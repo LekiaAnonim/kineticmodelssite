@@ -1,13 +1,16 @@
 services:
   db:
     image: postgres
+    platform: linux/amd64  # Force x86_64 for compatibility
     ports:
       - "5432:5432"
     env_file:
       - ./.env.dev
   debug:
-    build: .
-    platform: linux/amd64  # Force x86_64 for better RMG compatibility
+    build: 
+      context: .
+      dockerfile: Dockerfile.custom
+    platform: linux/amd64  # Force x86_64 for RMG compatibility
     tty: true
     env_file:
       - ./.env.dev

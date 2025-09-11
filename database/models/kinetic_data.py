@@ -1,11 +1,11 @@
-from typing import List, Optional
+from typing import List, Optional, Literal, ClassVar
 
 import rmgpy.kinetics as kinetics
 from titlecase import titlecase
 from django.core.exceptions import ValidationError as DJValidationError
 from django.db import models
 from django.contrib.postgres.fields import JSONField
-from pydantic.typing import Literal
+# from pydantic.typing import Literal
 from pydantic import BaseModel, ValidationError, validator
 from rmgpy.quantity import ScalarQuantity, ArrayQuantity, RATECOEFFICIENT_COMMON_UNITS, Energy
 
@@ -315,7 +315,7 @@ class Troe(BaseModel):
             efficiencies=rmg_efficiencies,
         )
 
-    kinetics_type = "Troe Kinetics"
+    kinetics_type:ClassVar[str] = "Troe Kinetics"
 
     def table_data(self):
         _, low_heads, low_bodies = self.low_arrhenius.table_data()[0]

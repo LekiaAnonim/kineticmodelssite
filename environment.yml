@@ -4,23 +4,22 @@ channels:
   - rmg
   - nodefaults
 dependencies:
-  - python>=3.7
+  - python=3.9
   - nomkl
   - cairo
   - cairocffi
   - xlrd
   - xlwt
   - habanero>=0.6,<0.7
-  - rmg==3.0
-  - django==3.0
+  - rmg=3.3.0  # Available for linux-64 (x86_64)
   - django-filter
   - django-extensions
   - django-model-utils
   - django-crispy-forms
-  - psycopg2
   - gunicorn
   - pip
   - pip:
+    - django==3.0
     - titlecase
     - black
     - flake8
@@ -31,3 +30,4 @@ dependencies:
     - drf-writable-nested
     - python-dotenv
     - pydantic
+    - psycopg2-binary
