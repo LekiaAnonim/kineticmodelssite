@@ -4,7 +4,7 @@ import rmgpy.kinetics as kinetics
 from titlecase import titlecase
 from django.core.exceptions import ValidationError as DJValidationError
 from django.db import models
-from django.contrib.postgres.fields import JSONField
+# from django.contrib.postgres.fields import JSONField
 # from pydantic.typing import Literal
 from pydantic import BaseModel, ValidationError, validator
 from rmgpy.quantity import ScalarQuantity, ArrayQuantity, RATECOEFFICIENT_COMMON_UNITS, Energy
@@ -47,12 +47,12 @@ class Arrhenius(BaseModel):
     type: Literal["arrhenius"]
     a: float
     a_si: float
-    a_delta: Optional[float]
+    a_delta: Optional[float] = None
     a_units: str
     n: float
     e: float
     e_si: float
-    e_delta: Optional[float]
+    e_delta: Optional[float] = None
     e_units: str
 
     @validator("a_units")
@@ -114,6 +114,7 @@ class ArrheniusEP(BaseModel):
     a_si: float
     a_units: float
     n: float
+    alpha: float # Add missing alpha field
     e0: float
     e0_si: float
     e0_units: str
@@ -270,7 +271,7 @@ class Lindemann(BaseModel):
     high_arrhenius: Arrhenius
 
     def to_rmg(self, min_temp, max_temp, min_pressure, max_pressure, efficiencies, *args):
-        rmg_efficiencies = {e.species.to_rmg(): e.efficiency for e in self.efficiency_set.all()}
+        rmg_efficiencies = {e.species.to_rmg(): e.efficiency for e in efficiencies}
 
         return kinetics.Lindemann(
             arrheniusHigh=self.high_arrhenius.to_rmg(),
@@ -298,10 +299,12 @@ class Troe(BaseModel):
     t2: float = 0.0
     t3: float
 
+    # Use ClassVar to indicate this is not a field
+    kinetics_type: ClassVar[str] = "Troe Kinetics"
     def to_rmg(self, min_temp, max_temp, min_pressure, max_pressure, efficiencies, *args):
         rmg_efficiencies = {e.species.to_rmg(): e.efficiency for e in efficiencies}
 
-        return kinetics.Lindemann(
+        return kinetics.Troe(
             arrheniusHigh=self.high_arrhenius.to_rmg(),
             arrheniusLow=self.low_arrhenius.to_rmg(),
             alpha=self.alpha,
@@ -376,7 +379,7 @@ class Kinetics(models.Model):
     reverse = models.BooleanField(
         default=False, help_text="Is this the rate for the reverse reaction?"
     )
-    raw_data = JSONField(validators=[validate_kinetics_data])
+    raw_data = models.JSONField(validators=[validate_kinetics_data])
     species = models.ManyToManyField("Species", through="Efficiency", blank=True)
     min_temp = models.FloatField("Lower Temp Bound", help_text="units: K", null=True, blank=True)
     max_temp = models.FloatField("Upper Temp Bound", help_text="units: K", null=True, blank=True)

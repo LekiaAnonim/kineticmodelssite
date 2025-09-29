@@ -14,6 +14,7 @@ import os
 
 from pathlib import Path
 from dotenv import load_dotenv
+import dj_database_url
 
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,6 +55,7 @@ INSTALLED_APPS = [
     "django_filters",
     "django_extensions",
     "crispy_forms",
+    "crispy_bootstrap4",
     "rest_framework",
     "rest_framework.authtoken",
 ]
@@ -100,8 +102,19 @@ DATABASES = {
         "PASSWORD": os.getenv("POSTGRES_PASSWORD"),
         "HOST": os.getenv("DB_HOST"),
         "PORT": 5432,
+        "OPTIONS": {
+            "options": "-c timezone=utc"
+        }
     }
 }
+
+# DATABASES = {
+#     "default": dj_database_url.config(
+#         default=os.getenv("DATABASE_URL"),
+#         conn_max_age=600,
+#         options={'options': '-c timezone=utc'}
+#     )
+# }
 
 
 # Password validation
@@ -153,3 +166,5 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {"anon": "100/day", "user": "1000/day"},
 }
+
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

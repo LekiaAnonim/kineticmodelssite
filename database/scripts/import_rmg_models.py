@@ -89,6 +89,8 @@ def import_rmg_models(apps, schema_editor):
     for name in model_names:
         setattr(models, name, apps.get_model("database", name))
     path = os.getenv("RMGMODELSPATH", "./rmg-models/")
+
+
     skip_list = ["PCI2011/193-Mehl"]
     model_paths = get_models(path, skip_list)
 
@@ -538,6 +540,27 @@ def get_doi(source_path):
         return matched_list[0]
 
 
+# def get_models(path, ignore_list=[]):
+#     """
+#     Walk the given `path` looking for libraries and source files.
+#     Skips any paths that end with something in the skip_list
+#     (eg. skip_list=['PCI2011/193-Mehl'])
+#     Returns tuples of the following form:
+#         model_name, thermo_library, kinetics_library, source_file
+#     """
+
+#     ignore_list.extend([".git", "translations", "modelComparer"])
+#     root, dirs, _ = next(os.walk(path))
+#     for dir in dirs:
+#         pdir = Path(dir)
+#         if pdir.name not in ignore_list:
+#             rmg_model_name = pdir.name
+#             thermo_path = root / pdir / "RMG-Py-thermo-library" / "ThermoLibrary.py"
+#             kinetics_path = root / pdir / "RMG-Py-kinetics-library" / "reactions.py"
+#             source_path = root / pdir / "source.txt"
+#             yield rmg_model_name, str(thermo_path), str(kinetics_path), str(source_path)
+
+
 def get_models(path, ignore_list=[]):
     """
     Walk the given `path` looking for libraries and source files.
@@ -546,14 +569,34 @@ def get_models(path, ignore_list=[]):
     Returns tuples of the following form:
         model_name, thermo_library, kinetics_library, source_file
     """
-
+    
+    ignore_list = ignore_list.copy()  # Don't modify the default parameter
     ignore_list.extend([".git", "translations", "modelComparer"])
-    root, dirs, _ = next(os.walk(path))
-    for dir in dirs:
-        pdir = Path(dir)
-        if pdir.name not in ignore_list:
-            rmg_model_name = pdir.name
-            thermo_path = root / pdir / "RMG-Py-thermo-library" / "ThermoLibrary.py"
-            kinetics_path = root / pdir / "RMG-Py-kinetics-library" / "reactions.py"
-            source_path = root / pdir / "source.txt"
-            yield rmg_model_name, str(thermo_path), str(kinetics_path), str(source_path)
+    
+    # Convert to Path object for better handling
+    base_path = Path(path)
+    
+    # Check if path exists
+    if not base_path.exists():
+        logger.error(f"Path does not exist: {path}")
+        return
+    
+    # Walk through directories
+    try:
+        for item in base_path.iterdir():
+            if not item.is_dir():
+                continue
+                
+            if item.name in ignore_list:
+                continue
+            
+            rmg_model_name = item.name
+            thermo_path = item / "RMG-Py-thermo-library" / "ThermoLibrary.py"
+            kinetics_path = item / "RMG-Py-kinetics-library" / "reactions.py"
+            source_path = item / "source.txt"
+            
+            # Only yield if at least one of the library files exists
+            if thermo_path.exists() or kinetics_path.exists():
+                yield rmg_model_name, str(thermo_path), str(kinetics_path), str(source_path)
+    except Exception as e:
+        logger.error(f"Error walking directory {path}: {e}")
