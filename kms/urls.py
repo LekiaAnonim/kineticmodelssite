@@ -23,6 +23,7 @@ from django.urls import path, include
 urlpatterns = [
     path("", include("database.urls")),
     path("api/", include("api.urls")),
+    path("api/import-voting/", include("import_voting.urls")),
     path("admin/", admin.site.urls),
     path("login/", LoginView.as_view(template_name="database/login.html"), name="login"),
 ]

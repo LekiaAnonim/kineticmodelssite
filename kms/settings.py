@@ -42,6 +42,7 @@ ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split(" ")
 # Application definition
 
 INSTALLED_APPS = [
+    "import_voting.apps.ImportVotingConfig",
     "database.apps.DatabaseConfig",
     "api.apps.ApiConfig",
     "dal",
