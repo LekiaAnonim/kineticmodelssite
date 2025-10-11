@@ -42,6 +42,7 @@ ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split(" ")
 # Application definition
 
 INSTALLED_APPS = [
+    "importer_dashboard.apps.ImporterDashboardConfig",
     "import_voting.apps.ImportVotingConfig",
     "database.apps.DatabaseConfig",
     "api.apps.ApiConfig",
@@ -76,7 +77,7 @@ ROOT_URLCONF = "kms.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [os.path.join(BASE_DIR, 'kms', 'templates')],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -167,5 +168,10 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {"anon": "100/day", "user": "1000/day"},
 }
+
+# Authentication URLs
+LOGIN_URL = '/login/'
+LOGIN_REDIRECT_URL = '/'
+LOGOUT_REDIRECT_URL = '/login/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

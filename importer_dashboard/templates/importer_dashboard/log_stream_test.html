@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+
+{% block title %}Log Stream Test{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Log Stream Diagnostic</h2>
+    
+    <div style="margin: 20px 0;">
+        <button onclick="testSSE()" class="btn btn-primary">Test SSE Connection</button>
+        <button onclick="testHTTP()" class="btn btn-secondary">Test HTTP Endpoint</button>
+        <button onclick="sendTestMessage()" class="btn btn-secondary">Send Test Message</button>
+        <button onclick="clearConsole()" class="btn btn-secondary">Clear Console</button>
+    </div>
+    
+    <div id="console" style="background: #1e1e1e; color: #d4d4d4; padding: 20px; font-family: monospace; min-height: 400px; overflow-y: auto; border-radius: 4px;">
+        <div>Ready to test...</div>
+    </div>
+</div>
+
+<script>
+let testEventSource = null;
+const consoleDiv = document.getElementById('console');
+
+function log(message, type = 'info') {
+    const colors = {
+        'info': '#d4d4d4',
+        'success': '#4ec9b0',
+        'error': '#f48771',
+        'warning': '#dcdcaa'
+    };
+    
+    const timestamp = new Date().toLocaleTimeString();
+    const div = document.createElement('div');
+    div.style.color = colors[type] || colors.info;
+    div.style.marginBottom = '5px';
+    div.textContent = `[${timestamp}] ${message}`;
+    consoleDiv.appendChild(div);
+    consoleDiv.scrollTop = consoleDiv.scrollHeight;
+}
+
+function clearConsole() {
+    consoleDiv.innerHTML = '<div>Console cleared.</div>';
+}
+
+function testSSE() {
+    log('Testing SSE connection...', 'info');
+    
+    if (testEventSource) {
+        testEventSource.close();
+    }
+    
+    const url = '{% url "importer_dashboard:log_stream" %}';
+    log(`Connecting to: ${url}`, 'info');
+    
+    testEventSource = new EventSource(url);
+    
+    testEventSource.onopen = function() {
+        log('✅ SSE connection opened successfully!', 'success');
+    };
+    
+    testEventSource.onmessage = function(event) {
+        log(`📨 Received message: ${event.data}`, 'success');
+        try {
+            const data = JSON.parse(event.data);
+            log(`📦 Parsed data: ${JSON.stringify(data, null, 2)}`, 'info');
+        } catch (e) {
+            log(`⚠️  Could not parse as JSON: ${e.message}`, 'warning');
+        }
+    };
+    
+    testEventSource.onerror = function(error) {
+        log(`❌ SSE error occurred!`, 'error');
+        log(`ReadyState: ${testEventSource.readyState}`, 'error');
+        log(`0=CONNECTING, 1=OPEN, 2=CLOSED`, 'info');
+        
+        if (testEventSource.readyState === EventSource.CLOSED) {
+            log('Connection closed by server', 'error');
+        }
+    };
+    
+    // Test for 30 seconds
+    setTimeout(function() {
+        if (testEventSource && testEventSource.readyState === EventSource.OPEN) {
+            log('✅ SSE connection still alive after 30 seconds', 'success');
+        } else {
+            log('❌ SSE connection died within 30 seconds', 'error');
+        }
+    }, 30000);
+}
+
+function testHTTP() {
+    log('Testing HTTP endpoint...', 'info');
+    
+    const url = '{% url "importer_dashboard:get_logs" %}?count=5';
+    log(`Fetching: ${url}`, 'info');
+    
+    fetch(url)
+        .then(response => {
+            log(`HTTP Status: ${response.status} ${response.statusText}`, response.ok ? 'success' : 'error');
+            return response.json();
+        })
+        .then(data => {
+            log(`✅ Received ${data.count} log messages`, 'success');
+            if (data.messages && data.messages.length > 0) {
+                data.messages.forEach((msg, i) => {
+                    log(`  [${i+1}] ${msg.level}: ${msg.message}`, 'info');
+                });
+            } else {
+                log('  No messages in log buffer', 'warning');
+            }
+        })
+        .catch(error => {
+            log(`❌ HTTP error: ${error.message}`, 'error');
+        });
+}
+
+function sendTestMessage() {
+    log('Sending test message to logger...', 'info');
+    
+    // This will trigger the logger via a refresh action
+    fetch('{% url "importer_dashboard:index" %}', {
+        method: 'GET'
+    })
+    .then(() => {
+        log('✅ Page loaded (should trigger logger activity)', 'success');
+        log('Now try clicking "Refresh Jobs" button on main page', 'info');
+    })
+    .catch(error => {
+        log(`❌ Error: ${error.message}`, 'error');
+    });
+}
+
+// Auto-start SSE test on page load
+window.addEventListener('load', function() {
+    log('Page loaded. Click "Test SSE Connection" to begin.', 'info');
+    log(`Current user is authenticated: {% if user.is_authenticated %}Yes{% else %}No{% endif %}`, 'info');
+});
+</script>
+{% endblock %}

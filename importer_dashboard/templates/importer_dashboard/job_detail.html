@@ -1,0 +1,361 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}{{ job.name }} - Job Detail{% endblock %}
+
+{% block content %}
+<script>
+    // Add dashboard-page class to body for CSS styling
+    document.body.classList.add('dashboard-page');
+</script>
+
+<div class="dashboard-container">
+<div class="job-header">
+    <div>
+        <div class="job-title">{{ job.name }}</div>
+        <span class="status-badge status-{{ job.status|lower }}">
+            {{ job.get_status_display }}
+        </span>
+    </div>
+    <div class="job-actions">
+        <a href="{% url 'importer_dashboard:index' %}" class="btn btn-secondary">
+            ← Back to Dashboard
+        </a>
+        
+        {% if job.status == 'running' or job.status == 'pending' %}
+            <form method="post" action="{% url 'importer_dashboard:job_kill' job.id %}" style="display: inline;">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-danger" 
+                        onclick="return confirm('Are you sure you want to kill this job?')">
+                    Kill Job
+                </button>
+            </form>
+        {% else %}
+            <form method="post" action="{% url 'importer_dashboard:job_start' job.id %}" style="display: inline;">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-success">
+                    Start Job
+                </button>
+            </form>
+        {% endif %}
+        
+        {% if job.status == 'running' and job.host %}
+            <a href="{% url 'importer_dashboard:interactive_session' job.id %}" class="btn btn-primary">
+                <svg class="btn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                    <line x1="8" y1="21" x2="16" y2="21"></line>
+                    <line x1="12" y1="17" x2="12" y2="21"></line>
+                </svg>
+                Interactive Session
+            </a>
+        {% endif %}
+    </div>
+</div>
+
+{% if progress_status %}
+<div class="alert alert-{{ progress_status.type }}" style="margin: 20px 0;">
+    <div style="display: flex; align-items: center; justify-content: space-between;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+            <span>{{ progress_status.message }}</span>
+        </div>
+        {% if job.status == 'running' %}
+        <button class="btn btn-secondary btn-small" onclick="location.reload()">
+            <svg class="btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+            Refresh Progress
+        </button>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="value">{{ job.total_species|default:"0" }}</div>
+        <div class="label">Total Species</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ job.processed_species|default:"0" }}</div>
+        <div class="label">Processed</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ job.identified_species|default:"0" }}</div>
+        <div class="label">Identified</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ job.confirmed_species|default:"0" }}</div>
+        <div class="label">Confirmed</div>
+    </div>
+    <div class="stat-card">
+        <div class="value" id="unidentified-count">0</div>
+        <div class="label">Unidentified</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ job.total_reactions|default:"0" }}</div>
+        <div class="label">Total Reactions</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Job Details</h2>
+    <div class="detail-grid">
+        <div class="detail-item">
+            <div class="detail-label">Job Name</div>
+            <div class="detail-value">{{ job.name }}</div>
+        </div>
+        <div class="detail-item">
+            <div class="detail-label">Port</div>
+            <div class="detail-value">{{ job.port|default:"Not assigned" }}</div>
+        </div>
+        <div class="detail-item">
+            <div class="detail-label">SLURM Job ID</div>
+            <div class="detail-value">{{ job.slurm_job_id|default:"Not running" }}</div>
+        </div>
+        <div class="detail-item">
+            <div class="detail-label">Compute Node</div>
+            <div class="detail-value">{{ job.host|default:"Not assigned" }}</div>
+        </div>
+        <div class="detail-item">
+            <div class="detail-label">Created</div>
+            <div class="detail-value">{{ job.created_at|date:"Y-m-d H:i" }}</div>
+        </div>
+        <div class="detail-item">
+            <div class="detail-label">Last Updated</div>
+            <div class="detail-value">{{ job.updated_at|date:"Y-m-d H:i" }}</div>
+        </div>
+    </div>
+    
+    {% if job.total_species and job.total_species > 0 %}
+    <h3>Overall Progress</h3>
+    <div class="progress-bar" id="progress-{{ job.id }}" style="height: 30px;">
+        <div class="progress-fill" style="width: {{ job.progress_percentage }}%; font-size: 14px;">
+            {{ job.progress_percentage|floatformat:1 }}% ({{ job.processed_species }}/{{ job.total_species }})
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+{% if identifications %}
+<div class="card">
+    <h2>Species Identifications ({{ identifications|length }})</h2>
+    <div class="species-table">
+        <table>
+            <thead>
+                <tr>
+                    <th>Chemkin Label</th>
+                    <th>SMILES</th>
+                    <th>Identified At</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for species in identifications %}
+                <tr>
+                    <td><code>{{ species.chemkin_label }}</code></td>
+                    <td><code>{{ species.smiles }}</code></td>
+                    <td>{{ species.identified_at|date:"Y-m-d H:i:s" }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="log-tabs">
+        <button class="log-tab active" onclick="showLogTab('console-output')">Console Output</button>
+        <button class="log-tab" onclick="showLogTab('rmg-log')">RMG Log</button>
+        <button class="log-tab" onclick="showLogTab('error-log')">Error Log</button>
+        <button class="log-tab" onclick="showLogTab('recent-logs')">Recent Activity</button>
+    </div>
+    
+    <div id="console-output" class="log-content active">
+        <h3>Console Output (Last 200 Lines)</h3>
+        <p style="font-size: 13px; color: #666; margin-bottom: 10px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle;">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+            Shows SLURM job output including initialization, conda environment, and early Python messages.
+        </p>
+        <button class="btn btn-secondary btn-small" onclick="refreshLog('console')">
+            <svg class="btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+            Refresh
+        </button>
+        <div class="log-viewer" id="console-output-content">
+            Loading...
+        </div>
+    </div>
+    
+    <div id="rmg-log" class="log-content">
+        <h3>RMG Log (Last 50 Lines)</h3>
+        <p style="font-size: 13px; color: #666; margin-bottom: 10px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle;">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+            Shows RMG-specific operations from RMG-Py-output/RMG.log (created after RMG initialization).
+        </p>
+        <button class="btn btn-secondary btn-small" onclick="refreshLog('rmg')">
+            <svg class="btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+            Refresh
+        </button>
+        <div class="log-viewer" id="rmg-log-content">
+            Loading...
+        </div>
+    </div>
+    
+    <div id="error-log" class="log-content">
+        <h3>Error Log</h3>
+        <p style="font-size: 13px; color: #666; margin-bottom: 10px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle;">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+            Shows SLURM stderr output including Python tracebacks and error messages.
+        </p>
+        <button class="btn btn-secondary btn-small" onclick="refreshLog('error')">
+            <svg class="btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+            Refresh
+        </button>
+        <div class="log-viewer" id="error-log-content">
+            Loading...
+        </div>
+    </div>
+    
+    <div id="recent-logs" class="log-content">
+        <h3>Recent Activity</h3>
+        {% if recent_logs %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Level</th>
+                    <th>Message</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in recent_logs %}
+                <tr>
+                    <td>{{ log.timestamp|date:"Y-m-d H:i:s" }}</td>
+                    <td><span class="status-badge status-{{ log.level|lower }}">{{ log.level }}</span></td>
+                    <td>{{ log.message }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p>No activity logs recorded yet.</p>
+        {% endif %}
+    </div>
+</div>
+
+</div> <!-- Close dashboard-container -->
+
+<script>
+    function showLogTab(tabName) {
+        // Hide all tabs
+        document.querySelectorAll('.log-content').forEach(tab => {
+            tab.classList.remove('active');
+        });
+        document.querySelectorAll('.log-tab').forEach(btn => {
+            btn.classList.remove('active');
+        });
+        
+        // Show selected tab
+        document.getElementById(tabName).classList.add('active');
+        event.target.classList.add('active');
+    }
+    
+    function refreshLog(logType) {
+        const jobId = {{ job.id }};
+        let url, targetId;
+        
+        switch(logType) {
+            case 'console':
+                url = `/importer/job/${jobId}/console/`;
+                targetId = 'console-output-content';
+                break;
+            case 'rmg':
+                url = `/importer/job/${jobId}/log/`;
+                targetId = 'rmg-log-content';
+                break;
+            case 'error':
+                url = `/importer/job/${jobId}/error-log/`;
+                targetId = 'error-log-content';
+                break;
+            default:
+                return;
+        }
+        
+        fetch(url)
+            .then(response => response.text())
+            .then(html => {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                const logContent = doc.querySelector('.log-viewer');
+                if (logContent) {
+                    document.getElementById(targetId).innerHTML = logContent.innerHTML;
+                }
+            })
+            .catch(error => {
+                console.error('Error refreshing log:', error);
+                document.getElementById(targetId).innerHTML = 
+                    `<span style="color: #dc3545;">Error loading log: ${error.message}</span>`;
+            });
+    }
+    
+    // Load logs on page load
+    window.addEventListener('DOMContentLoaded', () => {
+        refreshLog('console');
+        refreshLog('rmg');
+        refreshLog('error');
+        
+        // Calculate unidentified species
+        const total = {{ job.total_species|default:0 }};
+        const identified = {{ job.identified_species|default:0 }};
+        const unidentified = Math.max(0, total - identified);
+        document.getElementById('unidentified-count').textContent = unidentified;
+    });
+    
+    // Auto-refresh every 15 seconds if job is running
+    {% if job.status == 'running' %}
+    setInterval(() => {
+        refreshLog('console');
+        refreshLog('rmg');
+    }, 15000);
+    
+    // If tunnel is active but no progress data, refresh page every 30 seconds to check for updates
+    {% if job.tunnel_active and job.total_species == 0 %}
+    console.log("RMG web server not ready yet. Auto-refreshing every 30 seconds...");
+    setInterval(() => {
+        location.reload();
+    }, 30000); // Refresh page every 30 seconds
+    {% endif %}
+    {% endif %}
+</script>
+
+{% endblock %}
