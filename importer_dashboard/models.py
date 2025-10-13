@@ -236,3 +236,271 @@ class JobLog(models.Model):
     
     def __str__(self):
         return f"[{self.log_type}] {self.message[:50]}"
+
+
+class Species(models.Model):
+    """
+    Represents a chemical species in an import job
+    """
+    job = models.ForeignKey(ClusterJob, on_delete=models.CASCADE, related_name='species')
+    
+    # Species identification
+    chemkin_label = models.CharField(max_length=200, help_text="Label from Chemkin file")
+    formula = models.CharField(max_length=100, help_text="Chemical formula (e.g., CH4)")
+    
+    # Identification status
+    IDENTIFICATION_STATUS = [
+        ('unidentified', 'Unidentified'),
+        ('tentative', 'Tentative Match'),
+        ('confirmed', 'Confirmed'),
+        ('processed', 'Processed'),
+    ]
+    identification_status = models.CharField(max_length=20, choices=IDENTIFICATION_STATUS, 
+                                            default='unidentified')
+    
+    # Matched RMG species info
+    rmg_label = models.CharField(max_length=200, blank=True, help_text="RMG species label")
+    rmg_index = models.IntegerField(null=True, blank=True, help_text="RMG species index")
+    smiles = models.CharField(max_length=500, blank=True, help_text="SMILES representation")
+    
+    # Thermodynamics
+    enthalpy_discrepancy = models.FloatField(null=True, blank=True, 
+                                            help_text="H(298K) difference in kJ/mol")
+    
+    # User tracking
+    identified_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                     related_name='identified_species')
+    identification_method = models.CharField(max_length=100, blank=True,
+                                            help_text="auto, manual, vote, thermo")
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        unique_together = [['job', 'chemkin_label']]
+        ordering = ['chemkin_label']
+        verbose_name = "Species"
+        verbose_name_plural = "Species"
+    
+    def __str__(self):
+        return f"{self.chemkin_label} ({self.formula})"
+    
+    @property
+    def is_identified(self):
+        return self.identification_status in ['confirmed', 'processed']
+    
+    @property
+    def vote_count(self):
+        """Count total votes for all candidates"""
+        return Vote.objects.filter(species=self).count()
+
+
+class CandidateSpecies(models.Model):
+    """
+    Represents a candidate RMG species that might match a Chemkin species
+    """
+    species = models.ForeignKey(Species, on_delete=models.CASCADE, 
+                               related_name='candidates')
+    
+    # RMG species information
+    rmg_label = models.CharField(max_length=200, help_text="RMG species label")
+    rmg_index = models.IntegerField(help_text="RMG species index")
+    smiles = models.CharField(max_length=500, help_text="SMILES representation")
+    
+    # Thermodynamics comparison
+    enthalpy_discrepancy = models.FloatField(help_text="H(298K) difference in kJ/mol")
+    
+    # Confidence metrics
+    vote_count = models.IntegerField(default=0, help_text="Number of voting reactions")
+    unique_vote_count = models.IntegerField(default=0, 
+                                           help_text="Votes after pruning common reactions")
+    thermo_library_matches = models.IntegerField(default=0, 
+                                                 help_text="Matches in thermo libraries")
+    
+    # Status
+    is_blocked = models.BooleanField(default=False, help_text="User blocked this match")
+    blocked_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name='blocked_candidates')
+    block_reason = models.TextField(blank=True)
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = [['species', 'rmg_index']]
+        ordering = ['-unique_vote_count', '-vote_count', 'enthalpy_discrepancy']
+        verbose_name = "Candidate Species"
+        verbose_name_plural = "Candidate Species"
+    
+    def __str__(self):
+        return f"{self.rmg_label} (Δ{self.enthalpy_discrepancy:.1f} kJ/mol, {self.vote_count} votes)"
+    
+    @property
+    def confidence_score(self):
+        """Calculate confidence score based on multiple factors"""
+        score = 0.0
+        
+        # Vote count contribution (max 50 points)
+        score += min(self.unique_vote_count * 5, 50)
+        
+        # Enthalpy contribution (max 30 points)
+        if abs(self.enthalpy_discrepancy) < 10:
+            score += 30
+        elif abs(self.enthalpy_discrepancy) < 50:
+            score += 20
+        elif abs(self.enthalpy_discrepancy) < 100:
+            score += 10
+        
+        # Thermo library match contribution (max 20 points)
+        score += min(self.thermo_library_matches * 10, 20)
+        
+        return min(score, 100)
+
+
+class Vote(models.Model):
+    """
+    Represents a reaction-based vote for a species match
+    
+    When an RMG reaction matches a Chemkin reaction, unidentified species
+    in that reaction get "votes" toward being matched with their RMG counterparts.
+    """
+    species = models.ForeignKey(Species, on_delete=models.CASCADE, 
+                               related_name='votes')
+    candidate = models.ForeignKey(CandidateSpecies, on_delete=models.CASCADE,
+                                 related_name='votes')
+    
+    # Reaction information
+    chemkin_reaction = models.TextField(help_text="String representation of Chemkin reaction")
+    rmg_reaction = models.TextField(help_text="String representation of RMG reaction")
+    rmg_reaction_family = models.CharField(max_length=100, help_text="RMG reaction family")
+    
+    # Vote quality
+    is_unique = models.BooleanField(default=True, 
+                                   help_text="Not a common vote shared by multiple candidates")
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = [['species', 'candidate', 'chemkin_reaction']]
+        ordering = ['-created_at']
+        verbose_name = "Vote"
+        verbose_name_plural = "Votes"
+    
+    def __str__(self):
+        return f"{self.species.chemkin_label} → {self.candidate.rmg_label} via {self.rmg_reaction_family}"
+
+
+class ThermoMatch(models.Model):
+    """
+    Represents a match based on identical thermodynamics from a library
+    """
+    species = models.ForeignKey(Species, on_delete=models.CASCADE,
+                               related_name='thermo_matches')
+    candidate = models.ForeignKey(CandidateSpecies, on_delete=models.CASCADE,
+                                 related_name='thermo_matches')
+    
+    # Library information
+    library_name = models.CharField(max_length=200, help_text="Thermo library name")
+    library_species_name = models.CharField(max_length=200, 
+                                           help_text="Species name in library")
+    
+    # Match quality
+    name_matches = models.BooleanField(default=False,
+                                      help_text="Library name matches Chemkin label")
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = [['species', 'candidate', 'library_name']]
+        ordering = ['-name_matches', 'library_name']
+        verbose_name = "Thermo Match"
+        verbose_name_plural = "Thermo Matches"
+    
+    def __str__(self):
+        return f"{self.library_species_name} in {self.library_name}"
+
+
+class BlockedMatch(models.Model):
+    """
+    Records matches that have been explicitly blocked by users
+    """
+    job = models.ForeignKey(ClusterJob, on_delete=models.CASCADE,
+                           related_name='blocked_matches')
+    chemkin_label = models.CharField(max_length=200)
+    smiles = models.CharField(max_length=500)
+    rmg_label = models.CharField(max_length=200, blank=True)
+    
+    # Blocking information
+    blocked_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    reason = models.TextField(blank=True)
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = [['job', 'chemkin_label', 'smiles']]
+        ordering = ['-created_at']
+        verbose_name = "Blocked Match"
+        verbose_name_plural = "Blocked Matches"
+
+
+class VoteCandidate(models.Model):
+    """
+    Vote-based candidate species (from votes database)
+    Simplified model focused on data from votes_{job_id}.db
+    """
+    species = models.ForeignKey(Species, on_delete=models.CASCADE,
+                               related_name='vote_candidates')
+    
+    # RMG species information
+    rmg_index = models.IntegerField(help_text="RMG species index")
+    smiles = models.CharField(max_length=500, help_text="SMILES representation")
+    adjlist = models.TextField(blank=True, help_text="Adjacency list representation")
+    
+    # Vote count
+    vote_count = models.IntegerField(default=0, help_text="Number of voting reactions")
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = [['species', 'rmg_index']]
+        ordering = ['-vote_count']
+        verbose_name = "Vote Candidate"
+        verbose_name_plural = "Vote Candidates"
+    
+    def __str__(self):
+        return f"{self.smiles} ({self.vote_count} votes)"
+
+
+class VotingReaction(models.Model):
+    """
+    Individual reaction that provides evidence for a candidate match
+    """
+    candidate = models.ForeignKey(VoteCandidate, on_delete=models.CASCADE,
+                                 related_name='voting_reactions')
+    
+    # Reaction information
+    chemkin_reaction = models.TextField(help_text="Chemkin reaction string")
+    rmg_reaction = models.TextField(help_text="RMG reaction string")
+    family = models.CharField(max_length=100, blank=True, help_text="RMG reaction family")
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = "Voting Reaction"
+        verbose_name_plural = "Voting Reactions"
+    
+    def __str__(self):
+        return f"{self.chemkin_reaction} -> {self.rmg_reaction}"
+    
+    def __str__(self):
+        return f"{self.chemkin_label} ≠ {self.smiles}"
