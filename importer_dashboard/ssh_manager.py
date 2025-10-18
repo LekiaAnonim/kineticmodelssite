@@ -267,7 +267,7 @@ class SSHJobManager:
         
         # Build the job submission command
         command = (
-            f'cd {self.config.root_path}{job.name} && '
+            f'cd {self.config.root_path}/{job.name} && '
             f'source /projects/westgroup/lekia.p/miniforge3/bin/activate && '
             f'conda activate {self.config.conda_env_name} && '
             f'sbatch {self.config.slurm_string} '
@@ -300,7 +300,7 @@ class SSHJobManager:
     
     def get_log_tail(self, job: ClusterJob, lines: int = 50):
         """Get the tail of the RMG log file"""
-        log_path = f'{self.config.root_path}{job.name}/RMG-Py-output/RMG.log'
+        log_path = f'{self.config.root_path}/{job.name}/RMG-Py-output/RMG.log'
         command = f'tail -n{lines} {log_path}'
         
         stdout, stderr = self.exec_command(command)
@@ -310,9 +310,9 @@ class SSHJobManager:
         
         return stdout
     
-    def get_console_output(self, job: ClusterJob, lines: int = 200):
-        """Get the SLURM console output (stdout) - shows job initialization and early errors"""
-        output_path = f'{self.config.root_path}{job.name}/output.log'
+    def get_output_tail(self, job: ClusterJob, lines: int = 50):
+        """Get the tail of the output.log file"""
+        output_path = f'{self.config.root_path}/{job.name}/output.log'
         command = f'tail -n{lines} {output_path}'
         
         stdout, stderr = self.exec_command(command)
@@ -324,7 +324,7 @@ class SSHJobManager:
     
     def get_error_log(self, job: ClusterJob):
         """Get the error log for a job (SLURM stderr)"""
-        error_path = f'{self.config.root_path}{job.name}/error.log'
+        error_path = f'{self.config.root_path}/{job.name}/error.log'
         command = f'cat {error_path} ; stat -c %y {error_path}'
         
         stdout, stderr = self.exec_command(command)
@@ -395,7 +395,7 @@ class SSHJobManager:
         """
         try:
             # Check for identified_chemkin.txt which lists all identified species
-            chemkin_path = f'{self.config.root_path}{job.name}/RMG-Py-output/identified_chemkin.txt'
+            chemkin_path = f'{self.config.root_path}/{job.name}/RMG-Py-output/identified_chemkin.txt'
             command = f'wc -l {chemkin_path} && grep -c "^!" {chemkin_path}'
             stdout, stderr = self.exec_command(command)
             
@@ -409,7 +409,7 @@ class SSHJobManager:
                 species_count = total_lines - comment_lines  # Approximate
                 
                 # Try to get reaction count
-                reaction_command = f'grep -c "^[A-Z]" {self.config.root_path}{job.name}/RMG-Py-output/identified_chemkin.txt || echo 0'
+                reaction_command = f'grep -c "^[A-Z]" {self.config.root_path}/{job.name}/RMG-Py-output/identified_chemkin.txt || echo 0'
                 reaction_stdout, _ = self.exec_command(reaction_command)
                 reaction_count = int(reaction_stdout.strip().split('\n')[0])
                 
