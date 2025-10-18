@@ -510,13 +510,25 @@ def sync_species_from_cluster(job: ClusterJob, ssh_manager=None) -> Dict:
                         if not smiles:
                             continue
                         
+                        # Determine label source (if label matches chemkin label, it's from chemkin)
+                        rmg_label = candidate_info.get('label', smiles)
+                        label_source = 'chemkin' if rmg_label.upper() == ck_label.upper() else 'rmg'
+                        
+                        # Get enthalpy discrepancy - could be in different keys
+                        enthalpy_disc = candidate_info.get('enthalpy_discrepancy')
+                        if enthalpy_disc is None:
+                            enthalpy_disc = candidate_info.get('delta_H')
+                        if enthalpy_disc is None:
+                            enthalpy_disc = candidate_info.get('H_discrepancy')
+                        
                         # Create or update CandidateSpecies
                         candidate, created = CandidateSpecies.objects.get_or_create(
                             species=species,
                             smiles=smiles,
                             defaults={
-                                'rmg_label': candidate_info.get('label', smiles),
-                                'enthalpy_discrepancy': candidate_info.get('enthalpy_discrepancy', 0.0),
+                                'rmg_label': rmg_label,
+                                'label_source': label_source,
+                                'enthalpy_discrepancy': enthalpy_disc,
                                 'vote_count': candidate_info.get('vote_count', 0),
                                 'unique_vote_count': candidate_info.get('unique_vote_count', 0)
                             }
@@ -525,10 +537,30 @@ def sync_species_from_cluster(job: ClusterJob, ssh_manager=None) -> Dict:
                         if created:
                             result['candidates_synced'] += 1
                         else:
-                            # Update vote counts
+                            # Update vote counts and enthalpy
                             candidate.vote_count = candidate_info.get('vote_count', 0)
                             candidate.unique_vote_count = candidate_info.get('unique_vote_count', 0)
+                            candidate.label_source = label_source
+                            if enthalpy_disc is not None:
+                                candidate.enthalpy_discrepancy = enthalpy_disc
                             candidate.save()
+                        
+                        # Process thermo matches
+                        for thermo_info in candidate_info.get('thermo_matches', []):
+                            library_name = thermo_info.get('library', '')
+                            library_species_name = thermo_info.get('species_name', '')
+                            name_matches = thermo_info.get('name_matches', False)
+                            
+                            if library_name and library_species_name:
+                                ThermoMatch.objects.get_or_create(
+                                    species=species,
+                                    candidate=candidate,
+                                    library_name=library_name,
+                                    defaults={
+                                        'library_species_name': library_species_name,
+                                        'name_matches': name_matches
+                                    }
+                                )
                         
                         # Process votes
                         # Clear old votes for this candidate to avoid duplicates
@@ -573,16 +605,24 @@ def sync_species_from_cluster(job: ClusterJob, ssh_manager=None) -> Dict:
                     
                     # Create confirmed candidate
                     if smiles:
-                        CandidateSpecies.objects.get_or_create(
-                            species=species,
-                            smiles=smiles,
-                            defaults={
-                                'rmg_label': identified_info.get('rmg_label', smiles),
-                                'is_confirmed': True,
-                                'vote_count': 0,
-                                'unique_vote_count': 0
-                            }
-                        )
+                        rmg_index = identified_info.get('rmg_index')
+                        
+                        # Build the lookup and defaults
+                        lookup = {'species': species, 'smiles': smiles}
+                        defaults = {
+                            'rmg_label': identified_info.get('rmg_label', smiles),
+                            'is_confirmed': True,
+                            'vote_count': 0,
+                            'unique_vote_count': 0,
+                            'enthalpy_discrepancy': identified_info.get('enthalpy_discrepancy', 0.0)
+                        }
+                        
+                        # Add rmg_index if available
+                        if rmg_index is not None:
+                            lookup['rmg_index'] = rmg_index
+                            defaults['rmg_index'] = rmg_index
+                        
+                        CandidateSpecies.objects.get_or_create(**lookup, defaults=defaults)
                         result['candidates_synced'] += 1
                 
                 # Process blocked matches

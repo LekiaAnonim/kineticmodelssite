@@ -1,0 +1,661 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Species Queue - {{ job.name }}{% endblock %}
+
+{% block extra_css %}
+<style>
+    .species-card {
+        border: 1px solid #dee2e6;
+        border-radius: 0.25rem;
+        margin-bottom: 1rem;
+        transition: box-shadow 0.2s;
+    }
+    
+    .species-card:hover {
+        box-shadow: 0 0.125rem 0.25rem rgba(0,0,0,0.075);
+    }
+    
+    .species-header {
+        background-color: #f8f9fa;
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid #dee2e6;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    
+    .species-body {
+        padding: 1rem;
+    }
+    
+    .candidate-row {
+        display: flex;
+        align-items: center;
+        padding: 0.5rem;
+        border: 1px solid #dee2e6;
+        border-radius: 0.25rem;
+        margin-bottom: 0.5rem;
+        background-color: #fff;
+    }
+    
+    .candidate-image {
+        width: 120px;
+        height: 120px;
+        object-fit: contain;
+        border: 1px solid #dee2e6;
+        border-radius: 0.25rem;
+        margin-right: 1rem;
+        background-color: #fff;
+    }
+    
+    .candidate-info {
+        flex: 1;
+    }
+    
+    .candidate-actions {
+        margin-left: 1rem;
+    }
+    
+    .confidence-badge {
+        font-size: 0.9rem;
+        padding: 0.25rem 0.5rem;
+    }
+    
+    .confidence-high {
+        background-color: #28a745;
+        color: white;
+    }
+    
+    .confidence-medium {
+        background-color: #ffc107;
+        color: black;
+    }
+    
+    .confidence-low {
+        background-color: #dc3545;
+        color: white;
+    }
+    
+    .vote-badge {
+        background-color: #007bff;
+        color: white;
+        font-size: 0.85rem;
+        padding: 0.25rem 0.5rem;
+        border-radius: 0.25rem;
+    }
+    
+    .stats-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border-radius: 0.5rem;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+    }
+    
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 1rem;
+        margin-top: 1rem;
+    }
+    
+    .stat-item {
+        text-align: center;
+    }
+    
+    .stat-value {
+        font-size: 2rem;
+        font-weight: bold;
+        line-height: 1;
+    }
+    
+    .stat-label {
+        font-size: 0.9rem;
+        opacity: 0.9;
+        margin-top: 0.25rem;
+    }
+    
+    .filter-bar {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 0.25rem;
+        margin-bottom: 1.5rem;
+    }
+    
+    .no-species {
+        text-align: center;
+        padding: 3rem;
+        color: #6c757d;
+    }
+    
+    .species-identified {
+        color: #28a745;
+        font-weight: 500;
+    }
+    
+    .species-unidentified {
+        color: #dc3545;
+        font-weight: 500;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<main role="main">
+    <div class="container-fluid">
+        <!-- Header -->
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h2>Species Identification Queue</h2>
+                <p class="text-muted mb-0">
+                    <a href="{% url 'importer_dashboard:job_detail' job.id %}">{{ job.name }}</a>
+                </p>
+            </div>
+            <div>
+                {% if job.status == 'running' and job.host %}
+                <a href="?sync=true" class="btn btn-outline-secondary" title="Sync latest data from cluster">
+                    <i class="fas fa-sync-alt"></i> Refresh from Cluster
+                </a>
+                {% endif %}
+                <a href="{% url 'importer_dashboard:species_statistics' job.id %}" class="btn btn-outline-info">
+                    <i class="fas fa-chart-bar"></i> Statistics
+                </a>
+                <a href="{% url 'importer_dashboard:export_identifications' job.id %}" class="btn btn-outline-success">
+                    <i class="fas fa-download"></i> Export SMILES
+                </a>
+                <button type="button" class="btn btn-primary" id="autoConfirmBtn">
+                    <i class="fas fa-magic"></i> Auto-Confirm High Confidence
+                </button>
+            </div>
+        </div>
+
+        <!-- Sync Message -->
+        {% if sync_message %}
+        <div class="alert alert-{{ sync_message.type }} alert-dismissible fade show" role="alert">
+            {{ sync_message.text }}
+            <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                <span aria-hidden="true">&times;</span>
+            </button>
+        </div>
+        {% endif %}
+
+        <!-- Statistics Card -->
+        <div class="stats-card">
+            <h4 class="mb-3">Progress Overview</h4>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-value">{{ stats.total }}</div>
+                    <div class="stat-label">Total Species</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">{{ stats.confirmed }}</div>
+                    <div class="stat-label">Confirmed</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">{{ stats.tentative }}</div>
+                    <div class="stat-label">Tentative</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">{{ stats.unidentified }}</div>
+                    <div class="stat-label">Unidentified</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">
+                        {% if stats.total > 0 %}
+                            {% widthratio stats.confirmed stats.total 100 %}%
+                        {% else %}
+                            0%
+                        {% endif %}
+                    </div>
+                    <div class="stat-label">Complete</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Filter Bar -->
+        <div class="filter-bar">
+            <form method="get" class="form-inline">
+                <label class="mr-2">Filter:</label>
+                <select name="status" class="form-control form-control-sm mr-2" onchange="this.form.submit()">
+                    <option value="unidentified" {% if status_filter == 'unidentified' %}selected{% endif %}>Unidentified</option>
+                    <option value="tentative" {% if status_filter == 'tentative' %}selected{% endif %}>Tentative</option>
+                    <option value="confirmed" {% if status_filter == 'confirmed' %}selected{% endif %}>Confirmed</option>
+                    <option value="all" {% if status_filter == 'all' %}selected{% endif %}>All</option>
+                </select>
+                
+                <label class="mr-2 ml-3">Sort by:</label>
+                <select name="sort" class="form-control form-control-sm mr-2" onchange="this.form.submit()">
+                    <option value="controversy" {% if sort_by == 'controversy' %}selected{% endif %}>Most Controversial</option>
+                    <option value="confidence" {% if sort_by == 'confidence' %}selected{% endif %}>Highest Confidence</option>
+                    <option value="name" {% if sort_by == 'name' %}selected{% endif %}>Name</option>
+                    <option value="formula" {% if sort_by == 'formula' %}selected{% endif %}>Formula</option>
+                </select>
+            </form>
+        </div>
+
+        <!-- Species List -->
+        {% if species_list %}
+            {% for item in species_list %}
+            <div class="species-card">
+                <div class="species-header">
+                    <div>
+                        <h5 class="mb-0">
+                            <strong>{{ item.species.chemkin_label }}</strong>
+                            <span class="text-muted ml-2">({{ item.species.formula }})</span>
+                            
+                            {% if item.species.identification_status == 'confirmed' %}
+                                <span class="badge badge-success ml-2">Confirmed</span>
+                            {% elif item.species.identification_status == 'tentative' %}
+                                <span class="badge badge-warning ml-2">Tentative</span>
+                            {% elif item.species.identification_status == 'processed' %}
+                                <span class="badge badge-info ml-2">Processed</span>
+                            {% else %}
+                                <span class="badge badge-secondary ml-2">Unidentified</span>
+                            {% endif %}
+                        </h5>
+                        <small class="text-muted">
+                            <strong>Species totals:</strong> {{ item.total_votes }} total votes • 
+                            {{ item.unique_votes }} unique votes • 
+                            {{ item.candidate_count }} candidate{% if item.candidate_count != 1 %}s{% endif %}
+                        </small>
+                    </div>
+                    <div>
+                        <a href="{% url 'importer_dashboard:species_detail' job.id item.species.id %}" 
+                           class="btn btn-sm btn-outline-primary">
+                            View Details
+                        </a>
+                    </div>
+                </div>
+                
+                <div class="species-body">
+                    {% if item.top_candidate %}
+                    <div class="candidate-row">
+                        <img src="https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/{{ item.top_candidate.smiles|urlencode }}/PNG?image_size=120x120" 
+                             alt="{{ item.top_candidate.smiles }}"
+                             class="candidate-image"
+                             onerror="this.src='{% static 'importer_dashboard/img/molecule_placeholder.png' %}';">
+                        
+                        <div class="candidate-info">
+                            <div class="mb-2">
+                                <strong>{{ item.top_candidate.rmg_label }}</strong>
+                                {% if item.top_candidate.label_source == 'chemkin' %}
+                                    <span class="badge badge-info ml-1" title="Label from Chemkin file">
+                                        <i class="fas fa-file-alt"></i> Chemkin
+                                    </span>
+                                {% else %}
+                                    <span class="badge badge-secondary ml-1" title="Label generated by RMG">
+                                        <i class="fas fa-robot"></i> RMG
+                                    </span>
+                                {% endif %}
+                                {% if item.top_candidate.confidence_score >= 70 %}
+                                    <span class="badge confidence-badge confidence-high ml-2">
+                                        {{ item.top_candidate.confidence_score|floatformat:0 }}% confidence
+                                    </span>
+                                {% elif item.top_candidate.confidence_score >= 40 %}
+                                    <span class="badge confidence-badge confidence-medium ml-2">
+                                        {{ item.top_candidate.confidence_score|floatformat:0 }}% confidence
+                                    </span>
+                                {% else %}
+                                    <span class="badge confidence-badge confidence-low ml-2">
+                                        {{ item.top_candidate.confidence_score|floatformat:0 }}% confidence
+                                    </span>
+                                {% endif %}
+                            </div>
+                            <div class="mb-1">
+                                <small><strong>SMILES:</strong> <code>{{ item.top_candidate.smiles }}</code></small>
+                            </div>
+                            <div class="mb-1">
+                                <small>
+                                    <strong>ΔH(298K) Discrepancy:</strong> 
+                                    {% if item.top_candidate.enthalpy_discrepancy %}
+                                        <span class="{% if item.top_candidate.enthalpy_discrepancy_abs < 50 %}text-success{% elif item.top_candidate.enthalpy_discrepancy_abs < 100 %}text-warning{% else %}text-danger{% endif %}">
+                                            {{ item.top_candidate.enthalpy_discrepancy|floatformat:1 }} kJ/mol
+                                        </span>
+                                    {% else %}
+                                        <span class="text-muted">Not calculated</span>
+                                    {% endif %}
+                                </small>
+                            </div>
+                            {% if item.top_candidate.thermo_matches_count > 0 %}
+                            <div class="mb-1">
+                                <small>
+                                    <strong><i class="fas fa-fire"></i> Thermo Matches:</strong>
+                                    <span class="badge badge-success">{{ item.top_candidate.thermo_matches_count }} library match{{ item.top_candidate.thermo_matches_count|pluralize:"es" }}</span>
+                                    {% if item.top_candidate.thermo_name_matches %}
+                                        <span class="badge badge-success ml-1" title="Name matches Chemkin label">
+                                            <i class="fas fa-check-circle"></i> Name Match
+                                        </span>
+                                    {% endif %}
+                                </small>
+                            </div>
+                            {% endif %}
+                            <div>
+                                <span class="vote-badge">{{ item.top_candidate.unique_vote_count }} unique votes</span>
+                                <span class="vote-badge ml-1">{{ item.top_candidate.vote_count }} total votes</span>
+                                <br><small class="text-muted" style="font-size: 0.75rem;">(for top match only)</small>
+                            </div>
+                        </div>
+                        
+                        <div class="candidate-actions">
+                            {% if item.species.identification_status == 'unidentified' or item.species.identification_status == 'tentative' %}
+                            <button type="button" 
+                                    class="btn btn-success btn-confirm"
+                                    data-species-id="{{ item.species.id }}"
+                                    data-candidate-id="{{ item.top_candidate.id }}"
+                                    data-species-label="{{ item.species.chemkin_label }}"
+                                    data-smiles="{{ item.top_candidate.smiles }}">
+                                <i class="fas fa-check"></i> Confirm
+                            </button>
+                            <button type="button" 
+                                    class="btn btn-danger btn-block"
+                                    data-species-id="{{ item.species.id }}"
+                                    data-candidate-id="{{ item.top_candidate.id }}">
+                                <i class="fas fa-times"></i> Block
+                            </button>
+                            {% endif %}
+                        </div>
+                    </div>
+                    
+                    {% if item.candidate_count > 1 %}
+                    <div class="mt-2 text-center">
+                        <a href="{% url 'importer_dashboard:species_detail' job.id item.species.id %}" 
+                           class="btn btn-sm btn-outline-secondary">
+                            View all {{ item.candidate_count }} candidates
+                        </a>
+                    </div>
+                    {% endif %}
+                    
+                    {% else %}
+                    <div class="text-center py-3 text-muted">
+                        <i class="fas fa-question-circle fa-2x mb-2"></i>
+                        <p>No candidates found</p>
+                        <button type="button" 
+                                class="btn btn-sm btn-primary btn-manual-smiles"
+                                data-species-id="{{ item.species.id }}"
+                                data-species-label="{{ item.species.chemkin_label }}">
+                            <i class="fas fa-edit"></i> Enter SMILES Manually
+                        </button>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        {% else %}
+            <div class="no-species">
+                <!-- No species match current filter -->
+                <i class="fas fa-check-circle fa-4x mb-3 text-success"></i>
+                
+                {% if status_filter == 'unidentified' %}
+                    <h4>All Species Identified! 🎉</h4>
+                    <p class="text-muted">
+                        Great work! All {{ stats.total }} species in this job have been identified.
+                    </p>
+                    {% if stats.confirmed > 0 %}
+                        <p class="text-muted">
+                            <a href="?status=confirmed" class="btn btn-success mt-2">
+                                <i class="fas fa-check"></i> View {{ stats.confirmed }} Confirmed Species
+                            </a>
+                        </p>
+                    {% endif %}
+                    
+                {% elif status_filter == 'tentative' %}
+                    <h4>No Tentative Matches</h4>
+                    <p class="text-muted">
+                        There are no species with tentative matches requiring review.
+                    </p>
+                    {% if stats.unidentified > 0 %}
+                        <p class="text-muted">
+                            <a href="?status=unidentified" class="btn btn-primary mt-2">
+                                <i class="fas fa-search"></i> View {{ stats.unidentified }} Unidentified Species
+                            </a>
+                        </p>
+                    {% elif stats.confirmed > 0 %}
+                        <p class="text-muted">
+                            <a href="?status=confirmed" class="btn btn-success mt-2">
+                                <i class="fas fa-check"></i> View {{ stats.confirmed }} Confirmed Species
+                            </a>
+                        </p>
+                    {% endif %}
+                    
+                {% elif status_filter == 'confirmed' %}
+                    <h4>No Confirmed Species Yet</h4>
+                    <p class="text-muted">
+                        No species have been confirmed yet. Identification is in progress.
+                    </p>
+                    {% if stats.unidentified > 0 %}
+                        <p class="text-muted">
+                            <a href="?status=unidentified" class="btn btn-primary mt-2">
+                                <i class="fas fa-search"></i> View {{ stats.unidentified }} Unidentified Species
+                            </a>
+                        </p>
+                    {% endif %}
+                    
+                {% else %}
+                    <h4>No Species Found</h4>
+                    <p class="text-muted">
+                        No species match the current filter criteria.
+                    </p>
+                    {% if stats.total > 0 %}
+                        <p class="text-muted">
+                            This job has {{ stats.total }} total species.
+                            <a href="?status=all" class="btn btn-outline-primary mt-2">
+                                <i class="fas fa-list"></i> View All Species
+                            </a>
+                        </p>
+                    {% endif %}
+                {% endif %}
+                
+                {% if job.status == 'running' and job.port %}
+                    <p class="text-muted mt-3">
+                        <a href="http://localhost:{{ job.port }}" target="_blank" class="btn btn-outline-info btn-sm">
+                            <i class="fas fa-external-link-alt"></i> View Live importChemkin.py Interface
+                        </a>
+                    </p>
+                {% endif %}
+            </div>
+        {% endif %}
+    </div>
+</main>
+
+<!-- Confirm Modal -->
+<div class="modal fade" id="confirmModal" tabindex="-1" role="dialog">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Confirm Species Match</h5>
+                <button type="button" class="close" data-dismiss="modal">
+                    <span>&times;</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p>Confirm that <strong id="confirmSpeciesLabel"></strong> matches:</p>
+                <p class="text-center">
+                    <code id="confirmSmiles"></code>
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-success" id="confirmMatchBtn">Confirm Match</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Manual SMILES Modal -->
+<div class="modal fade" id="smilesModal" tabindex="-1" role="dialog">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Enter SMILES for <span id="smilesSpeciesLabel"></span></h5>
+                <button type="button" class="close" data-dismiss="modal">
+                    <span>&times;</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="smilesForm">
+                    <div class="form-group">
+                        <label for="smilesInput">SMILES String:</label>
+                        <input type="text" class="form-control" id="smilesInput" required 
+                               placeholder="e.g., C, [CH3], CC">
+                        <small class="form-text text-muted">
+                            Enter the SMILES representation of the species structure.
+                        </small>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="submitSmilesBtn">Submit</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+$(document).ready(function() {
+    let currentSpeciesId, currentCandidateId;
+    
+    // Confirm match button
+    $('.btn-confirm').click(function() {
+        currentSpeciesId = $(this).data('species-id');
+        currentCandidateId = $(this).data('candidate-id');
+        $('#confirmSpeciesLabel').text($(this).data('species-label'));
+        $('#confirmSmiles').text($(this).data('smiles'));
+        $('#confirmModal').modal('show');
+    });
+    
+    // Confirm match action
+    $('#confirmMatchBtn').click(function() {
+        $.ajax({
+            url: `/dashboard/job/{{ job.id }}/species/${currentSpeciesId}/confirm/`,
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': '{{ csrf_token }}'
+            },
+            data: {
+                candidate_id: currentCandidateId
+            },
+            success: function(response) {
+                if (response.success) {
+                    $('#confirmModal').modal('hide');
+                    location.reload();
+                } else {
+                    alert('Error: ' + (response.error || 'Unknown error'));
+                }
+            },
+            error: function(xhr) {
+                alert('Error confirming match: ' + xhr.responseText);
+            }
+        });
+    });
+    
+    // Block match button
+    $('.btn-block').click(function() {
+        if (!confirm('Are you sure you want to block this match?')) {
+            return;
+        }
+        
+        const speciesId = $(this).data('species-id');
+        const candidateId = $(this).data('candidate-id');
+        
+        $.ajax({
+            url: `/dashboard/job/{{ job.id }}/species/${speciesId}/block/`,
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': '{{ csrf_token }}'
+            },
+            data: {
+                candidate_id: candidateId,
+                reason: 'User blocked from queue view'
+            },
+            success: function(response) {
+                if (response.success) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (response.error || 'Unknown error'));
+                }
+            },
+            error: function(xhr) {
+                alert('Error blocking match: ' + xhr.responseText);
+            }
+        });
+    });
+    
+    // Manual SMILES button
+    $('.btn-manual-smiles').click(function() {
+        currentSpeciesId = $(this).data('species-id');
+        $('#smilesSpeciesLabel').text($(this).data('species-label'));
+        $('#smilesInput').val('');
+        $('#smilesModal').modal('show');
+    });
+    
+    // Submit SMILES
+    $('#submitSmilesBtn').click(function() {
+        const smiles = $('#smilesInput').val().trim();
+        
+        if (!smiles) {
+            alert('Please enter a SMILES string');
+            return;
+        }
+        
+        $.ajax({
+            url: `/dashboard/job/{{ job.id }}/species/${currentSpeciesId}/submit-smiles/`,
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': '{{ csrf_token }}'
+            },
+            data: {
+                smiles: smiles
+            },
+            success: function(response) {
+                if (response.success) {
+                    $('#smilesModal').modal('hide');
+                    location.reload();
+                } else {
+                    alert('Error: ' + (response.error || 'Unknown error'));
+                }
+            },
+            error: function(xhr) {
+                const response = JSON.parse(xhr.responseText);
+                alert('Error: ' + (response.error || 'Unknown error'));
+            }
+        });
+    });
+    
+    // Auto-confirm button
+    $('#autoConfirmBtn').click(function() {
+        if (!confirm('Auto-confirm all high-confidence matches? This will confirm species with only one candidate and sufficient evidence.')) {
+            return;
+        }
+        
+        $(this).prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Processing...');
+        
+        $.ajax({
+            url: `/dashboard/job/{{ job.id }}/species/auto-confirm/`,
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': '{{ csrf_token }}'
+            },
+            success: function(response) {
+                if (response.success) {
+                    alert(`Auto-confirmed ${response.confirmed_count} species`);
+                    location.reload();
+                } else {
+                    alert('Error: ' + (response.error || 'Unknown error'));
+                    $('#autoConfirmBtn').prop('disabled', false).html('<i class="fas fa-magic"></i> Auto-Confirm High Confidence');
+                }
+            },
+            error: function(xhr) {
+                alert('Error: ' + xhr.responseText);
+                $('#autoConfirmBtn').prop('disabled', false).html('<i class="fas fa-magic"></i> Auto-Confirm High Confidence');
+            }
+        });
+    });
+});
+</script>
+{% endblock %}

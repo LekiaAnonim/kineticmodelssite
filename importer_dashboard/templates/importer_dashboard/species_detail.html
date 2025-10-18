@@ -1,0 +1,708 @@
+{% extends "base.html" %}
+{% load static %}
+{% load species_filters %}
+
+{% block title %}{{ species.chemkin_label }} - Species Detail{% endblock %}
+
+{% block extra_css %}
+<style>
+    :root {
+        --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        --success-color: #10b981;
+        --danger-color: #ef4444;
+        --warning-color: #f59e0b;
+        --gray-50: #f9fafb;
+        --gray-100: #f3f4f6;
+        --gray-200: #e5e7eb;
+        --gray-600: #4b5563;
+        --gray-900: #111827;
+    }
+    
+    body {
+        background-color: var(--gray-50);
+    }
+    
+    /* Compact Header */
+    .page-header {
+        background: var(--primary-gradient);
+        color: white;
+        padding: 1.5rem 0;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    }
+    
+    .breadcrumb-custom {
+        background: transparent;
+        padding: 0;
+        margin-bottom: 0.5rem;
+    }
+    
+    .breadcrumb-custom a {
+        color: rgba(255, 255, 255, 0.8);
+        text-decoration: none;
+    }
+    
+    .breadcrumb-custom a:hover {
+        color: white;
+    }
+    
+    .species-title {
+        font-size: 2rem;
+        font-weight: 700;
+        margin: 0;
+    }
+    
+    .species-meta {
+        display: flex;
+        gap: 1.5rem;
+        margin-top: 0.5rem;
+        flex-wrap: wrap;
+    }
+    
+    .meta-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        background: rgba(255, 255, 255, 0.2);
+        padding: 0.25rem 0.75rem;
+        border-radius: 0.5rem;
+        font-size: 0.9rem;
+    }
+    
+    /* Compact Candidate Cards */
+    .candidates-grid {
+        display: grid;
+        gap: 1rem;
+        margin-bottom: 2rem;
+    }
+    
+    .candidate-card {
+        background: white;
+        border-radius: 0.75rem;
+        overflow: hidden;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+        transition: all 0.2s;
+    }
+    
+    .candidate-card:hover {
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        transform: translateY(-2px);
+    }
+    
+    .candidate-card.rank-1 {
+        border: 2px solid var(--success-color);
+    }
+    
+    .candidate-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem 1.25rem;
+        background: var(--gray-50);
+        border-bottom: 1px solid var(--gray-200);
+    }
+    
+    .candidate-card.rank-1 .candidate-header {
+        background: linear-gradient(to right, #d1fae5, #f0fdf4);
+    }
+    
+    .candidate-rank {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+    }
+    
+    .rank-badge {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 1rem;
+    }
+    
+    .rank-badge.gold {
+        background: linear-gradient(135deg, #fbbf24, #f59e0b);
+        color: white;
+    }
+    
+    .rank-badge.silver {
+        background: linear-gradient(135deg, #d1d5db, #9ca3af);
+        color: white;
+    }
+    
+    .rank-badge.bronze {
+        background: linear-gradient(135deg, #f97316, #ea580c);
+        color: white;
+    }
+    
+    .confidence-badge {
+        padding: 0.375rem 0.75rem;
+        border-radius: 0.5rem;
+        font-weight: 600;
+        font-size: 0.875rem;
+    }
+    
+    .confidence-high {
+        background: #d1fae5;
+        color: #065f46;
+    }
+    
+    .confidence-medium {
+        background: #fef3c7;
+        color: #92400e;
+    }
+    
+    .confidence-low {
+        background: #fee2e2;
+        color: #991b1b;
+    }
+    
+    .candidate-body {
+        padding: 1.25rem;
+    }
+    
+    .candidate-content {
+        display: grid;
+        grid-template-columns: 200px 1fr;
+        gap: 1.5rem;
+        align-items: start;
+    }
+    
+    @media (max-width: 768px) {
+        .candidate-content {
+            grid-template-columns: 1fr;
+        }
+    }
+    
+    .molecule-box {
+        background: white;
+        border: 1px solid var(--gray-200);
+        border-radius: 0.5rem;
+        padding: 0.75rem;
+        text-align: center;
+    }
+    
+    .molecule-box img {
+        max-width: 100%;
+        height: auto;
+        max-height: 180px;
+    }
+    
+    .candidate-details {
+        display: grid;
+        gap: 0.75rem;
+    }
+    
+    .detail-row {
+        display: grid;
+        grid-template-columns: 140px 1fr;
+        gap: 0.75rem;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid var(--gray-100);
+        font-size: 0.9rem;
+    }
+    
+    .detail-row:last-child {
+        border-bottom: none;
+    }
+    
+    .detail-label {
+        color: var(--gray-600);
+        font-weight: 500;
+    }
+    
+    .detail-value {
+        color: var(--gray-900);
+        font-family: 'Courier New', monospace;
+        word-break: break-all;
+    }
+    
+    .stats-row {
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+    
+    .stat-box {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        background: var(--gray-50);
+        padding: 0.5rem 0.75rem;
+        border-radius: 0.5rem;
+        font-size: 0.875rem;
+    }
+    
+    .stat-box i {
+        color: var(--gray-600);
+    }
+    
+    /* Compact Voting Evidence */
+    .voting-section {
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 2px solid var(--gray-200);
+    }
+    
+    .section-title {
+        font-size: 0.875rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: var(--gray-600);
+        margin-bottom: 0.75rem;
+        letter-spacing: 0.05em;
+    }
+    
+    .reactions-compact {
+        display: grid;
+        gap: 0.5rem;
+        max-height: 300px;
+        overflow-y: auto;
+    }
+    
+    .reaction-row {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.5rem 0.75rem;
+        background: var(--gray-50);
+        border-radius: 0.375rem;
+        font-size: 0.85rem;
+        transition: background 0.2s;
+    }
+    
+    .reaction-row:hover {
+        background: var(--gray-100);
+    }
+    
+    .reaction-row.unique {
+        background: #d1fae5;
+        border-left: 3px solid var(--success-color);
+    }
+    
+    .reaction-badge {
+        padding: 0.125rem 0.5rem;
+        border-radius: 0.25rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        white-space: nowrap;
+    }
+    
+    .reaction-badge.unique {
+        background: var(--success-color);
+        color: white;
+    }
+    
+    .reaction-badge.common {
+        background: var(--gray-200);
+        color: var(--gray-600);
+    }
+    
+    .reaction-formula {
+        flex: 1;
+        font-family: 'Courier New', monospace;
+        font-size: 0.8rem;
+        color: var(--gray-900);
+    }
+    
+    .reaction-family {
+        color: var(--gray-600);
+        font-size: 0.75rem;
+    }
+    
+    /* Action Buttons */
+    .action-bar {
+        display: flex;
+        gap: 0.75rem;
+        margin-top: 1rem;
+    }
+    
+    .btn-modern {
+        padding: 0.5rem 1.25rem;
+        border-radius: 0.5rem;
+        font-weight: 600;
+        font-size: 0.875rem;
+        border: none;
+        transition: all 0.2s;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    
+    .btn-modern:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    }
+    
+    .btn-success-modern {
+        background: var(--success-color);
+        color: white;
+    }
+    
+    .btn-danger-modern {
+        background: var(--danger-color);
+        color: white;
+    }
+    
+    .btn-secondary-modern {
+        background: var(--gray-200);
+        color: var(--gray-900);
+    }
+    
+    /* Thermo Library Chips */
+    .thermo-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.375rem;
+    }
+    
+    .thermo-chip {
+        padding: 0.25rem 0.625rem;
+        background: #dbeafe;
+        color: #1e40af;
+        border-radius: 0.375rem;
+        font-size: 0.75rem;
+        font-weight: 500;
+    }
+    
+    /* Empty State */
+    .empty-state {
+        text-align: center;
+        padding: 2rem;
+        color: var(--gray-600);
+    }
+    
+    .empty-state i {
+        font-size: 3rem;
+        margin-bottom: 1rem;
+        opacity: 0.5;
+    }
+    
+    /* Scrollbar */
+    .reactions-compact::-webkit-scrollbar {
+        width: 6px;
+    }
+    
+    .reactions-compact::-webkit-scrollbar-track {
+        background: var(--gray-100);
+        border-radius: 3px;
+    }
+    
+    .reactions-compact::-webkit-scrollbar-thumb {
+        background: var(--gray-600);
+        border-radius: 3px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Compact Header -->
+<div class="page-header">
+    <div class="container">
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb breadcrumb-custom">
+                <li class="breadcrumb-item"><a href="{% url 'importer_dashboard:job_detail' job.id %}">{{ job.job_name }}</a></li>
+                <li class="breadcrumb-item"><a href="{% url 'importer_dashboard:species_queue' job.id %}">Species Queue</a></li>
+                <li class="breadcrumb-item active text-white">{{ species.chemkin_label }}</li>
+            </ol>
+        </nav>
+        
+        <h1 class="species-title">{{ species.chemkin_label }}</h1>
+        
+        <div class="species-meta">
+            <div class="meta-item">
+                <i class="fas fa-flask"></i>
+                <span>{{ species.formula }}</span>
+            </div>
+            <div class="meta-item">
+                <i class="fas fa-info-circle"></i>
+                <span class="text-capitalize">{{ species.identification_status }}</span>
+            </div>
+            <div class="meta-item">
+                <i class="fas fa-users"></i>
+                <span>{{ candidates|length }} Candidate{{ candidates|length|pluralize }}</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="container">
+    <!-- Candidates Grid -->
+    <div class="candidates-grid">
+        {% for item in candidates %}
+        <div class="candidate-card {% if forloop.counter == 1 %}rank-1{% endif %}">
+            <!-- Candidate Header -->
+            <div class="candidate-header">
+                <div class="candidate-rank">
+                    <div class="rank-badge {% if forloop.counter == 1 %}gold{% elif forloop.counter == 2 %}silver{% elif forloop.counter == 3 %}bronze{% endif %}">
+                        #{{ forloop.counter }}
+                    </div>
+                    <div>
+                        <div style="font-weight: 600; color: var(--gray-900);">{{ item.candidate.rmg_label }}</div>
+                        <div style="font-size: 0.75rem; color: var(--gray-600);">
+                            {% if forloop.counter == 1 %}Top Match{% else %}Alternative{% endif %}
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="confidence-badge {% if item.confidence >= 70 %}confidence-high{% elif item.confidence >= 40 %}confidence-medium{% else %}confidence-low{% endif %}">
+                    {{ item.confidence|floatformat:0 }}% Confidence
+                </div>
+            </div>
+            
+            <!-- Candidate Body -->
+            <div class="candidate-body">
+                <div class="candidate-content">
+                    <!-- Molecule Image -->
+                    <div class="molecule-box">
+                        {% if item.image_url %}
+                            <img src="{{ item.image_url }}" alt="{{ item.candidate.smiles }}" loading="lazy">
+                        {% else %}
+                            <div style="padding: 2rem; color: var(--gray-600);">
+                                <i class="fas fa-image fa-2x"></i>
+                                <div style="font-size: 0.75rem; margin-top: 0.5rem;">No image</div>
+                            </div>
+                        {% endif %}
+                    </div>
+                    
+                    <!-- Details -->
+                    <div class="candidate-details">
+                        <div class="detail-row">
+                            <div class="detail-label">SMILES</div>
+                            <div class="detail-value">{{ item.candidate.smiles }}</div>
+                        </div>
+                        
+                        <div class="detail-row">
+                            <div class="detail-label">Enthalpy Δ</div>
+                            <div class="detail-value">
+                                {{ item.candidate.enthalpy_discrepancy|floatformat:2 }} kcal/mol
+                                <span style="color: var(--gray-600); font-size: 0.85rem;">
+                                    ({{ item.candidate.enthalpy_discrepancy_abs|floatformat:2 }} absolute)
+                                </span>
+                            </div>
+                        </div>
+                        
+                        <div class="detail-row">
+                            <div class="detail-label">Voting Stats</div>
+                            <div class="stats-row">
+                                <div class="stat-box">
+                                    <i class="fas fa-star"></i>
+                                    <strong>{{ item.unique_vote_count }}</strong> unique
+                                </div>
+                                <div class="stat-box">
+                                    <i class="fas fa-chart-bar"></i>
+                                    <strong>{{ item.vote_count }}</strong> total
+                                </div>
+                            </div>
+                        </div>
+                        
+                        {% if item.thermo_matches %}
+                        <div class="detail-row">
+                            <div class="detail-label">
+                                <i class="fas fa-fire"></i> Thermo Libraries
+                                <small class="text-muted">({{ item.thermo_matches|length }})</small>
+                            </div>
+                            <div class="thermo-chips">
+                                {% for match in item.thermo_matches %}
+                                <span class="thermo-chip {% if match.name_matches %}bg-success text-white{% endif %}" 
+                                      title="{{ match.library_species_name }} in {{ match.library_name }}{% if match.name_matches %} - Name matches Chemkin label!{% endif %}">
+                                    {{ match.library_name }}
+                                    {% if match.name_matches %}
+                                        <i class="fas fa-check-circle ml-1"></i>
+                                    {% endif %}
+                                </span>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        <div class="detail-row">
+                            <div class="detail-label">Library Species</div>
+                            <div class="detail-value">
+                                <small>
+                                    {% for match in item.thermo_matches %}
+                                        <span class="{% if match.name_matches %}text-success font-weight-bold{% endif %}">
+                                            {{ match.library_species_name }}
+                                        </span>
+                                        <span class="text-muted">({{ match.library_name }})</span>{% if not forloop.last %}, {% endif %}
+                                    {% endfor %}
+                                </small>
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <!-- Voting Evidence -->
+                <div class="voting-section">
+                    <div class="section-title">
+                        <i class="fas fa-vote-yea"></i> Voting Evidence
+                    </div>
+                    
+                    {% if voting_matrix %}
+                        <div class="reactions-compact">
+                            {% for reaction, data in voting_matrix.items %}
+                                {% if item.candidate.id in data.votes %}
+                                    {% with vote=data.votes|get_item:item.candidate.id %}
+                                    <div class="reaction-row {% if vote.is_unique %}unique{% endif %}">
+                                        <span class="reaction-badge {% if vote.is_unique %}unique{% else %}common{% endif %}">
+                                            {% if vote.is_unique %}UNIQUE{% else %}COMMON{% endif %}
+                                        </span>
+                                        <div class="reaction-formula">{{ data.formatted|safe }}</div>
+                                        <div class="reaction-family">{{ vote.family|default:"—" }}</div>
+                                    </div>
+                                    {% endwith %}
+                                {% endif %}
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <div class="empty-state">
+                            <i class="fas fa-inbox"></i>
+                            <div>No voting evidence available</div>
+                        </div>
+                    {% endif %}
+                </div>
+                
+                <!-- Actions -->
+                {% if species.identification_status == 'unidentified' or species.identification_status == 'tentative' %}
+                <div class="action-bar">
+                    <button type="button" 
+                            class="btn btn-modern btn-success-modern btn-confirm"
+                            data-species-id="{{ species.id }}"
+                            data-candidate-id="{{ item.candidate.id }}"
+                            data-species-label="{{ species.chemkin_label }}"
+                            data-smiles="{{ item.candidate.smiles }}">
+                        <i class="fas fa-check"></i> Confirm This Match
+                    </button>
+                    
+                    <button type="button"
+                            class="btn btn-modern btn-danger-modern btn-block"
+                            data-species-id="{{ species.id }}"
+                            data-candidate-id="{{ item.candidate.id }}"
+                            data-species-label="{{ species.chemkin_label }}"
+                            data-smiles="{{ item.candidate.smiles }}">
+                        <i class="fas fa-ban"></i> Block
+                    </button>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Confirmation Modal -->
+<div class="modal fade" id="confirmModal" tabindex="-1" role="dialog">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Confirm Species Match</h5>
+                <button type="button" class="close" data-dismiss="modal">
+                    <span>&times;</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p>Confirm that <strong id="confirm-species-label"></strong> is:</p>
+                <p class="text-monospace" id="confirm-smiles"></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-success" id="confirm-btn">Confirm</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Block Modal -->
+<div class="modal fade" id="blockModal" tabindex="-1" role="dialog">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Block Candidate</h5>
+                <button type="button" class="close" data-dismiss="modal">
+                    <span>&times;</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p>Block <strong id="block-smiles"></strong> as a candidate for <strong id="block-species-label"></strong>?</p>
+                <div class="form-group">
+                    <label>Reason (optional):</label>
+                    <textarea class="form-control" id="block-reason" rows="3"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="block-btn">Block</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+$(document).ready(function() {
+    let currentSpeciesId, currentCandidateId, currentAction;
+    
+    // Confirm button click
+    $('.btn-confirm').click(function() {
+        currentSpeciesId = $(this).data('species-id');
+        currentCandidateId = $(this).data('candidate-id');
+        $('#confirm-species-label').text($(this).data('species-label'));
+        $('#confirm-smiles').text($(this).data('smiles'));
+        $('#confirmModal').modal('show');
+    });
+    
+    // Block button click
+    $('.btn-block').click(function() {
+        currentSpeciesId = $(this).data('species-id');
+        currentCandidateId = $(this).data('candidate-id');
+        $('#block-species-label').text($(this).data('species-label'));
+        $('#block-smiles').text($(this).data('smiles'));
+        $('#blockModal').modal('show');
+    });
+    
+    // Confirm action
+    $('#confirm-btn').click(function() {
+        $.ajax({
+            url: `/importer/job/{{ job.id }}/species/${currentSpeciesId}/confirm/`,
+            method: 'POST',
+            data: {
+                candidate_id: currentCandidateId,
+                csrfmiddlewaretoken: '{{ csrf_token }}'
+            },
+            success: function(response) {
+                if (response.status === 'success') {
+                    window.location.href = '{% url "importer_dashboard:species_queue" job.id %}';
+                }
+            },
+            error: function() {
+                alert('Error confirming match');
+            }
+        });
+    });
+    
+    // Block action
+    $('#block-btn').click(function() {
+        $.ajax({
+            url: `/importer/job/{{ job.id }}/species/${currentSpeciesId}/block/`,
+            method: 'POST',
+            data: {
+                candidate_id: currentCandidateId,
+                reason: $('#block-reason').val(),
+                csrfmiddlewaretoken: '{{ csrf_token }}'
+            },
+            success: function(response) {
+                if (response.status === 'success') {
+                    location.reload();
+                }
+            },
+            error: function() {
+                alert('Error blocking candidate');
+            }
+        });
+    });
+});
+</script>
+{% endblock %}

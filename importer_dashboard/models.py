@@ -306,11 +306,16 @@ class CandidateSpecies(models.Model):
     
     # RMG species information
     rmg_label = models.CharField(max_length=200, help_text="RMG species label")
-    rmg_index = models.IntegerField(help_text="RMG species index")
+    rmg_index = models.IntegerField(null=True, blank=True, 
+                                    help_text="RMG species index")
     smiles = models.CharField(max_length=500, help_text="SMILES representation")
+    label_source = models.CharField(max_length=20, default='rmg', 
+                                   choices=[('rmg', 'RMG Generated'), ('chemkin', 'Chemkin File')],
+                                   help_text="Source of the species label")
     
     # Thermodynamics comparison
-    enthalpy_discrepancy = models.FloatField(help_text="H(298K) difference in kJ/mol")
+    enthalpy_discrepancy = models.FloatField(null=True, blank=True, 
+                                            help_text="H(298K) difference in kJ/mol")
     
     # Confidence metrics
     vote_count = models.IntegerField(default=0, help_text="Number of voting reactions")
@@ -320,6 +325,8 @@ class CandidateSpecies(models.Model):
                                                  help_text="Matches in thermo libraries")
     
     # Status
+    is_confirmed = models.BooleanField(default=False, 
+                                       help_text="User confirmed this match")
     is_blocked = models.BooleanField(default=False, help_text="User blocked this match")
     blocked_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
                                   related_name='blocked_candidates')
@@ -330,7 +337,20 @@ class CandidateSpecies(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        unique_together = [['species', 'rmg_index']]
+        # Use unique_together only when rmg_index is not null
+        # For confirmed species without RMG matching, use species+smiles uniqueness
+        constraints = [
+            models.UniqueConstraint(
+                fields=['species', 'rmg_index'],
+                condition=models.Q(rmg_index__isnull=False),
+                name='unique_species_rmg_index'
+            ),
+            models.UniqueConstraint(
+                fields=['species', 'smiles'],
+                condition=models.Q(is_confirmed=True, rmg_index__isnull=True),
+                name='unique_confirmed_species_smiles'
+            ),
+        ]
         ordering = ['-unique_vote_count', '-vote_count', 'enthalpy_discrepancy']
         verbose_name = "Candidate Species"
         verbose_name_plural = "Candidate Species"
@@ -452,7 +472,7 @@ class BlockedMatch(models.Model):
 class VoteCandidate(models.Model):
     """
     Vote-based candidate species (from votes database)
-    Simplified model focused on data from votes_{job_id}.db
+    Model focused on data from votes_{job_id}.db
     """
     species = models.ForeignKey(Species, on_delete=models.CASCADE,
                                related_name='vote_candidates')
