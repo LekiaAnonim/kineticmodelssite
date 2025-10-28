@@ -521,6 +521,139 @@ class VotingReaction(models.Model):
     
     def __str__(self):
         return f"{self.chemkin_reaction} -> {self.rmg_reaction}"
+
+
+class SyncLog(models.Model):
+    """
+    Tracks synchronization operations between cluster and Django
+    
+    Used for incremental sync to track what's already been synced and when.
+    """
+    # Sync identification
+    job = models.ForeignKey(ClusterJob, on_delete=models.CASCADE,
+                           related_name='sync_logs')
+    sync_type = models.CharField(max_length=50, 
+                                 help_text="Type of data synced (votes, identified_species, etc.)")
+    direction = models.CharField(max_length=10, choices=[
+        ('pull', 'Pull from cluster'),
+        ('push', 'Push to cluster')
+    ], default='pull')
+    
+    # Sync results
+    record_count = models.IntegerField(default=0, help_text="Number of records synced")
+    success = models.BooleanField(default=False)
+    error_message = models.TextField(blank=True, null=True)
+    
+    # Timestamp
+    synced_at = models.DateTimeField(default=timezone.now, db_index=True)
+    
+    class Meta:
+        ordering = ['-synced_at']
+        verbose_name = "Sync Log"
+        verbose_name_plural = "Sync Logs"
+        indexes = [
+            models.Index(fields=['job', 'sync_type', '-synced_at']),
+            models.Index(fields=['job', 'success', '-synced_at']),
+        ]
     
     def __str__(self):
-        return f"{self.chemkin_label} ≠ {self.smiles}"
+        status = "✓" if self.success else "✗"
+        return f"{status} {self.sync_type} ({self.record_count} records) - {self.synced_at.strftime('%Y-%m-%d %H:%M:%S')}"
+
+
+class ChemkinReaction(models.Model):
+    """
+    Stores a reaction from the CHEMKIN mechanism file with full kinetics
+    
+    Represents reactions parsed from mechanism.txt by RMG-Py's load_chemkin_file()
+    """
+    job = models.ForeignKey(ClusterJob, on_delete=models.CASCADE,
+                           related_name='chemkin_reactions')
+    
+    # Reaction identification
+    index = models.IntegerField(help_text="Reaction number in mechanism file")
+    equation = models.TextField(help_text="Full reaction equation (e.g., 'H + O2 <=> O + OH')")
+    
+    # Reactants and products (stored as comma-separated species labels)
+    reactants = models.TextField(help_text="Comma-separated reactant species labels")
+    products = models.TextField(help_text="Comma-separated product species labels")
+    
+    # Arrhenius kinetics parameters
+    A = models.FloatField(help_text="Pre-exponential factor")
+    A_units = models.CharField(max_length=50, blank=True, help_text="Units for A")
+    n = models.FloatField(help_text="Temperature exponent")
+    Ea = models.FloatField(help_text="Activation energy")
+    Ea_units = models.CharField(max_length=50, blank=True, help_text="Units for Ea (e.g., 'kcal/mol')")
+    
+    # Temperature range
+    temp_min = models.FloatField(null=True, blank=True, help_text="Minimum temperature (K)")
+    temp_max = models.FloatField(null=True, blank=True, help_text="Maximum temperature (K)")
+    
+    # Reaction properties
+    is_reversible = models.BooleanField(default=True)
+    is_duplicate = models.BooleanField(default=False)
+    is_pressure_dependent = models.BooleanField(default=False)
+    
+    # Reaction family (if identified by RMG)
+    family = models.CharField(max_length=200, blank=True, help_text="RMG reaction family")
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['job', 'index']
+        unique_together = [['job', 'index']]
+        verbose_name = "CHEMKIN Reaction"
+        verbose_name_plural = "CHEMKIN Reactions"
+        indexes = [
+            models.Index(fields=['job', 'index']),
+            models.Index(fields=['job', 'is_duplicate']),
+        ]
+    
+    def __str__(self):
+        return f"R{self.index}: {self.equation}"
+
+
+class ChemkinThermo(models.Model):
+    """
+    Stores thermodynamics data (NASA polynomials) for a species
+    
+    NASA 7-coefficient polynomial format for heat capacity, enthalpy, and entropy
+    """
+    species = models.OneToOneField(Species, on_delete=models.CASCADE,
+                                   related_name='chemkin_thermo')
+    
+    # Temperature ranges
+    temp_low = models.FloatField(help_text="Lowest temperature (K)")
+    temp_mid = models.FloatField(help_text="Middle temperature for polynomial switch (K)")
+    temp_high = models.FloatField(help_text="Highest temperature (K)")
+    
+    # High temperature polynomial coefficients (T_mid to T_high)
+    high_a1 = models.FloatField()
+    high_a2 = models.FloatField()
+    high_a3 = models.FloatField()
+    high_a4 = models.FloatField()
+    high_a5 = models.FloatField()
+    high_a6 = models.FloatField()  # Integration constant for H
+    high_a7 = models.FloatField()  # Integration constant for S
+    
+    # Low temperature polynomial coefficients (T_low to T_mid)
+    low_a1 = models.FloatField()
+    low_a2 = models.FloatField()
+    low_a3 = models.FloatField()
+    low_a4 = models.FloatField()
+    low_a5 = models.FloatField()
+    low_a6 = models.FloatField()  # Integration constant for H
+    low_a7 = models.FloatField()  # Integration constant for S
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        verbose_name = "CHEMKIN Thermodynamics"
+        verbose_name_plural = "CHEMKIN Thermodynamics"
+    
+    def __str__(self):
+        return f"Thermo for {self.species.chemkin_label} ({self.temp_low}-{self.temp_high} K)"

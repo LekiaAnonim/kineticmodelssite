@@ -947,12 +947,13 @@ td a:focus-visible {
 }
 
 .log-entry {
-    display: flex;
+    display: grid;
+    grid-template-columns: 65px minmax(0, auto) 1fr;
+    gap: 8px;
     padding: 4px 8px;
     border-radius: 3px;
     margin-bottom: 2px;
-    white-space: pre-wrap;
-    word-break: break-word;
+    align-items: start;
 }
 
 .log-entry:hover {
@@ -961,17 +962,17 @@ td a:focus-visible {
 
 .log-time {
     flex-shrink: 0;
-    width: 90px;
     color: #858585;
-    margin-right: 12px;
     font-weight: 500;
+    font-size: 11px;
+    padding-top: 2px;
 }
 
 .log-message {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 8px;
+    grid-column: 3;
+    word-break: break-word;
+    white-space: pre-wrap;
+    line-height: 1.4;
 }
 
 /* Job context badge */
@@ -984,8 +985,12 @@ td a:focus-visible {
     font-size: 10px;
     font-weight: 600;
     color: #60a5fa;
-    margin-right: 6px;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
+    vertical-align: middle;
+    cursor: help;
 }
 
 /* Details toggle button */
@@ -1240,12 +1245,13 @@ td a:focus-visible {
 }
 
 /* Add right padding to main content so it doesn't get hidden behind fixed panel */
-body {
+/* Only apply when activity log panel is actually present on the page */
+body:has(.activity-log-fixed) {
     padding-right: 460px;
     transition: padding-right 0.3s ease;
 }
 
-body.log-minimized {
+body:has(.activity-log-fixed).log-minimized {
     padding-right: 40px;
 }
 

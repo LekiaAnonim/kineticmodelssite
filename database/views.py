@@ -108,7 +108,7 @@ class SidebarLookup:
 
 @SidebarLookup
 class BaseView(TemplateView):
-    template_name = "database/base.html"
+    template_name = "database/home.html"
 
 
 @SidebarLookup

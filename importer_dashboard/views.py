@@ -980,7 +980,66 @@ def refresh_progress(request):
                 'total_running': running_jobs.count()
             }
         )
-        messages.success(request, f'Refreshed progress for {updated_count} jobs')
+        
+        # Auto-sync votes for running jobs
+        from .incremental_sync import sync_job_votes_incremental
+        synced_jobs = 0
+        synced_species = 0
+        synced_votes = 0
+        
+        dashboard_logger.info(
+            "Starting vote synchronization for running jobs",
+            "dashboard",
+            details={'job_count': running_jobs.count()}
+        )
+        
+        for job in running_jobs:
+            try:
+                # Check if we should sync (avoid syncing too frequently)
+                last_sync = job.sync_logs.filter(
+                    sync_type='incremental_votes',
+                    success=True
+                ).order_by('-synced_at').first()
+                
+                # Only sync if it's been more than 5 minutes since last sync
+                if last_sync:
+                    from django.utils import timezone
+                    time_since_sync = (timezone.now() - last_sync.synced_at).total_seconds()
+                    if time_since_sync < 300:  # 5 minutes
+                        continue
+                
+                # Run incremental sync
+                result = sync_job_votes_incremental(job)
+                
+                if result.get('status') == 'success':
+                    synced_jobs += 1
+                    synced_species += result.get('species_synced', 0)
+                    synced_votes += result.get('votes_synced', 0)
+                    
+                    dashboard_logger.info(
+                        f"Synced votes for {job.name}",
+                        "dashboard",
+                        details={
+                            'job': job.name,
+                            'species': result.get('species_synced', 0),
+                            'votes': result.get('votes_synced', 0)
+                        }
+                    )
+            except Exception as e:
+                dashboard_logger.warning(
+                    f"Failed to sync votes for {job.name}: {str(e)}",
+                    "dashboard",
+                    details={'job': job.name, 'error': str(e)}
+                )
+        
+        if synced_jobs > 0:
+            messages.success(
+                request, 
+                f'Refreshed progress for {updated_count} jobs. '
+                f'Synced {synced_species} species and {synced_votes} votes from {synced_jobs} jobs.'
+            )
+        else:
+            messages.success(request, f'Refreshed progress for {updated_count} jobs')
         
     except Exception as e:
         dashboard_logger.error(
@@ -1105,7 +1164,21 @@ def api_species_identify(request, job_id):
 @login_required
 def interactive_session(request, job_id):
     """
-    Interactive session view for species identification
+        <!-- interactive_session.html -->
+    <div class="alert alert-info">
+        <strong>💡 New Feature:</strong> Try the 
+        <a href="{% url 'importer_dashboard:species_queue' job.id %}">
+            Modern Species Identification             # Update interactive_session view to link to new system
+            def interactive_session(request, job_id):
+                # ... existing code ...
+                
+                context = {
+                    'job': job,
+                    # Add suggestion to use new system
+                    'use_modern_ui': True,  
+                    'species_queue_url': reverse('importer_dashboard:species_queue', args=[job_id]),
+                    # ... rest of context ...
+                } session view for species identification
     
     This provides a WebSocket-like interface for real-time interaction
     with the importChemkin.py process.
@@ -1140,6 +1213,16 @@ def interactive_session(request, job_id):
                 job.unmatched_reactions = progress.get('unmatchedreactions', 0)
                 job.save()
                 logger.info(f"Updated progress for job {job.name}: {job.total_species} species")
+                
+                # Auto-sync species data to new Species model
+                try:
+                    from .species_utils import sync_species_from_cluster
+                    sync_result = sync_species_from_cluster(job, ssh_manager)
+                    if sync_result['success']:
+                        logger.info(f"Auto-synced species data for job {job.id}")
+                except Exception as sync_error:
+                    logger.warning(f"Could not auto-sync species for job {job.id}: {sync_error}")
+                    
         except Exception as e:
             logger.warning(f"Could not fetch live progress for job {job.id}: {str(e)}")
     
@@ -1482,3 +1565,192 @@ def job_resume(request, job_id):
         messages.error(request, f"Failed to resume job: {str(e)}")
     
     return redirect('importer_dashboard:interactive_session', job_id=job_id)
+
+
+@login_required
+@require_http_methods(["POST"])
+def sync_votes_incremental(request, job_id):
+    """
+    Trigger incremental sync of vote data from cluster
+    
+    Only syncs records updated since last sync (or all if first sync).
+    Much faster than full DB copy for ongoing jobs.
+    """
+    from .incremental_sync import sync_job_votes_incremental
+    
+    try:
+        job = get_object_or_404(ClusterJob, id=job_id)
+        
+        dashboard_logger.info(
+            f"Starting incremental vote sync for {job.name}",
+            "sync",
+            job_id=job.id,
+            job_name=job.name
+        )
+        
+        # Perform sync
+        result = sync_job_votes_incremental(job)
+        
+        if result['success']:
+            dashboard_logger.success(
+                f"✓ Incremental sync complete: {result['message']}",
+                "sync",
+                job_id=job.id,
+                job_name=job.name,
+                details={
+                    'votes_synced': result['votes_synced'],
+                    'identified_synced': result['identified_synced'],
+                    'blocked_synced': result['blocked_synced'],
+                    'incremental': result.get('incremental', False),
+                    'db_size_bytes': result.get('db_size', 0)
+                }
+            )
+            messages.success(request, result['message'])
+        else:
+            dashboard_logger.error(
+                f"✗ Sync failed: {result['message']}",
+                "sync",
+                job_id=job.id,
+                job_name=job.name
+            )
+            messages.error(request, f"Sync failed: {result['message']}")
+        
+        return JsonResponse(result)
+        
+    except Exception as e:
+        error_msg = f"Sync error: {str(e)}"
+        dashboard_logger.error(error_msg, "sync", job_id=job_id)
+        logger.error(error_msg, exc_info=True)
+        return JsonResponse({
+            'success': False,
+            'message': error_msg
+        }, status=500)
+
+
+@login_required
+def sync_status(request, job_id):
+    """
+    View sync history and statistics for a job
+    """
+    from .models import SyncLog
+    
+    job = get_object_or_404(ClusterJob, id=job_id)
+    
+    # Get recent sync logs
+    sync_logs = SyncLog.objects.filter(job=job).order_by('-synced_at')[:50]
+    
+    # Calculate statistics
+    total_syncs = sync_logs.count()
+    successful_syncs = sync_logs.filter(success=True).count()
+    failed_syncs = sync_logs.filter(success=False).count()
+    
+    # Get last successful sync by type
+    last_votes_sync = SyncLog.objects.filter(
+        job=job,
+        sync_type='votes',
+        success=True
+    ).order_by('-synced_at').first()
+    
+    last_identified_sync = SyncLog.objects.filter(
+        job=job,
+        sync_type='identified_species',
+        success=True
+    ).order_by('-synced_at').first()
+    
+    context = {
+        'job': job,
+        'sync_logs': sync_logs,
+        'total_syncs': total_syncs,
+        'successful_syncs': successful_syncs,
+        'failed_syncs': failed_syncs,
+        'success_rate': (successful_syncs / total_syncs * 100) if total_syncs > 0 else 0,
+        'last_votes_sync': last_votes_sync,
+        'last_identified_sync': last_identified_sync,
+    }
+    
+    return render(request, 'importer_dashboard/sync_status.html', context)
+
+
+@login_required
+def mechanism_coverage(request, job_id):
+    """
+    Show what percentage of mechanism is usable with current identifications
+    
+    Analyzes reactions to determine:
+    - Fully usable (all species identified)
+    - Partially identified (some species identified)
+    - Not yet usable (no species identified)
+    """
+    job = get_object_or_404(ClusterJob, id=job_id)
+    
+    from .models import ChemkinReaction, Species
+    from django.db.models import Q
+    
+    total_reactions = ChemkinReaction.objects.filter(job=job).count()
+    
+    # Get identified species labels
+    identified_labels = set(Species.objects.filter(
+        job=job,
+        identification_status='confirmed'
+    ).values_list('chemkin_label', flat=True))
+    
+    # Count usable reactions (all species identified)
+    usable_reactions = 0
+    partially_identified = 0
+    unidentified_reactions = 0
+    
+    # Sample reactions for each category
+    usable_examples = []
+    partial_examples = []
+    unidentified_examples = []
+    
+    reactions = ChemkinReaction.objects.filter(job=job)
+    for reaction in reactions:
+        all_species = set()
+        for s in reaction.reactants.split('+'):
+            all_species.add(s.strip())
+        for s in reaction.products.split('+'):
+            all_species.add(s.strip())
+        
+        identified_in_rxn = all_species & identified_labels
+        
+        if len(identified_in_rxn) == len(all_species):
+            usable_reactions += 1
+            if len(usable_examples) < 10:
+                usable_examples.append(reaction)
+        elif len(identified_in_rxn) > 0:
+            partially_identified += 1
+            if len(partial_examples) < 10:
+                partial_examples.append(reaction)
+        else:
+            unidentified_reactions += 1
+            if len(unidentified_examples) < 10:
+                unidentified_examples.append(reaction)
+    
+    coverage_percent = (usable_reactions / total_reactions) * 100 if total_reactions > 0 else 0
+    partial_percent = (partially_identified / total_reactions) * 100 if total_reactions > 0 else 0
+    unidentified_percent = (unidentified_reactions / total_reactions) * 100 if total_reactions > 0 else 0
+    
+    total_species_count = Species.objects.filter(job=job).count()
+    identified_species_count = len(identified_labels)
+    species_percent = (identified_species_count / total_species_count) * 100 if total_species_count > 0 else 0
+    
+    context = {
+        'job': job,
+        'total_reactions': total_reactions,
+        'usable_reactions': usable_reactions,
+        'partially_identified': partially_identified,
+        'unidentified_reactions': unidentified_reactions,
+        'coverage_percent': coverage_percent,
+        'partial_percent': partial_percent,
+        'unidentified_percent': unidentified_percent,
+        'total_species': total_species_count,
+        'identified_species': identified_species_count,
+        'species_percent': species_percent,
+        'usable_examples': usable_examples,
+        'partial_examples': partial_examples,
+        'unidentified_examples': unidentified_examples,
+    }
+    
+    return render(request, 'importer_dashboard/mechanism_coverage.html', context)
+

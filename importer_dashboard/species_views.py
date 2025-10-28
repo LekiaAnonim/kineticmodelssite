@@ -17,7 +17,7 @@ import urllib.parse
 
 from .models import (
     ClusterJob, Species, CandidateSpecies, Vote, ThermoMatch,
-    BlockedMatch, ImportJobStatus
+    BlockedMatch, ImportJobStatus, ChemkinReaction
 )
 from .species_utils import (
     prune_common_votes, calculate_confidence_score,
@@ -50,12 +50,19 @@ def species_queue(request, job_id):
     sync_message = None
     if should_sync:
         try:
-            from .species_utils import sync_species_from_cluster
-            sync_result = sync_species_from_cluster(job)
+            # Use new incremental sync instead of old CherryPy API
+            from .incremental_sync import sync_job_votes_incremental
+            sync_result = sync_job_votes_incremental(job)
+            
             if sync_result['success']:
                 sync_message = {
                     'type': 'success',
-                    'text': f"✓ Synced from cluster: {sync_result['message']}"
+                    'text': (
+                        f"✓ Synced from cluster: {sync_result['votes_synced']} votes, "
+                        f"{sync_result['identified_synced']} identified, "
+                        f"{sync_result['blocked_synced']} blocked "
+                        f"({'incremental' if sync_result.get('incremental') else 'full sync'})"
+                    )
                 }
             else:
                 sync_message = {
@@ -126,6 +133,24 @@ def species_queue(request, job_id):
     elif sort_by == 'confidence':
         # This requires getting top candidate confidence - done in template
         species_qs = species_qs.order_by('-unique_votes', '-total_votes')
+    elif sort_by == 'importance':
+        # Sort by reaction participation (NEW FEATURE!)
+        # Count reactions for each species using exact word boundary matching
+        import re
+        species_with_counts = []
+        for species in species_qs:
+            # Use regex for exact word boundary matching
+            species_pattern = r'(^|,|\s)' + re.escape(species.chemkin_label) + r'(,|\s|$)'
+            reaction_count = ChemkinReaction.objects.filter(
+                Q(reactants__iregex=species_pattern) |
+                Q(products__iregex=species_pattern),
+                job=job
+            ).count()
+            species_with_counts.append((species, reaction_count))
+        
+        # Sort by reaction count descending
+        species_with_counts.sort(key=lambda x: x[1], reverse=True)
+        species_qs = [s[0] for s in species_with_counts]
     
     # Get species with their candidates
     species_list = []
@@ -137,6 +162,7 @@ def species_queue(request, job_id):
         top_candidate = candidates.first() if candidates.exists() else None
         
         # Add absolute enthalpy and thermo match info for template display
+        confidence_score = None
         if top_candidate:
             top_candidate.enthalpy_discrepancy_abs = abs(top_candidate.enthalpy_discrepancy) if top_candidate.enthalpy_discrepancy else 0
             
@@ -147,11 +173,20 @@ def species_queue(request, job_id):
             )
             top_candidate.thermo_matches_count = thermo_matches.count()
             top_candidate.thermo_name_matches = thermo_matches.filter(name_matches=True).exists()
+            
+            # Calculate confidence score for the top candidate
+            confidence_score = calculate_confidence_score(
+                vote_count=top_candidate.vote_count,
+                unique_votes=top_candidate.unique_vote_count,
+                enthalpy_diff=top_candidate.enthalpy_discrepancy,
+                thermo_matches=thermo_matches.count()
+            )
         
         species_data = {
             'species': species,
             'candidates': candidates,
             'top_candidate': top_candidate,
+            'confidence_score': confidence_score,
             'total_votes': species.total_votes,
             'unique_votes': species.unique_votes,
             'candidate_count': species.candidate_count,
@@ -273,11 +308,25 @@ def species_detail(request, job_id, species_id):
             'image_url': get_species_image_url(candidate.smiles),
         })
     
+    # Get reactions this species appears in (NEW FEATURE!)
+    # Use regex for exact word boundary matching to avoid false positives
+    # (e.g., "CH2" should NOT match "CH2O" or "C2CH2")
+    import re
+    species_pattern = r'(^|,|\s)' + re.escape(species.chemkin_label) + r'(,|\s|$)'
+    
+    species_reactions = ChemkinReaction.objects.filter(
+        Q(reactants__iregex=species_pattern) |
+        Q(products__iregex=species_pattern),
+        job=job
+    ).order_by('equation')[:50]  # Show first 50 reactions
+    
     context = {
         'job': job,
         'species': species,
         'candidates': candidate_data,
         'voting_matrix': voting_matrix,
+        'species_reactions': species_reactions,
+        'reaction_count': species_reactions.count(),
         'auto_confirm_suggested': False,  # Calculate this
     }
     
@@ -713,3 +762,41 @@ def auto_confirm_all(request, job_id):
     except Exception as e:
         logger.error(f"Error in auto-confirm: {e}")
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+@login_required
+@require_POST
+def sync_votes_manual(request, job_id):
+    """
+    Manually trigger incremental vote sync from cluster
+    
+    This syncs vote data, identified species, and blocked matches
+    using the new SSH-based incremental sync system.
+    """
+    job = get_object_or_404(ClusterJob, id=job_id)
+    
+    try:
+        from .incremental_sync import sync_job_votes_incremental
+        
+        dashboard_logger.info(f"Manual sync triggered for job {job.name}")
+        result = sync_job_votes_incremental(job)
+        
+        if result['success']:
+            messages.success(
+                request,
+                f"✓ Sync complete: {result['votes_synced']} votes, "
+                f"{result['identified_synced']} identified species, "
+                f"{result['blocked_synced']} blocked matches "
+                f"({'incremental' if result.get('incremental') else 'full sync'})"
+            )
+            dashboard_logger.info(f"Manual sync succeeded: {result['message']}")
+        else:
+            messages.error(request, f"✗ Sync failed: {result['message']}")
+            dashboard_logger.error(f"Manual sync failed: {result['message']}")
+            
+    except Exception as e:
+        messages.error(request, f"✗ Sync error: {str(e)}")
+        dashboard_logger.error(f"Manual sync exception: {e}", exc_info=True)
+    
+    # Redirect back to species queue
+    return redirect('importer_dashboard:species_queue', job_id=job_id)

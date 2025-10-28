@@ -15,7 +15,7 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 
-def parse_progress_json(progress_data: Dict) -> Dict:
+def parse_progress_json(progress_data: Dict):
     """
     Parse progress.json from importChemkin.py
     
@@ -45,7 +45,7 @@ def parse_progress_json(progress_data: Dict) -> Dict:
     }
 
 
-def parse_species_from_smiles_file(smiles_file_content: str) -> List[Dict]:
+def parse_species_from_smiles_file(smiles_file_content: str):
     """
     Parse SMILES.txt file containing identified species
     
@@ -83,7 +83,7 @@ def parse_species_from_smiles_file(smiles_file_content: str) -> List[Dict]:
     return species_list
 
 
-def parse_blocked_matches_file(blocked_file_content: str) -> List[Dict]:
+def parse_blocked_matches_file(blocked_file_content: str):
     """
     Parse BLOCKED.txt file containing blocked matches
     
@@ -116,7 +116,7 @@ def parse_blocked_matches_file(blocked_file_content: str) -> List[Dict]:
     return blocked_list
 
 
-def parse_formula_from_thermo(thermo_content: str) -> Dict[str, str]:
+def parse_formula_from_thermo(thermo_content: str):
     """
     Parse chemical formulas from Chemkin thermo file
     
@@ -150,7 +150,7 @@ def calculate_confidence_score(
     unique_votes: int,
     enthalpy_diff: float,
     thermo_matches: int
-) -> float:
+):
     """
     Calculate confidence score for a species match
     
@@ -192,7 +192,7 @@ def should_auto_confirm(
     thermo_matches: int,
     is_only_candidate: bool = False,
     name_matches: bool = False
-) -> bool:
+):
     """
     Determine if a match should be automatically confirmed
     
@@ -225,7 +225,7 @@ def should_auto_confirm(
     return False
 
 
-def prune_common_votes(species: Species) -> None:
+def prune_common_votes(species: Species):
     """
     Remove non-discriminating votes that are common to all candidates
     
@@ -270,7 +270,7 @@ def prune_common_votes(species: Species) -> None:
                 candidate.save()
 
 
-def get_species_image_url(smiles: str, size: int = 200) -> str:
+def get_species_image_url(smiles: str, size: int = 200):
     """
     Generate URL for species structure image
     
@@ -287,7 +287,7 @@ def get_species_image_url(smiles: str, size: int = 200) -> str:
     return f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/{encoded_smiles}/PNG?image_size={size}x{size}"
 
 
-def format_reaction_string(reaction_str: str, identified_labels: List[str]) -> str:
+def format_reaction_string(reaction_str: str, identified_labels: List[str]):
     """
     Format reaction string with HTML highlighting for identified/unidentified species
     
@@ -314,7 +314,7 @@ def format_reaction_string(reaction_str: str, identified_labels: List[str]) -> s
     return ''.join(formatted)
 
 
-def sync_species_from_job(job: ClusterJob, ssh_manager) -> Dict[str, int]:
+def sync_species_from_job(job: ClusterJob, ssh_manager):
     """
     Sync species data from cluster job files
     
@@ -340,7 +340,7 @@ def sync_species_from_job(job: ClusterJob, ssh_manager) -> Dict[str, int]:
     return stats
 
 
-def export_smiles_file(job: ClusterJob) -> str:
+def export_smiles_file(job: ClusterJob):
     """
     Export confirmed species identifications to SMILES.txt format
     
@@ -365,7 +365,7 @@ def export_smiles_file(job: ClusterJob) -> str:
     return '\n'.join(lines)
 
 
-def export_blocked_file(job: ClusterJob) -> str:
+def export_blocked_file(job: ClusterJob):
     """
     Export blocked matches to BLOCKED.txt format
     
@@ -389,7 +389,7 @@ def export_blocked_file(job: ClusterJob) -> str:
     return '\n'.join(lines)
 
 
-def sync_species_from_cluster(job: ClusterJob, ssh_manager=None) -> Dict:
+def sync_species_from_cluster(job: ClusterJob, ssh_manager=None):
     """
     Sync species data from cluster job to Django database
     

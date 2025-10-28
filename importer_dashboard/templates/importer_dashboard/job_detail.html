@@ -48,6 +48,14 @@
                 </svg>
                 Interactive Session
             </a>
+            <a href="{% url 'importer_dashboard:species_queue' job.id %}" class="btn btn-info">
+                <svg class="btn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+                    <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                </svg>
+                Identify Species
+            </a>
         {% endif %}
     </div>
 </div>
@@ -168,111 +176,6 @@
     </div>
 </div>
 {% endif %}
-
-<div class="card">
-    <div class="log-tabs">
-        <button class="log-tab active" onclick="showLogTab('console-output')">Console Output</button>
-        <button class="log-tab" onclick="showLogTab('rmg-log')">RMG Log</button>
-        <button class="log-tab" onclick="showLogTab('error-log')">Error Log</button>
-        <button class="log-tab" onclick="showLogTab('recent-logs')">Recent Activity</button>
-    </div>
-    
-    <div id="console-output" class="log-content active">
-        <h3>Console Output (Last 200 Lines)</h3>
-        <p style="font-size: 13px; color: #666; margin-bottom: 10px;">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle;">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="8" x2="12" y2="12"></line>
-                <line x1="12" y1="16" x2="12.01" y2="16"></line>
-            </svg>
-            Shows SLURM job output including initialization, conda environment, and early Python messages.
-        </p>
-        <button class="btn btn-secondary btn-small" onclick="refreshLog('console')">
-            <svg class="btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="23 4 23 10 17 10"></polyline>
-                <polyline points="1 20 1 14 7 14"></polyline>
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-            </svg>
-            Refresh
-        </button>
-        <div class="log-viewer" id="console-output-content">
-            Loading...
-        </div>
-    </div>
-    
-    <div id="rmg-log" class="log-content">
-        <h3>RMG Log (Last 50 Lines)</h3>
-        <p style="font-size: 13px; color: #666; margin-bottom: 10px;">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle;">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="8" x2="12" y2="12"></line>
-                <line x1="12" y1="16" x2="12.01" y2="16"></line>
-            </svg>
-            Shows RMG-specific operations from RMG-Py-output/RMG.log (created after RMG initialization).
-        </p>
-        <button class="btn btn-secondary btn-small" onclick="refreshLog('rmg')">
-            <svg class="btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="23 4 23 10 17 10"></polyline>
-                <polyline points="1 20 1 14 7 14"></polyline>
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-            </svg>
-            Refresh
-        </button>
-        <div class="log-viewer" id="rmg-log-content">
-            Loading...
-        </div>
-    </div>
-    
-    <div id="error-log" class="log-content">
-        <h3>Error Log</h3>
-        <p style="font-size: 13px; color: #666; margin-bottom: 10px;">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle;">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="8" x2="12" y2="12"></line>
-                <line x1="12" y1="16" x2="12.01" y2="16"></line>
-            </svg>
-            Shows SLURM stderr output including Python tracebacks and error messages.
-        </p>
-        <button class="btn btn-secondary btn-small" onclick="refreshLog('error')">
-            <svg class="btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="23 4 23 10 17 10"></polyline>
-                <polyline points="1 20 1 14 7 14"></polyline>
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-            </svg>
-            Refresh
-        </button>
-        <div class="log-viewer" id="error-log-content">
-            Loading...
-        </div>
-    </div>
-    
-    <div id="recent-logs" class="log-content">
-        <h3>Recent Activity</h3>
-        {% if recent_logs %}
-        <table>
-            <thead>
-                <tr>
-                    <th>Timestamp</th>
-                    <th>Level</th>
-                    <th>Message</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for log in recent_logs %}
-                <tr>
-                    <td>{{ log.timestamp|date:"Y-m-d H:i:s" }}</td>
-                    <td><span class="status-badge status-{{ log.level|lower }}">{{ log.level }}</span></td>
-                    <td>{{ log.message }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% else %}
-        <p>No activity logs recorded yet.</p>
-        {% endif %}
-    </div>
-</div>
-
 </div> <!-- Close dashboard-container -->
 
 <script>

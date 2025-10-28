@@ -30,13 +30,13 @@ class VoteReader:
         if not self.db_path.exists():
             raise FileNotFoundError(f"Votes database not found: {db_path}")
     
-    def get_connection(self) -> sqlite3.Connection:
+    def get_connection(self):
         """Get database connection"""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row  # Access columns by name
         return conn
     
-    def get_all_votes(self, job_id: str) -> Dict:
+    def get_all_votes(self, job_id: str):
         """
         Get all votes for a job
         
@@ -60,7 +60,8 @@ class VoteReader:
         try:
             # Get all species with votes
             cursor.execute("""
-                SELECT chemkin_label, rmg_index, smiles, vote_count, adjlist
+                SELECT chemkin_label, rmg_species_index, rmg_species_smiles, 
+                       rmg_species_label, vote_count
                 FROM species_votes
                 WHERE job_id = ?
                 ORDER BY chemkin_label, vote_count DESC
@@ -77,14 +78,15 @@ class VoteReader:
                 reactions = self.get_voting_reactions(
                     job_id, 
                     chemkin_label, 
-                    row['rmg_index']
+                    row['rmg_species_index']
                 )
                 
                 votes[chemkin_label]['candidates'].append({
-                    'rmg_index': row['rmg_index'],
-                    'smiles': row['smiles'],
-                    'adjlist': row['adjlist'],
+                    'rmg_index': row['rmg_species_index'],
+                    'smiles': row['rmg_species_smiles'],
+                    'adjlist': '',  # Not stored in this schema
                     'vote_count': row['vote_count'],
+                    'rmg_label': row['rmg_species_label'],
                     'reactions': reactions
                 })
             
@@ -93,7 +95,7 @@ class VoteReader:
         finally:
             conn.close()
     
-    def get_votes_for_species(self, job_id: str, chemkin_label: str) -> Dict:
+    def get_votes_for_species(self, job_id: str, chemkin_label: str):
         """
         Get voting data for a specific species
         
@@ -119,7 +121,7 @@ class VoteReader:
         
         try:
             cursor.execute("""
-                SELECT rmg_index, smiles, adjlist, vote_count
+                SELECT rmg_species_index, rmg_species_smiles, rmg_species_label, vote_count
                 FROM species_votes
                 WHERE job_id = ? AND chemkin_label = ?
                 ORDER BY vote_count DESC
@@ -130,14 +132,15 @@ class VoteReader:
                 reactions = self.get_voting_reactions(
                     job_id,
                     chemkin_label,
-                    row['rmg_index']
+                    row['rmg_species_index']
                 )
                 
                 candidates.append({
-                    'rmg_index': row['rmg_index'],
-                    'smiles': row['smiles'],
-                    'adjlist': row['adjlist'],
+                    'rmg_index': row['rmg_species_index'],
+                    'smiles': row['rmg_species_smiles'],
+                    'adjlist': '',  # Not stored in this schema
                     'vote_count': row['vote_count'],
+                    'rmg_label': row['rmg_species_label'],
                     'reactions': reactions
                 })
             
@@ -154,7 +157,7 @@ class VoteReader:
         job_id: str, 
         chemkin_label: str, 
         rmg_index: int
-    ) -> List[Dict]:
+    ):
         """
         Get all reactions that voted for a specific candidate
         
@@ -171,20 +174,23 @@ class VoteReader:
         cursor = conn.cursor()
         
         try:
+            # Note: voting_reactions table uses species_vote_id as foreign key
+            # We need to join with species_votes to filter properly
             cursor.execute("""
-                SELECT chemkin_reaction, rmg_reaction, family
-                FROM voting_reactions
-                WHERE job_id = ? 
-                  AND chemkin_label = ? 
-                  AND rmg_index = ?
+                SELECT vr.chemkin_reaction_str, vr.edge_reaction_str, vr.reaction_family
+                FROM voting_reactions vr
+                JOIN species_votes sv ON vr.species_vote_id = sv.id
+                WHERE sv.job_id = ? 
+                  AND sv.chemkin_label = ? 
+                  AND sv.rmg_species_index = ?
             """, (job_id, chemkin_label, rmg_index))
             
             reactions = []
             for row in cursor.fetchall():
                 reactions.append({
-                    'chemkin_reaction': row['chemkin_reaction'],
-                    'rmg_reaction': row['rmg_reaction'],
-                    'family': row['family']
+                    'chemkin_reaction': row['chemkin_reaction_str'],
+                    'rmg_reaction': row['edge_reaction_str'],
+                    'family': row['reaction_family']
                 })
             
             return reactions
@@ -192,7 +198,7 @@ class VoteReader:
         finally:
             conn.close()
     
-    def get_identified_species(self, job_id: str) -> List[Dict]:
+    def get_identified_species(self, job_id: str):
         """
         Get all identified species
         
@@ -212,20 +218,22 @@ class VoteReader:
         
         try:
             cursor.execute("""
-                SELECT chemkin_label, smiles, adjlist, confirmed_by, confirmed_at
+                SELECT chemkin_label, rmg_species_smiles, rmg_species_label, rmg_species_index
                 FROM identified_species
                 WHERE job_id = ?
-                ORDER BY confirmed_at DESC
+                ORDER BY chemkin_label
             """, (job_id,))
             
             identified = []
             for row in cursor.fetchall():
                 identified.append({
                     'chemkin_label': row['chemkin_label'],
-                    'smiles': row['smiles'],
-                    'adjlist': row['adjlist'],
-                    'confirmed_by': row['confirmed_by'],
-                    'confirmed_at': row['confirmed_at']
+                    'smiles': row['rmg_species_smiles'],
+                    'adjlist': '',  # Not stored in this schema
+                    'rmg_label': row['rmg_species_label'],
+                    'rmg_index': row['rmg_species_index'],
+                    'confirmed_by': 'auto',  # Not tracked in this schema
+                    'confirmed_at': ''  # Not tracked in this schema
                 })
             
             return identified
@@ -233,7 +241,7 @@ class VoteReader:
         finally:
             conn.close()
     
-    def get_blocked_matches(self, job_id: str) -> List[Dict]:
+    def get_blocked_matches(self, job_id: str):
         """
         Get all blocked matches
         
@@ -254,23 +262,22 @@ class VoteReader:
         
         try:
             cursor.execute("""
-                SELECT chemkin_label, rmg_index, smiles, adjlist, 
-                       blocked_by, blocked_at, reason
+                SELECT chemkin_label, rmg_species_index, reason, created_at
                 FROM blocked_matches
                 WHERE job_id = ?
-                ORDER BY blocked_at DESC
+                ORDER BY created_at DESC
             """, (job_id,))
             
             blocked = []
             for row in cursor.fetchall():
                 blocked.append({
                     'chemkin_label': row['chemkin_label'],
-                    'rmg_index': row['rmg_index'],
-                    'smiles': row['smiles'],
-                    'adjlist': row['adjlist'],
-                    'blocked_by': row['blocked_by'],
-                    'blocked_at': row['blocked_at'],
-                    'reason': row['reason'] if 'reason' in row.keys() else None
+                    'rmg_index': row['rmg_species_index'],
+                    'smiles': '',  # Not stored in this schema
+                    'adjlist': '',  # Not stored in this schema
+                    'blocked_by': 'auto',  # Not tracked in this schema
+                    'blocked_at': row['created_at'],
+                    'reason': row['reason'] if row['reason'] else None
                 })
             
             return blocked
@@ -278,7 +285,7 @@ class VoteReader:
         finally:
             conn.close()
     
-    def get_statistics(self, job_id: str) -> Dict:
+    def get_statistics(self, job_id: str):
         """
         Get summary statistics
         
@@ -367,35 +374,45 @@ class VoteReader:
             conn.close()
 
 
-def find_votes_database_on_cluster(ssh_job_manager, job_path: str, job_id: str) -> Optional[str]:
+def find_votes_database_on_cluster(ssh_job_manager, job_path: str, job_id: str = None):
     """
     Find votes database file for a job on the cluster
     
     Args:
         ssh_job_manager: SSHJobManager instance
         job_path: Path to job directory on cluster
-        job_id: Job ID (MD5 hash)
+        job_id: Job ID (MD5 hash) - optional, will search for any votes_*.db if not provided
         
     Returns:
         Path to votes database or None if not found
     """
-    # Try several possible locations
-    possible_paths = [
-        f'{job_path}/votes_{job_id}.db',
-        f'{job_path}/RMG-Py/votes_{job_id}.db',
-        f'{job_path}/../votes_{job_id}.db',
-    ]
-    
-    for path in possible_paths:
-        # Check if file exists on cluster
-        result = ssh_job_manager.exec_command(f'[ -f {path} ] && echo EXISTS || echo MISSING')
-        stdout, stderr = result
+    # If job_id provided, try specific paths
+    if job_id:
+        possible_paths = [
+            f'{job_path}/votes_{job_id}.db',
+            f'{job_path}/RMG-Py/votes_{job_id}.db',
+            f'{job_path}/../votes_{job_id}.db',
+        ]
         
-        if 'EXISTS' in stdout:
-            logger.info(f"Found votes database: {path}")
-            return path
+        for path in possible_paths:
+            # Check if file exists on cluster
+            result = ssh_job_manager.exec_command(f'[ -f {path} ] && echo EXISTS || echo MISSING')
+            stdout, stderr = result
+            
+            if 'EXISTS' in stdout:
+                logger.info(f"Found votes database: {path}")
+                return path
     
-    logger.warning(f"Votes database not found for job {job_id}")
+    # If not found or no job_id provided, search for any votes_*.db file
+    logger.info(f"Searching for any votes_*.db file in {job_path}")
+    stdout, stderr = ssh_job_manager.exec_command(f'find {job_path} -maxdepth 1 -name "votes_*.db" -type f 2>/dev/null | head -n 1')
+    
+    if stdout.strip():
+        db_path = stdout.strip()
+        logger.info(f"Found votes database: {db_path}")
+        return db_path
+    
+    logger.warning(f"Votes database not found in {job_path}")
     return None
 
 
@@ -437,7 +454,7 @@ def sync_votes_to_django(job, ssh_job_manager):
         logger.info(f"Looking for votes database with job_id: {job_id}")
         
         # Connect to cluster if not already connected
-        if not ssh_job_manager.client:
+        if not ssh_job_manager.is_connected():
             ssh_job_manager.connect()
         
         # Find votes database on cluster
@@ -448,18 +465,38 @@ def sync_votes_to_django(job, ssh_job_manager):
                 'message': 'Votes database not found on cluster'
             }
         
-        # Copy database to local temp file using SFTP
+        # Copy database to local temp file using base64 encoding over SSH
         import tempfile
+        import base64
+        
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp:
             local_db_path = tmp.name
         
-        # Download database from cluster using paramiko SFTP
-        sftp = ssh_job_manager.client.open_sftp()
+        # Download database using base64 encoding to avoid binary issues
         try:
-            sftp.get(db_path, local_db_path)
-            logger.info(f"Downloaded votes database to {local_db_path}")
-        finally:
-            sftp.close()
+            logger.info(f"Downloading votes database: {db_path}")
+            logger.info("Using base64 encoding to transfer database...")
+            
+            # Encode the database file as base64 on remote side
+            b64_stdout, b64_stderr = ssh_job_manager.exec_command(f'base64 {db_path}')
+            
+            if b64_stderr and 'No such file' in b64_stderr:
+                raise Exception(f"Database file not found: {db_path}")
+            
+            if not b64_stdout or not b64_stdout.strip():
+                raise Exception(f"Failed to read database: {b64_stderr}")
+            
+            # Decode base64 and write to local file
+            db_binary = base64.b64decode(b64_stdout.strip())
+            
+            with open(local_db_path, 'wb') as f:
+                f.write(db_binary)
+            
+            logger.info(f"Downloaded votes database to {local_db_path} ({len(db_binary)} bytes)")
+            
+        except Exception as e:
+            logger.error(f"Error downloading database: {e}")
+            raise
         
         # Read votes from database
         reader = VoteReader(local_db_path)

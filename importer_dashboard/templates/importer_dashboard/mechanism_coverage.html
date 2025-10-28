@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <!-- Breadcrumb -->
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{% url 'importer_dashboard:index' %}">Jobs</a></li>
+                    <li class="breadcrumb-item"><a href="{% url 'importer_dashboard:species_queue' job.id %}">{{ job.job_name }}</a></li>
+                    <li class="breadcrumb-item active" aria-current="page">Mechanism Coverage</li>
+                </ol>
+            </nav>
+
+            <!-- Page Header -->
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h2>Mechanism Coverage Analysis</h2>
+                <div>
+                    <a href="{% url 'importer_dashboard:species_queue' job.id %}" class="btn btn-outline-secondary">
+                        Back to Species Queue
+                    </a>
+                </div>
+            </div>
+
+            <!-- Overall Progress Card -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="mb-0">Overall Mechanism Status</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row mb-4">
+                        <div class="col-md-6">
+                            <h6>Species Progress</h6>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span>Identified Species:</span>
+                                <strong>{{ identified_species }} / {{ total_species }}</strong>
+                            </div>
+                            <div class="progress" style="height: 25px;">
+                                <div class="progress-bar bg-dark" role="progressbar" 
+                                     style="width: {{ species_percent|floatformat:1 }}%"
+                                     aria-valuenow="{{ species_percent }}" 
+                                     aria-valuemin="0" 
+                                     aria-valuemax="100">
+                                    {{ species_percent|floatformat:1 }}%
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <h6>Reaction Coverage</h6>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span>Usable Reactions:</span>
+                                <strong>{{ usable_reactions }} / {{ total_reactions }}</strong>
+                            </div>
+                            <div class="progress" style="height: 25px;">
+                                <div class="progress-bar bg-dark" role="progressbar" 
+                                     style="width: {{ coverage_percent|floatformat:1 }}%"
+                                     aria-valuenow="{{ coverage_percent }}" 
+                                     aria-valuemin="0" 
+                                     aria-valuemax="100">
+                                    {{ coverage_percent|floatformat:1 }}%
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Detailed Breakdown -->
+                    <div class="row text-center">
+                        <div class="col-md-4">
+                            <div class="card border mb-3">
+                                <div class="card-body">
+                                    <h3 class="card-title">{{ usable_reactions }}</h3>
+                                    <p class="card-text text-muted">Fully Usable Reactions</p>
+                                    <small class="text-muted">{{ coverage_percent|floatformat:1 }}% of total</small>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card border mb-3">
+                                <div class="card-body">
+                                    <h3 class="card-title">{{ partially_identified }}</h3>
+                                    <p class="card-text text-muted">Partially Identified</p>
+                                    <small class="text-muted">{{ partial_percent|floatformat:1 }}% of total</small>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card border mb-3">
+                                <div class="card-body">
+                                    <h3 class="card-title">{{ unidentified_reactions }}</h3>
+                                    <p class="card-text text-muted">Not Yet Usable</p>
+                                    <small class="text-muted">{{ unidentified_percent|floatformat:1 }}% of total</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Usable Reactions Examples -->
+            {% if usable_examples %}
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h6 class="mb-0">Fully Usable Reactions <span class="badge badge-secondary">Sample</span></h6>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small">All species in these reactions are identified and have thermodynamic data.</p>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Equation</th>
+                                    <th>A</th>
+                                    <th>n</th>
+                                    <th>Ea</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for reaction in usable_examples %}
+                                <tr>
+                                    <td><code>{{ reaction.equation }}</code></td>
+                                    <td><small>{{ reaction.A }}</small></td>
+                                    <td><small>{{ reaction.n }}</small></td>
+                                    <td><small>{{ reaction.Ea }}</small></td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% if usable_reactions > 10 %}
+                    <p class="text-muted small mb-0">Showing 10 of {{ usable_reactions }} usable reactions</p>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Partially Identified Reactions Examples -->
+            {% if partial_examples %}
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h6 class="mb-0">Partially Identified Reactions <span class="badge badge-secondary">Sample</span></h6>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small">Some species in these reactions are identified, but not all. Identify remaining species to make these reactions usable.</p>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Equation</th>
+                                    <th>A</th>
+                                    <th>n</th>
+                                    <th>Ea</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for reaction in partial_examples %}
+                                <tr>
+                                    <td><code>{{ reaction.equation }}</code></td>
+                                    <td><small>{{ reaction.A }}</small></td>
+                                    <td><small>{{ reaction.n }}</small></td>
+                                    <td><small>{{ reaction.Ea }}</small></td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% if partially_identified > 10 %}
+                    <p class="text-muted small mb-0">Showing 10 of {{ partially_identified }} partially identified reactions</p>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Unidentified Reactions Examples -->
+            {% if unidentified_examples %}
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h6 class="mb-0">Unidentified Reactions <span class="badge badge-secondary">Sample</span></h6>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small">No species in these reactions are identified yet. These reactions cannot be used until species are identified.</p>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Equation</th>
+                                    <th>A</th>
+                                    <th>n</th>
+                                    <th>Ea</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for reaction in unidentified_examples %}
+                                <tr>
+                                    <td><code>{{ reaction.equation }}</code></td>
+                                    <td><small>{{ reaction.A }}</small></td>
+                                    <td><small>{{ reaction.n }}</small></td>
+                                    <td><small>{{ reaction.Ea }}</small></td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% if unidentified_reactions > 10 %}
+                    <p class="text-muted small mb-0">Showing 10 of {{ unidentified_reactions }} unidentified reactions</p>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Interpretation Guide -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h6 class="mb-0">Interpretation Guide</h6>
+                </div>
+                <div class="card-body">
+                    <h6>Usability Categories:</h6>
+                    <ul class="small">
+                        <li><strong>Fully Usable:</strong> All species in the reaction are identified and have thermodynamic data. These reactions can be used in simulations immediately.</li>
+                        <li><strong>Partially Identified:</strong> Some species are identified, but not all. Focus on identifying the remaining species to unlock these reactions.</li>
+                        <li><strong>Not Yet Usable:</strong> None of the species in the reaction are identified. These reactions are currently unavailable for simulations.</li>
+                    </ul>
+                    <h6 class="mt-3">Recommendations:</h6>
+                    <ul class="small">
+                        <li>Sort the species queue by <strong>"Most Important (by reactions)"</strong> to prioritize species that appear in many reactions.</li>
+                        <li>Identifying key species can dramatically increase mechanism coverage by unlocking multiple reactions at once.</li>
+                        <li>Aim for at least 80% coverage to ensure comprehensive mechanism representation in simulations.</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

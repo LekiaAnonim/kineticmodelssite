@@ -4,6 +4,7 @@ URL configuration for the importer dashboard
 
 from django.urls import path
 from . import views
+from . import species_views
 
 app_name = 'importer_dashboard'
 
@@ -21,6 +22,21 @@ urlpatterns = [
     path('job/<int:job_id>/console/', views.job_console_output_view, name='job_console_output'),
     path('job/<int:job_id>/error-log/', views.job_error_log_view, name='job_error_log'),
     path('job/<int:job_id>/interactive/', views.interactive_session, name='interactive_session'),
+    
+    # Species identification
+    path('job/<int:job_id>/species-queue/', species_views.species_queue, name='species_queue'),
+    path('job/<int:job_id>/species/<int:species_id>/', species_views.species_detail, name='species_detail'),
+    path('job/<int:job_id>/species/<int:species_id>/confirm/', species_views.confirm_match, name='confirm_match'),
+    path('job/<int:job_id>/species/<int:species_id>/block/', species_views.block_match, name='block_match'),
+    path('job/<int:job_id>/species/<int:species_id>/submit-smiles/', species_views.submit_smiles, name='submit_smiles'),
+    path('job/<int:job_id>/species/statistics/', species_views.species_statistics, name='species_statistics'),
+    path('job/<int:job_id>/species/auto-confirm/', species_views.auto_confirm_all, name='auto_confirm_all'),
+    path('job/<int:job_id>/species/sync-votes/', species_views.sync_votes_manual, name='sync_votes_manual'),
+    path('job/<int:job_id>/export/identifications/', species_views.export_identifications, name='export_identifications'),
+    path('job/<int:job_id>/export/blocked/', species_views.export_blocked, name='export_blocked'),
+    
+    # Mechanism analysis
+    path('job/<int:job_id>/mechanism-coverage/', views.mechanism_coverage, name='mechanism_coverage'),
     
     # Dashboard actions
     path('refresh-jobs/', views.refresh_jobs, name='refresh_jobs'),
