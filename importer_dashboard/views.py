@@ -984,8 +984,9 @@ def refresh_progress(request):
         # Auto-sync votes for running jobs
         from .incremental_sync import sync_job_votes_incremental
         synced_jobs = 0
-        synced_species = 0
+        synced_identified = 0
         synced_votes = 0
+        synced_candidates = 0
         
         dashboard_logger.info(
             "Starting vote synchronization for running jobs",
@@ -997,7 +998,7 @@ def refresh_progress(request):
             try:
                 # Check if we should sync (avoid syncing too frequently)
                 last_sync = job.sync_logs.filter(
-                    sync_type='incremental_votes',
+                    sync_type='votes',
                     success=True
                 ).order_by('-synced_at').first()
                 
@@ -1006,27 +1007,51 @@ def refresh_progress(request):
                     from django.utils import timezone
                     time_since_sync = (timezone.now() - last_sync.synced_at).total_seconds()
                     if time_since_sync < 300:  # 5 minutes
+                        dashboard_logger.info(
+                            f"Skipping {job.name} - synced {int(time_since_sync)}s ago",
+                            "dashboard"
+                        )
                         continue
+                
+                dashboard_logger.info(f"Syncing votes for {job.name}...", "dashboard")
                 
                 # Run incremental sync
                 result = sync_job_votes_incremental(job)
                 
-                if result.get('status') == 'success':
+                if result.get('success'):
                     synced_jobs += 1
-                    synced_species += result.get('species_synced', 0)
+                    synced_identified += result.get('identified_synced', 0)
                     synced_votes += result.get('votes_synced', 0)
+                    synced_candidates += result.get('votes_synced', 0)  # votes = candidates with votes
                     
-                    dashboard_logger.info(
+                    # Update job counters from sync results AND actual database counts
+                    job.refresh_from_db()
+                    job.total_species = result.get('total_species', 0)
+                    job.total_reactions = result.get('total_reactions', 0)
+                    job.identified_species = job.species.filter(identification_status='confirmed').count()
+                    job.processed_species = job.species.count()
+                    job.confirmed_species = job.identified_species
+                    job.save()
+                    
+                    dashboard_logger.success(
                         f"Synced votes for {job.name}",
                         "dashboard",
                         details={
                             'job': job.name,
-                            'species': result.get('species_synced', 0),
-                            'votes': result.get('votes_synced', 0)
+                            'identified': result.get('identified_synced', 0),
+                            'candidates': result.get('votes_synced', 0),
+                            'total_species': result.get('total_species', 0),
+                            'total_reactions': result.get('total_reactions', 0),
+                            'message': result.get('message', '')
                         }
                     )
+                else:
+                    dashboard_logger.warning(
+                        f"Sync returned no data for {job.name}: {result.get('message', 'Unknown error')}",
+                        "dashboard"
+                    )
             except Exception as e:
-                dashboard_logger.warning(
+                dashboard_logger.error(
                     f"Failed to sync votes for {job.name}: {str(e)}",
                     "dashboard",
                     details={'job': job.name, 'error': str(e)}
@@ -1036,7 +1061,7 @@ def refresh_progress(request):
             messages.success(
                 request, 
                 f'Refreshed progress for {updated_count} jobs. '
-                f'Synced {synced_species} species and {synced_votes} votes from {synced_jobs} jobs.'
+                f'Synced {synced_identified} identified species and {synced_candidates} candidates from {synced_jobs} jobs.'
             )
         else:
             messages.success(request, f'Refreshed progress for {updated_count} jobs')
@@ -1164,99 +1189,19 @@ def api_species_identify(request, job_id):
 @login_required
 def interactive_session(request, job_id):
     """
-        <!-- interactive_session.html -->
-    <div class="alert alert-info">
-        <strong>💡 New Feature:</strong> Try the 
-        <a href="{% url 'importer_dashboard:species_queue' job.id %}">
-            Modern Species Identification             # Update interactive_session view to link to new system
-            def interactive_session(request, job_id):
-                # ... existing code ...
-                
-                context = {
-                    'job': job,
-                    # Add suggestion to use new system
-                    'use_modern_ui': True,  
-                    'species_queue_url': reverse('importer_dashboard:species_queue', args=[job_id]),
-                    # ... rest of context ...
-                } session view for species identification
+    Legacy interactive session view - redirects to Species Queue
     
-    This provides a WebSocket-like interface for real-time interaction
-    with the importChemkin.py process.
+    The old interactive session required SSH tunnels to RMG's web server,
+    which is blocked by the cluster's Squid proxy. Use Species Queue instead,
+    which syncs data via SSH and provides a better identification workflow.
     """
-    job = get_object_or_404(ClusterJob, id=job_id)
-    
-    # Try to refresh progress if tunnel is active and data is stale
-    config = job.config or ImportJobConfig.objects.filter(is_default=True).first()
-    
-    # Check if host needs to be updated from SLURM
-    if job.status == 'running' and (not job.host or job.host == 'Pending...') and config:
-        try:
-            ssh_manager = SSHJobManager(config=config)
-            ssh_manager.refresh_statuses()
-            job.refresh_from_db()
-            logger.info(f"Refreshed job status for {job.name}, host is now: {job.host}")
-        except Exception as e:
-            logger.warning(f"Could not refresh job status for job {job.id}: {str(e)}")
-    
-    # Now try to fetch live progress if we have a valid host
-    if job.status == 'running' and job.host and job.host != 'Pending...' and config:
-        try:
-            ssh_manager = SSHJobManager(config=config) if 'ssh_manager' not in locals() else ssh_manager
-            progress = ssh_manager.get_progress_json(job)
-            if progress:
-                # Update job progress from live data
-                job.total_species = progress.get('total', 0)
-                job.identified_species = progress.get('confirmed', 0)
-                job.processed_species = progress.get('processed', 0)
-                job.confirmed_species = progress.get('confirmed', 0)
-                job.total_reactions = progress.get('totalreactions', 0)
-                job.unmatched_reactions = progress.get('unmatchedreactions', 0)
-                job.save()
-                logger.info(f"Updated progress for job {job.name}: {job.total_species} species")
-                
-                # Auto-sync species data to new Species model
-                try:
-                    from .species_utils import sync_species_from_cluster
-                    sync_result = sync_species_from_cluster(job, ssh_manager)
-                    if sync_result['success']:
-                        logger.info(f"Auto-synced species data for job {job.id}")
-                except Exception as sync_error:
-                    logger.warning(f"Could not auto-sync species for job {job.id}: {sync_error}")
-                    
-        except Exception as e:
-            logger.warning(f"Could not fetch live progress for job {job.id}: {str(e)}")
-    
-    # Get recent identifications
-    recent_identifications = SpeciesIdentification.objects.filter(
-        job=job
-    ).order_by('-created_at')[:20]
-    
-    # Calculate unidentified species
-    unidentified_count = max(0, job.total_species - job.identified_species) if job.total_species else 0
-    
-    # Mock pending species (in production, this would come from the job's progress.json)
-    # TODO: Fetch actual pending species from the job's web interface
-    pending_species = []
-    if unidentified_count > 0:
-        pending_species = [
-            {
-                'chemkin_label': f'species_{i}', 
-                'structure': None,
-                'note': 'Placeholder - connect to job interface for actual species'
-            }
-            for i in range(min(5, unidentified_count))
-        ]
-    
-    context = {
-        'job': job,
-        'recent_identifications': recent_identifications,
-        'pending_species': pending_species,
-        'tunnel_active': job.status == 'running' and job.host,
-        'unidentified_count': unidentified_count,
-        'page_title': f'Interactive Session: {job.name}',
-    }
-    
-    return render(request, 'importer_dashboard/interactive_session.html', context)
+    # Redirect to the modern Species Queue interface
+    messages.info(
+        request,
+        'The interactive session has been replaced with the Species Queue, '
+        'which works better with cluster firewall restrictions.'
+    )
+    return redirect('importer_dashboard:species_queue', job_id=job_id)
 
 
 @login_required

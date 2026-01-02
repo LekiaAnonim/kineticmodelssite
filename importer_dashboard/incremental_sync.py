@@ -85,14 +85,14 @@ class IncrementalVoteSync:
                 self.db_path = None
                 self.job_id = None
         
-    def check_remote_db_exists(self) -> bool:
+    def check_remote_db_exists(self):
         """Check if votes database exists on cluster"""
         if not self.db_path:
             return False
         stdout, stderr = self.ssh_manager.exec_command(f'test -f {self.db_path} && echo "EXISTS"')
         return 'EXISTS' in stdout
     
-    def get_remote_db_size(self) -> int:
+    def get_remote_db_size(self):
         """Get size of remote database in bytes"""
         if not self.db_path:
             return 0
@@ -102,7 +102,7 @@ class IncrementalVoteSync:
         except:
             return 0
     
-    def get_last_sync_time(self) -> Optional[str]:
+    def get_last_sync_time(self):
         """
         Get timestamp of last successful sync for this job
         
@@ -125,7 +125,58 @@ class IncrementalVoteSync:
             logger.warning(f"Could not get last sync time: {e}")
             return None
     
-    def get_updated_votes(self, since: Optional[str] = None) -> Dict:
+    def get_total_counts(self):
+        """
+        Get total counts from the remote database
+        
+        Returns:
+            Dictionary with total_species and total_reactions
+        """
+        result = {'total_species': 0, 'total_reactions': 0}
+        
+        try:
+            # Count total species from identified_species table (species that have been matched)
+            # Plus any remaining unmatched species in species_votes
+            identified_query = "SELECT COUNT(*) as count FROM identified_species"
+            cmd = f"""sqlite3 {self.db_path} -json '{identified_query}'"""
+            stdout, stderr = self.ssh_manager.exec_command(cmd)
+            
+            identified_count = 0
+            if stdout.strip():
+                data = json.loads(stdout)
+                if data and len(data) > 0:
+                    identified_count = data[0].get('count', 0)
+            
+            # Also count species_votes (candidates being voted on)
+            votes_query = "SELECT COUNT(*) as count FROM species_votes"
+            cmd = f"""sqlite3 {self.db_path} -json '{votes_query}'"""
+            stdout, stderr = self.ssh_manager.exec_command(cmd)
+            
+            votes_count = 0
+            if stdout.strip():
+                data = json.loads(stdout)
+                if data and len(data) > 0:
+                    votes_count = data[0].get('count', 0)
+            
+            # Total is the sum of identified + unidentified (in voting)
+            result['total_species'] = identified_count + votes_count
+            
+            # Count total reactions from voting_reactions table
+            reactions_query = "SELECT COUNT(DISTINCT chemkin_reaction_str) as count FROM voting_reactions"
+            cmd = f"""sqlite3 {self.db_path} -json '{reactions_query}'"""
+            stdout, stderr = self.ssh_manager.exec_command(cmd)
+            
+            if stdout.strip():
+                data = json.loads(stdout)
+                if data and len(data) > 0:
+                    result['total_reactions'] = data[0].get('count', 0)
+                    
+        except Exception as e:
+            logger.warning(f"Could not get total counts: {e}")
+        
+        return result
+    
+    def get_updated_votes(self, since: Optional[str] = None):
         """
         Query remote database for votes updated since timestamp
         
@@ -176,7 +227,7 @@ class IncrementalVoteSync:
             logger.debug(f"Raw output: {stdout[:500]}")
             return {'votes': [], 'count': 0}
     
-    def get_voting_reactions(self, species_vote_ids: List[int]) -> Dict:
+    def get_voting_reactions(self, species_vote_ids: List[int]):
         """
         Get voting reactions for specific species votes
         
@@ -224,7 +275,7 @@ class IncrementalVoteSync:
             logger.error(f"Failed to parse reactions JSON: {e}")
             return {}
     
-    def get_thermo_matches(self, species_vote_ids: List[int]) -> Dict:
+    def get_thermo_matches(self, species_vote_ids: List[int]):
         """
         Get thermo matches for specific species votes
         
@@ -276,7 +327,7 @@ class IncrementalVoteSync:
             logger.error(f"Failed to parse thermo matches JSON: {e}")
             return {}
     
-    def get_updated_identified_species(self, since: Optional[str] = None) -> Dict:
+    def get_updated_identified_species(self, since: Optional[str] = None):
         """Get identified species updated since timestamp"""
         if since:
             where_clause = f"WHERE identified_at > '{since}'"
@@ -312,7 +363,7 @@ class IncrementalVoteSync:
             logger.error(f"Failed to parse identified species JSON: {e}")
             return {'species': [], 'count': 0}
     
-    def get_updated_blocked_matches(self, since: Optional[str] = None) -> Dict:
+    def get_updated_blocked_matches(self, since: Optional[str] = None):
         """Get blocked matches updated since timestamp"""
         if since:
             where_clause = f"WHERE blocked_at > '{since}'"
@@ -346,7 +397,7 @@ class IncrementalVoteSync:
             return {'blocked': [], 'count': 0}
     
     def sync_votes_to_django(self, votes_data: List[Dict], reactions_data: Dict, 
-                            thermo_matches_data: Dict = None) -> int:
+                            thermo_matches_data: Dict = None):
         """
         Sync vote data to Django models
         
@@ -430,7 +481,7 @@ class IncrementalVoteSync:
         
         return synced_count
     
-    def sync_identified_species_to_django(self, species_data: List[Dict]) -> int:
+    def sync_identified_species_to_django(self, species_data: List[Dict]):
         """Sync identified species to Django models"""
         synced_count = 0
         
@@ -480,7 +531,7 @@ class IncrementalVoteSync:
         
         return synced_count
     
-    def sync_blocked_matches_to_django(self, blocked_data: List[Dict]) -> int:
+    def sync_blocked_matches_to_django(self, blocked_data: List[Dict]):
         """Sync blocked matches to Django models"""
         synced_count = 0
         
@@ -503,7 +554,7 @@ class IncrementalVoteSync:
                 try:
                     candidate = CandidateSpecies.objects.get(
                         species=species,
-                        rmg_species_index=rmg_species_index
+                        rmg_index=rmg_species_index
                     )
                     
                     # Mark as blocked
@@ -534,7 +585,7 @@ class IncrementalVoteSync:
         except Exception as e:
             logger.error(f"Failed to record sync: {e}")
     
-    def sync_incremental(self) -> Dict:
+    def sync_incremental(self):
         """
         Perform incremental sync of all data types
         
@@ -548,7 +599,9 @@ class IncrementalVoteSync:
             'identified_synced': 0,
             'blocked_synced': 0,
             'db_size': 0,
-            'incremental': False
+            'incremental': False,
+            'total_species': 0,
+            'total_reactions': 0
         }
         
         try:
@@ -560,6 +613,12 @@ class IncrementalVoteSync:
             # Get DB size for reporting
             result['db_size'] = self.get_remote_db_size()
             logger.info(f"Remote database size: {result['db_size']:,} bytes")
+            
+            # Get total counts from database
+            counts = self.get_total_counts()
+            result['total_species'] = counts['total_species']
+            result['total_reactions'] = counts['total_reactions']
+            logger.info(f"Database contains {result['total_species']} species, {result['total_reactions']} reactions")
             
             # Get last sync time
             last_sync = self.get_last_sync_time()
@@ -626,7 +685,7 @@ class IncrementalVoteSync:
         
         return result
     
-    def sync_full_fallback(self) -> Dict:
+    def sync_full_fallback(self):
         """
         Fallback: Download entire DB and read with VoteReader
         
@@ -689,7 +748,7 @@ class IncrementalVoteSync:
         return result
 
 
-def sync_job_votes_incremental(job: ClusterJob) -> Dict:
+def sync_job_votes_incremental(job: ClusterJob):
     """
     Convenience function to perform incremental sync for a job
     
