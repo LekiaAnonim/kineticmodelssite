@@ -78,47 +78,132 @@ class SSHJobManager:
         """
         Discover all possible import jobs on the cluster
         
-        Finds all directories with import.sh files and extracts port numbers.
+        Legacy behavior (see RMG-importer/dashboard_new.py) lists jobs by scanning
+        for import scripts that declare a port.
+
+        This method:
+        - Creates/updates a ClusterJob per model folder under root_path (port may be NULL)
+          so it can appear on the homepage as an "IDLE" job.
+        - Scans for import.sh files containing a port marker and assigns that port
+          to the corresponding job.
         """
-        command = f'find {self.config.root_path} -name import.sh | xargs grep port'
-        stdout, stderr = self.exec_command(command)
-        
         discovered_jobs = []
+
+        def _looks_like_model_dir(name: str, ssh_abs_path: str) -> bool:
+            """Heuristic filter to keep non-model directories off the dashboard."""
+            if not name:
+                return False
+            # Hidden/system dirs
+            if name.startswith('.'):
+                return False
+            # Common non-model folders
+            if name in {
+                '__pycache__',
+                'archive',
+                'archives',
+                'backup',
+                'backups',
+                'tmp',
+                'temp',
+                'logs',
+                'log',
+            }:
+                return False
+
+            # Fast positive: has import.sh
+            stdout, _ = self.exec_command(f'test -f "{ssh_abs_path}/import.sh" && echo yes || echo no')
+            if stdout.strip() == 'yes':
+                return True
+
+            # Otherwise require at least one common RMG model marker.
+            marker_cmd = (
+                f'test -f "{ssh_abs_path}/input.py" && echo yes || '
+                f'test -f "{ssh_abs_path}/RMG-Py-output/RMG.log" && echo yes || '
+                f'test -f "{ssh_abs_path}/chemkin/chem_annotated.inp" && echo yes || '
+                f'test -f "{ssh_abs_path}/chemkin/chem.inp" && echo yes || '
+                f'test -f "{ssh_abs_path}/chemkin/chem_annotated.inp" && echo yes || '
+                f'echo no'
+            )
+            stdout, _ = self.exec_command(marker_cmd)
+            return stdout.strip() == 'yes'
+
+        # 1) First, create "possible jobs" from *all* immediate subfolders.
+        # We treat each subfolder as a potential model import job.
+        list_dirs_cmd = f"find {self.config.root_path} -mindepth 1 -maxdepth 1 -type d"
+        dirs_stdout, dirs_stderr = self.exec_command(list_dirs_cmd)
+        if dirs_stderr.strip():
+            logger.warning(f"Directory listing stderr: {dirs_stderr.strip()}")
+
+        for abs_path in sorted([p.strip() for p in dirs_stdout.splitlines() if p.strip()]):
+            name = abs_path.replace(self.config.root_path, '').lstrip('/')
+            if not _looks_like_model_dir(name=name, ssh_abs_path=abs_path):
+                continue
+            job, created = ClusterJob.objects.get_or_create(
+                name=name,
+                config=self.config,
+                defaults={
+                    'status': ImportJobStatus.IDLE,
+                }
+            )
+            discovered_jobs.append(job)
+            if created:
+                logger.info(f"Discovered possible job folder: {job.name}")
+
+        # 2) Then, scan import.sh files for ports and attach them to the matching folder job.
+        port_scan_cmd = f'find {self.config.root_path} -name import.sh | xargs grep port'
+        ports_stdout, ports_stderr = self.exec_command(port_scan_cmd)
+        if ports_stderr.strip():
+            # xargs may emit stderr if there are no import.sh files; don't hard-fail.
+            logger.debug(f"Port scan stderr: {ports_stderr.strip()}")
+
         ports_by_path = {}
-        
-        for line in stdout.splitlines():
+        for line in ports_stdout.splitlines():
             match = re.match(r"(.*)/import.sh", line)
             if not match:
                 continue
-            
             path = match.group(1)
-            
+
             # Extract port from various formats
             port_match = re.search(r'#SBATCH --job-name=port(\d+)', line)
             if not port_match:
                 port_match = re.search(r'#BSUB -J port(\d+)', line)
             if not port_match:
                 port_match = re.search(r'--port (\d+)', line)
-            
-            if port_match:
-                port = int(port_match.group(1))
-                ports_by_path[path] = port
-        
-        # Create or update job records
-        for path, port in ports_by_path.items():
-            job, created = ClusterJob.objects.get_or_create(
-                port=port,
+            if not port_match:
+                continue
+
+            ports_by_path[path] = int(port_match.group(1))
+
+        for abs_path, port in ports_by_path.items():
+            name = abs_path.replace(self.config.root_path, '').lstrip('/')
+
+            # Exclude hidden/system directories that can sneak in (e.g. a dumped .git folder)
+            # and are not real import jobs.
+            if not name or name.startswith('.'):
+                continue
+
+            job, _ = ClusterJob.objects.get_or_create(
+                name=name,
+                config=self.config,
                 defaults={
-                    'name': path.replace(self.config.root_path, ''),
-                    'config': self.config,
-                    'status': ImportJobStatus.IDLE,  # Discovered but not started
+                    'status': ImportJobStatus.IDLE,
                 }
             )
-            discovered_jobs.append(job)
-            
-            if created:
-                logger.info(f"Discovered new job: {job.name} on port {port}")
-        
+
+            # Try to set the port (and keep ports unique).
+            if job.port != port:
+                if ClusterJob.objects.filter(config=self.config, port=port).exclude(pk=job.pk).exists():
+                    logger.warning(
+                        f"Port {port} appears to be in use by another job; won't assign it to {job.name}"
+                    )
+                else:
+                    job.port = port
+                    job.save(update_fields=['port'])
+                    logger.info(f"Assigned port {port} to job {job.name}")
+
+            if job not in discovered_jobs:
+                discovered_jobs.append(job)
+
         return discovered_jobs
     
     def update_running_jobs_status(self):
@@ -321,6 +406,13 @@ class SSHJobManager:
             return f"Console output not found: {output_path}\n\nThis file is created when the job starts on the cluster."
         
         return stdout
+
+    def get_console_output(self, job: ClusterJob, lines: int = 500):
+        """Get console output (output.log) for a job.
+
+        The UI expects this method name.
+        """
+        return self.get_output_tail(job, lines=lines)
     
     def get_error_log(self, job: ClusterJob):
         """Get the error log for a job (SLURM stderr)"""
@@ -336,33 +428,98 @@ class SSHJobManager:
     
     def get_progress_json(self, job: ClusterJob):
         """
-        Get progress information from the job's web interface
-        
-        Note: This requires the job to be running and port forwarding to be set up.
+        Get progress information from the job's web interface.
+
+        New (preferred): fetch via Open OnDemand (OOD):
+            {ood_base_url}/{host}/{port}/progress.json
+
+        Legacy (fallback): fetch via localhost tunnel:
+            http://localhost:{port}/progress.json
         """
-        try:
-            import urllib.request
-            import urllib.error
-            url = f'http://localhost:{job.port}/progress.json'
-            logger.info(f"Attempting to fetch progress from {url} for job {job.name} (tunnel_active={job.tunnel_active})")
-            
-            with urllib.request.urlopen(url, timeout=5) as response:
-                data = json.loads(response.read().decode('utf-8'))
-                logger.info(f"Successfully fetched progress for job {job.name}: {data}")
-                return data
-        except urllib.error.URLError as e:
-            # Check if it's a ConnectionResetError (RMG web server not ready yet)
-            if 'Connection reset' in str(e) or 'Connection refused' in str(e):
-                logger.info(f"RMG web server not ready yet for job {job.name} on {job.host}:{job.port} - job may still be initializing")
-            else:
-                logger.warning(f"URLError fetching progress for job {job.name} at {url}: {str(e)}")
-            return None
-        except ConnectionResetError as e:
-            logger.info(f"RMG web server not ready yet for job {job.name} - connection reset. Job is likely still initializing.")
-            return None
-        except Exception as e:
-            logger.warning(f"Could not fetch progress for job {job.name} at {url}: {type(e).__name__}: {str(e)}")
-            return None
+        import urllib.request
+        import urllib.error
+        import ssl
+
+        # Prefer OOD if configured and host is known
+        ood_url = getattr(job, 'ood_url', None)
+        timeout = getattr(job.config, 'ood_timeout_seconds', 5) if job.config else 5
+
+        # SSL handling for OOD HTTPS requests
+        ssl_context = None
+        extra_headers = {}
+        if job.config:
+            ca_bundle = getattr(job.config, 'ood_ca_bundle', '') or ''
+            allow_insecure = bool(getattr(job.config, 'ood_allow_insecure_ssl', False))
+
+            # Optional additional headers for OOD auth (e.g., Cookie)
+            raw_headers = (getattr(job.config, 'ood_request_headers', '') or '').strip()
+            if raw_headers:
+                for line in raw_headers.splitlines():
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if ':' not in line:
+                        continue
+                    name, value = line.split(':', 1)
+                    extra_headers[name.strip()] = value.strip()
+
+            if allow_insecure:
+                ssl_context = ssl._create_unverified_context()
+            elif ca_bundle:
+                ssl_context = ssl.create_default_context(cafile=ca_bundle)
+
+        urls_to_try = []
+        if ood_url:
+            urls_to_try.append(ood_url + 'progress.json')
+        # Fallback for older tunnel-based setups
+        urls_to_try.append(f'http://localhost:{job.port}/progress.json')
+
+        last_error = None
+        for url in urls_to_try:
+            try:
+                logger.info(
+                    f"Attempting to fetch progress from {url} for job {job.name} "
+                    f"(host={job.host}, port={job.port}, tunnel_active={job.tunnel_active})"
+                )
+                request_kwargs = {'timeout': timeout}
+                # Only apply custom SSL context for HTTPS (OOD). HTTP tunnel doesn't need it.
+                if url.startswith('https://') and ssl_context is not None:
+                    request_kwargs['context'] = ssl_context
+
+                request_obj = url
+                if url.startswith('https://') and extra_headers:
+                    request_obj = urllib.request.Request(url, headers=extra_headers)
+
+                with urllib.request.urlopen(request_obj, **request_kwargs) as response:
+                    data = json.load(response)
+                    logger.info(f"Successfully fetched progress for job {job.name}: {data}")
+                    return data
+            except urllib.error.URLError as e:
+                last_error = e
+                # Connection errors are expected while job initializes
+                if 'Connection reset' in str(e) or 'Connection refused' in str(e):
+                    logger.info(
+                        f"Progress endpoint not ready for job {job.name} at {url} "
+                        f"(job may still be initializing): {e}"
+                    )
+                else:
+                    logger.warning(f"URLError fetching progress for job {job.name} at {url}: {e}")
+            except ConnectionResetError as e:
+                last_error = e
+                logger.info(
+                    f"Progress endpoint not ready for job {job.name} at {url} (connection reset): {e}"
+                )
+            except json.JSONDecodeError as e:
+                last_error = e
+                logger.warning(f"Invalid JSON from progress endpoint for job {job.name} at {url}: {e}")
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"Could not fetch progress for job {job.name} at {url}: {type(e).__name__}: {e}"
+                )
+
+        logger.info(f"All progress endpoints failed for job {job.name}. Last error: {last_error}")
+        return None
     
     def refresh_all_progress(self):
         """

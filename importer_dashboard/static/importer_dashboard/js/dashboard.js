@@ -187,3 +187,11 @@ document.addEventListener('DOMContentLoaded', function() {
 // Export for use in templates
 window.Dashboard = Dashboard;
 window.confirmAction = Dashboard.confirmAction.bind(Dashboard);
+
+// Compatibility shim: some legacy dashboard pages referenced `set_timeout`.
+// Forward it to the standard `setTimeout` to avoid runtime ReferenceErrors.
+if (typeof window.set_timeout === 'undefined') {
+    window.set_timeout = function(fn, delay) {
+        return window.setTimeout(fn, delay);
+    };
+}

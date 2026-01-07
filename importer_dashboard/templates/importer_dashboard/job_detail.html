@@ -5,260 +5,385 @@
 
 {% block content %}
 <script>
-    // Add dashboard-page class to body for CSS styling
     document.body.classList.add('dashboard-page');
 </script>
 
 <div class="dashboard-container">
-<div class="job-header">
-    <div>
-        <div class="job-title">{{ job.name }}</div>
-        <span class="status-badge status-{{ job.status|lower }}">
-            {{ job.get_status_display }}
-        </span>
+    <!-- Header -->
+    <div class="job-header">
+        <div>
+            <div class="job-title">{{ job.name }}</div>
+            <span class="status-badge status-{{ job.status|lower }}">
+                {{ job.get_status_display }}
+            </span>
+        </div>
+        <div class="job-actions">
+            <a href="{% url 'importer_dashboard:index' %}" class="btn btn-secondary">← Back to Dashboard</a>
+            {% if job.status == 'running' or job.status == 'pending' %}
+                <form method="post" action="{% url 'importer_dashboard:job_kill' job.id %}" style="display: inline;">
+                    {% csrf_token %}
+                    <button type="submit" class="btn btn-danger" onclick="return confirm('Kill this job?')">Kill Job</button>
+                </form>
+            {% else %}
+                <form method="post" action="{% url 'importer_dashboard:job_start' job.id %}" style="display: inline;">
+                    {% csrf_token %}
+                    <button type="submit" class="btn btn-success">Start Job</button>
+                </form>
+            {% endif %}
+            {% comment %} <a href="{% url 'importer_dashboard:species_queue' job.id %}" class="btn btn-primary">Species Queue</a> {% endcomment %}
+        </div>
     </div>
-    <div class="job-actions">
-        <a href="{% url 'importer_dashboard:index' %}" class="btn btn-secondary">
-            ← Back to Dashboard
-        </a>
-        
-        {% if job.status == 'running' or job.status == 'pending' %}
-            <form method="post" action="{% url 'importer_dashboard:job_kill' job.id %}" style="display: inline;">
-                {% csrf_token %}
-                <button type="submit" class="btn btn-danger" 
-                        onclick="return confirm('Are you sure you want to kill this job?')">
-                    Kill Job
-                </button>
-            </form>
-        {% else %}
-            <form method="post" action="{% url 'importer_dashboard:job_start' job.id %}" style="display: inline;">
-                {% csrf_token %}
-                <button type="submit" class="btn btn-success">
-                    Start Job
-                </button>
-            </form>
-        {% endif %}
-        
-        {% if job.status == 'running' and job.host %}
-            <a href="{% url 'importer_dashboard:interactive_session' job.id %}" class="btn btn-primary">
-                <svg class="btn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
-                    <line x1="8" y1="21" x2="16" y2="21"></line>
-                    <line x1="12" y1="17" x2="12" y2="21"></line>
-                </svg>
-                Interactive Session
-            </a>
-            <a href="{% url 'importer_dashboard:species_queue' job.id %}" class="btn btn-info">
-                <svg class="btn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
-                    <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                </svg>
-                Identify Species
-            </a>
-        {% endif %}
-    </div>
-</div>
 
-{% if progress_status %}
-<div class="alert alert-{{ progress_status.type }}" style="margin: 20px 0;">
-    <div style="display: flex; align-items: center; justify-content: space-between;">
-        <div style="display: flex; align-items: center; gap: 10px;">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="8" x2="12" y2="12"></line>
-                <line x1="12" y1="16" x2="12.01" y2="16"></line>
-            </svg>
-            <span>{{ progress_status.message }}</span>
-        </div>
-        {% if job.status == 'running' %}
-        <button class="btn btn-secondary btn-small" onclick="location.reload()">
-            <svg class="btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="23 4 23 10 17 10"></polyline>
-                <polyline points="1 20 1 14 7 14"></polyline>
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-            </svg>
-            Refresh Progress
-        </button>
-        {% endif %}
-    </div>
-</div>
-{% endif %}
-
-<div class="stats-grid">
-    <div class="stat-card">
-        <div class="value">{{ job.total_species|default:"0" }}</div>
-        <div class="label">Total Species</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ job.processed_species|default:"0" }}</div>
-        <div class="label">Processed</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ job.identified_species|default:"0" }}</div>
-        <div class="label">Identified</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ job.confirmed_species|default:"0" }}</div>
-        <div class="label">Confirmed</div>
-    </div>
-    <div class="stat-card">
-        <div class="value" id="unidentified-count">0</div>
-        <div class="label">Unidentified</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ job.total_reactions|default:"0" }}</div>
-        <div class="label">Total Reactions</div>
-    </div>
-</div>
-
-<div class="card">
-    <h2>Job Details</h2>
-    <div class="detail-grid">
-        <div class="detail-item">
-            <div class="detail-label">Job Name</div>
-            <div class="detail-value">{{ job.name }}</div>
-        </div>
-        <div class="detail-item">
-            <div class="detail-label">Port</div>
-            <div class="detail-value">{{ job.port|default:"Not assigned" }}</div>
-        </div>
-        <div class="detail-item">
-            <div class="detail-label">SLURM Job ID</div>
-            <div class="detail-value">{{ job.slurm_job_id|default:"Not running" }}</div>
-        </div>
-        <div class="detail-item">
-            <div class="detail-label">Compute Node</div>
-            <div class="detail-value">{{ job.host|default:"Not assigned" }}</div>
-        </div>
-        <div class="detail-item">
-            <div class="detail-label">Created</div>
-            <div class="detail-value">{{ job.created_at|date:"Y-m-d H:i" }}</div>
-        </div>
-        <div class="detail-item">
-            <div class="detail-label">Last Updated</div>
-            <div class="detail-value">{{ job.updated_at|date:"Y-m-d H:i" }}</div>
-        </div>
-    </div>
-    
-    {% if job.total_species and job.total_species > 0 %}
-    <h3>Overall Progress</h3>
-    <div class="progress-bar" id="progress-{{ job.id }}" style="height: 30px;">
-        <div class="progress-fill" style="width: {{ job.progress_percentage }}%; font-size: 14px;">
-            {{ job.progress_percentage|floatformat:1 }}% ({{ job.processed_species }}/{{ job.total_species }})
-        </div>
+    {% if progress_status %}
+    <div class="alert alert-{{ progress_status.type }}" style="margin: 20px 0;">
+        {{ progress_status.message }}
     </div>
     {% endif %}
-</div>
 
-{% if identifications %}
-<div class="card">
-    <h2>Species Identifications ({{ identifications|length }})</h2>
-    <div class="species-table">
-        <table>
+    <!-- Statistics Cards -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-value">{{ job.total_species }}</div>
+            <div class="stat-label">Total Species</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.identified_species }}</div>
+            <div class="stat-label">Identified</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ job.processed_species }}</div>
+            <div class="stat-label">Processed</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.unidentified_species }}</div>
+            <div class="stat-label">Unidentified</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.total_candidates }}</div>
+            <div class="stat-label">Candidates</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.total_votes }}</div>
+            <div class="stat-label">Total Votes</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.blocked_matches }}</div>
+            <div class="stat-label">Blocked</div>
+        </div>
+    </div>
+
+    <!-- Job Details -->
+    <div class="section">
+        <h3>Job Details</h3>
+        <table class="details-table">
+            <tr><th>Name</th><td>{{ job.name }}</td></tr>
+            <tr><th>Port</th><td>{{ job.port|default:"Not assigned" }}</td></tr>
+            <tr><th>SLURM Job ID</th><td>{{ job.slurm_job_id|default:"N/A" }}</td></tr>
+            <tr><th>Host</th><td>{{ job.host|default:"Pending..." }}</td></tr>
+            <tr><th>Status</th><td>{{ job.get_status_display }}</td></tr>
+            <tr><th>Created</th><td>{{ job.created_at }}</td></tr>
+            <tr><th>Started by</th><td>{{ job.started_by|default:"N/A" }}</td></tr>
+            <tr><th>Started</th><td>{{ job.started_at|default:"Not started" }}</td></tr>
+            <tr><th>Last Updated</th><td>{{ job.updated_at }}</td></tr>
+        </table>
+    </div>
+
+    <!-- Species List with All Related Data -->
+    <div class="section">
+        <h3>Species ({{ species_list.count }})</h3>
+        {% if species_list %}
+        <div class="species-accordion">
+            {% for species in species_list %}
+            <div class="species-item" style="border: 1px solid #ddd; margin: 10px 0; border-radius: 8px;">
+                <div class="species-header" style="padding: 15px; background: #f8f9fa; cursor: pointer;"
+                     onclick="toggleSpecies({{ species.id }})">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <strong>{{ species.chemkin_label }}</strong>
+                            <span style="color: #666; margin-left: 10px;">{{ species.formula }}</span>
+                            {% if species.smiles %}
+                            <code style="margin-left: 10px; font-size: 0.85em;">{{ species.smiles }}</code>
+                            {% endif %}
+                        </div>
+                        <div>
+                            <span class="badge badge-{{ species.identification_status }}">
+                                {{ species.get_identification_status_display }}
+                            </span>
+                            <span class="badge" style="background: #6c757d; color: white;">
+                                {{ species.candidates.count }} candidates
+                            </span>
+                            <span class="badge" style="background: #17a2b8; color: white;">
+                                {{ species.vote_candidates.count }} votes
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div id="species-{{ species.id }}" class="species-details" style="display: none; padding: 15px; border-top: 1px solid #ddd;">
+                    <!-- Species Info -->
+                    <div class="detail-section">
+                        <h5>Species Info</h5>
+                        <table class="mini-table">
+                            <tr><th>RMG Label</th><td>{{ species.rmg_label|default:"N/A" }}</td></tr>
+                            <tr><th>RMG Index</th><td>{{ species.rmg_index|default:"N/A" }}</td></tr>
+                            <tr><th>SMILES</th><td><code>{{ species.smiles|default:"N/A" }}</code></td></tr>
+                            <tr><th>Enthalpy Discrepancy</th><td>{{ species.enthalpy_discrepancy|default:"N/A" }} kJ/mol</td></tr>
+                            <tr><th>Identification Method</th><td>{{ species.identification_method|default:"N/A" }}</td></tr>
+                            <tr><th>Identified By</th><td>{{ species.identified_by|default:"Auto" }}</td></tr>
+                        </table>
+                    </div>
+
+
+                    <!-- Candidate Species -->
+                    {% if species.candidates.count > 0 %}
+                    <div class="detail-section" style="margin-top: 15px;">
+                        <h5>Candidate Species ({{ species.candidates.count }})</h5>
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>RMG Label</th>
+                                    <th>SMILES</th>
+                                    <th>ΔH (kJ/mol)</th>
+                                    <th>Votes</th>
+                                    <th>Unique Votes</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for candidate in species.candidates.all %}
+                                <tr class="{% if candidate.is_confirmed %}confirmed{% elif candidate.is_blocked %}blocked{% endif %}">
+                                    <td>{{ candidate.rmg_label }}</td>
+                                    <td><code>{{ candidate.smiles }}</code></td>
+                                    <td>{{ candidate.enthalpy_discrepancy|floatformat:6|default:"N/A" }}</td>
+                                    <td>{{ candidate.vote_count }}</td>
+                                    <td>{{ candidate.unique_vote_count }}</td>
+                                    <td>
+                                        {% if candidate.is_confirmed %}
+                                        <span class="badge badge-success">✓ Confirmed</span>
+                                        {% elif candidate.is_blocked %}
+                                        <span class="badge badge-danger">✗ Blocked</span>
+                                        {% else %}
+                                        <span class="badge badge-secondary">Pending</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% endif %}
+
+                    <!-- Vote Candidates -->
+                    {% if species.vote_candidates.count > 0 %}
+                    <div class="detail-section" style="margin-top: 15px;">
+                        <h5>Vote Candidates ({{ species.vote_candidates.count }})</h5>
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>RMG Index</th>
+                                    <th>SMILES</th>
+                                    <th>Vote Count</th>
+                                    <th>Reactions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for vc in species.vote_candidates.all %}
+                                <tr>
+                                    <td>{{ vc.rmg_index }}</td>
+                                    <td><code>{{ vc.smiles }}</code></td>
+                                    <td>{{ vc.vote_count }}</td>
+                                    <td>
+                                        {% for reaction in vc.voting_reactions.all|slice:":3" %}
+                                        <div style="font-size: 0.8em; margin: 2px 0;">
+                                            {{ reaction.chemkin_reaction|truncatechars:50 }}
+                                            {% if reaction.family %}<span class="badge">{{ reaction.family }}</span>{% endif %}
+                                        </div>
+                                        {% endfor %}
+                                        {% if vc.voting_reactions.count > 3 %}
+                                        <em>...and {{ vc.voting_reactions.count|add:"-3" }} more</em>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% endif %}
+
+                    <!-- Thermo Matches -->
+                    {% if species.thermo_matches.count > 0 %}
+                    <div class="detail-section" style="margin-top: 15px;">
+                        <h5>Thermo Library Matches ({{ species.thermo_matches.count }})</h5>
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Library</th>
+                                    <th>Species Name</th>
+                                    <th>Name Match</th>
+                                    <th>Candidate</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for tm in species.thermo_matches.all %}
+                                <tr>
+                                    <td>{{ tm.library_name }}</td>
+                                    <td>{{ tm.library_species_name }}</td>
+                                    <td>{% if tm.name_matches %}✓ Yes{% else %}No{% endif %}</td>
+                                    <td>{{ tm.candidate.rmg_label }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% endif %}
+
+                    <!-- Votes -->
+                    {% if species.votes.count > 0 %}
+                    <div class="detail-section" style="margin-top: 15px;">
+                        <h5>Reaction Votes ({{ species.votes.count }})</h5>
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Candidate</th>
+                                    <th>Chemkin Reaction</th>
+                                    <th>RMG Reaction</th>
+                                    <th>Family</th>
+                                    <th>Unique</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for vote in species.votes.all|slice:":10" %}
+                                <tr>
+                                    <td>{{ vote.candidate.rmg_label }}</td>
+                                    <td style="font-size: 0.85em;">{{ vote.chemkin_reaction|truncatechars:40 }}</td>
+                                    <td style="font-size: 0.85em;">{{ vote.rmg_reaction|truncatechars:40 }}</td>
+                                    <td><span class="badge">{{ vote.rmg_reaction_family }}</span></td>
+                                    <td>{% if vote.is_unique %}✓{% else %}✗{% endif %}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                        {% if species.votes.count > 10 %}
+                        <p><em>Showing first 10 of {{ species.votes.count }} votes</em></p>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="empty-message">No species data yet. Data will appear once RMG starts processing.</p>
+        {% endif %}
+    </div>
+
+    <!-- Species Identifications -->
+    <div class="section">
+        <h3>Species Identifications ({{ identified_species_list.count }})</h3>
+        {% if identified_species_list %}
+        <table class="data-table">
             <thead>
                 <tr>
                     <th>Chemkin Label</th>
                     <th>SMILES</th>
-                    <th>Identified At</th>
+                    <th>RMG Label</th>
+                    <th>RMG Index</th>
+                    <th>ΔH (kJ/mol)</th>
+                    <th>Method</th>
+                    <th>Identified By</th>
                 </tr>
             </thead>
             <tbody>
-                {% for species in identifications %}
+                {% for species in identified_species_list %}
                 <tr>
-                    <td><code>{{ species.chemkin_label }}</code></td>
+                    <td><strong>{{ species.chemkin_label }}</strong></td>
                     <td><code>{{ species.smiles }}</code></td>
-                    <td>{{ species.identified_at|date:"Y-m-d H:i:s" }}</td>
+                    <td>{{ species.rmg_label|default:"N/A" }}</td>
+                    <td>{{ species.rmg_index|default:"N/A" }}</td>
+                    <td>{{ species.enthalpy_discrepancy|floatformat:2|default:"N/A" }}</td>
+                    <td><span class="badge">{{ species.identification_method|default:"auto" }}</span></td>
+                    <td>{{ species.identified_by|default:"Auto" }}</td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
+        {% else %}
+        <p class="empty-message">No species identifications recorded yet.</p>
+        {% endif %}
     </div>
+
+    <!-- Blocked Matches -->
+    <div class="section">
+        <h3>Blocked Matches ({{ blocked_matches.count }})</h3>
+        {% if blocked_matches %}
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Chemkin Label</th>
+                    <th>SMILES</th>
+                    <th>RMG Label</th>
+                    <th>Blocked By</th>
+                    <th>Reason</th>
+                    <th>Date</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for bm in blocked_matches %}
+                <tr>
+                    <td>{{ bm.chemkin_label }}</td>
+                    <td><code>{{ bm.smiles }}</code></td>
+                    <td>{{ bm.rmg_label|default:"N/A" }}</td>
+                    <td>{{ bm.blocked_by|default:"Unknown" }}</td>
+                    <td>{{ bm.reason|default:"No reason given" }}</td>
+                    <td>{{ bm.created_at|date:"Y-m-d H:i" }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="empty-message">No blocked matches.</p>
+        {% endif %}
+    </div>
+
 </div>
-{% endif %}
-</div> <!-- Close dashboard-container -->
 
 <script>
-    function showLogTab(tabName) {
-        // Hide all tabs
-        document.querySelectorAll('.log-content').forEach(tab => {
-            tab.classList.remove('active');
-        });
-        document.querySelectorAll('.log-tab').forEach(btn => {
-            btn.classList.remove('active');
-        });
-        
-        // Show selected tab
-        document.getElementById(tabName).classList.add('active');
-        event.target.classList.add('active');
+function toggleSpecies(speciesId) {
+    const details = document.getElementById('species-' + speciesId);
+    if (details.style.display === 'none') {
+        details.style.display = 'block';
+    } else {
+        details.style.display = 'none';
     }
-    
-    function refreshLog(logType) {
-        const jobId = {{ job.id }};
-        let url, targetId;
-        
-        switch(logType) {
-            case 'console':
-                url = `/importer/job/${jobId}/console/`;
-                targetId = 'console-output-content';
-                break;
-            case 'rmg':
-                url = `/importer/job/${jobId}/log/`;
-                targetId = 'rmg-log-content';
-                break;
-            case 'error':
-                url = `/importer/job/${jobId}/error-log/`;
-                targetId = 'error-log-content';
-                break;
-            default:
-                return;
-        }
-        
-        fetch(url)
-            .then(response => response.text())
-            .then(html => {
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(html, 'text/html');
-                const logContent = doc.querySelector('.log-viewer');
-                if (logContent) {
-                    document.getElementById(targetId).innerHTML = logContent.innerHTML;
-                }
-            })
-            .catch(error => {
-                console.error('Error refreshing log:', error);
-                document.getElementById(targetId).innerHTML = 
-                    `<span style="color: #dc3545;">Error loading log: ${error.message}</span>`;
-            });
-    }
-    
-    // Load logs on page load
-    window.addEventListener('DOMContentLoaded', () => {
-        refreshLog('console');
-        refreshLog('rmg');
-        refreshLog('error');
-        
-        // Calculate unidentified species
-        const total = {{ job.total_species|default:0 }};
-        const identified = {{ job.identified_species|default:0 }};
-        const unidentified = Math.max(0, total - identified);
-        document.getElementById('unidentified-count').textContent = unidentified;
-    });
-    
-    // Auto-refresh every 15 seconds if job is running
-    {% if job.status == 'running' %}
-    setInterval(() => {
-        refreshLog('console');
-        refreshLog('rmg');
-    }, 15000);
-    
-    // If tunnel is active but no progress data, refresh page every 30 seconds to check for updates
-    {% if job.tunnel_active and job.total_species == 0 %}
-    console.log("RMG web server not ready yet. Auto-refreshing every 30 seconds...");
-    setInterval(() => {
-        location.reload();
-    }, 30000); // Refresh page every 30 seconds
-    {% endif %}
-    {% endif %}
+}
 </script>
 
+<style>
+.section { margin: 30px 0; }
+.section h3 { border-bottom: 2px solid #007bff; padding-bottom: 10px; }
+.stat-card { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center; }
+.stat-value { font-size: 2em; font-weight: bold; color: #007bff; }
+.stat-label { color: #666; margin-top: 5px; }
+.details-table, .mini-table { width: 100%; border-collapse: collapse; }
+.details-table th, .mini-table th { text-align: left; padding: 8px; background: #f8f9fa; width: 200px; }
+.details-table td, .mini-table td { padding: 8px; border-bottom: 1px solid #eee; }
+.data-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+.data-table th { background: #343a40; color: white; padding: 10px; text-align: left; }
+.data-table td { padding: 8px; border-bottom: 1px solid #ddd; }
+.data-table tr:hover { background: #f5f5f5; }
+.badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 0.8em; background: #6c757d; color: white; }
+.badge-success { background: #28a745; }
+.badge-danger { background: #dc3545; }
+.badge-warning { background: #ffc107; color: #333; }
+.badge-info { background: #17a2b8; }
+.badge-secondary { background: #6c757d; }
+.badge-confirmed { background: #28a745; }
+.badge-processed { background: #17a2b8; }
+.badge-unidentified { background: #dc3545; }
+.badge-tentative { background: #ffc107; color: #333; }
+.empty-message { color: #666; font-style: italic; padding: 20px; text-align: center; background: #f8f9fa; border-radius: 8px; }
+tr.confirmed { background: #d4edda; }
+tr.blocked { background: #f8d7da; }
+.detail-section h5 { color: #495057; margin-bottom: 10px; border-left: 3px solid #007bff; padding-left: 10px; }
+</style>
 {% endblock %}

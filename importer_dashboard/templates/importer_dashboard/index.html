@@ -5,13 +5,6 @@
 {% block header_subtitle %}Job Management and Monitoring{% endblock %}
 
 {% block content %}
-<!-- Initialize log viewer namespace early -->
-<script>
-    // Create namespace immediately to prevent "not defined" errors
-    window.LogViewer = window.LogViewer || {};
-    window.LogViewer.version = '1.0.1'; // Increment to force cache refresh
-    console.log('LogViewer namespace initialized v' + window.LogViewer.version);
-</script>
 
 <div id="auto-refresh-enabled"></div>
 
@@ -40,7 +33,7 @@
     </a>
 </div>
 
-<div class="stats-grid">
+{% comment %} <div class="stats-grid">
     <div class="stat-card">
         <div class="stat-content">
             <div class="value">{{ stats.total_jobs }}</div>
@@ -77,7 +70,7 @@
             <div class="label">Failed</div>
         </div>
     </div>
-</div>
+</div> {% endcomment %}
 
 <div class="card">
     <h2>Import Jobs</h2>
@@ -92,7 +85,7 @@
                 <th>Job #</th>
                 <th>Job</th>
                 <th>Host</th>
-                <th>Tunnel</th>
+                <th>Web</th>
                 <th>Log</th>
                 <th>Errors</th>
                 <th title="Processed Species">Pr.</th>
@@ -129,10 +122,10 @@
                         {% if job.host == 'Pending...' %}
                             <a href="{% url 'importer_dashboard:refresh_jobs' %}">refresh</a>
                         {% else %}
-                            {% if job.tunnel_active %}
-                                <a href="http://localhost:{{ job.port }}" target="_blank">open</a>
+                            {% if job.ood_url %}
+                                <a href="{{ job.ood_url }}" target="_blank">open</a>
                             {% else %}
-                                <span title="Start tunnel manager: python manage.py run_tunnels">connect</span>
+                                <span title="Compute node not assigned yet">-</span>
                             {% endif %}
                         {% endif %}
                     {% else %}
@@ -217,9 +210,6 @@
 
 {% block extra_js %}
 <script>
-    // Version check for cache busting
-    console.log('Loading log viewer script v1.0.1');
-    
     // Start auto-refresh (uses Dashboard.autoRefresh from dashboard.js)
     if (typeof Dashboard !== 'undefined' && Dashboard.autoRefresh) {
         Dashboard.autoRefresh.start();
@@ -247,6 +237,7 @@
         let maxLogEntries = 100;
         let pollBackupTimer = null;
         let sseWorking = false;
+        const streamUrl = '{% url "importer_dashboard:stream_logs" %}';
     
         // Toggle pause function
         function toggleLogPause() {
@@ -374,7 +365,6 @@
                 eventSource.close();
             }
         
-            const streamUrl = '{% url "importer_dashboard:log_stream" %}';
             console.log('Connecting to log stream:', streamUrl);
             updateStatusIndicator('connecting');
             
@@ -390,8 +380,6 @@
                 if (logMessages) {
                     logMessages.innerHTML = '';
                 }
-                
-                // Connection success will be shown via the first message
             };
             
             eventSource.onmessage = function(event) {

@@ -103,11 +103,14 @@ def import_rmg_models(apps, schema_editor):
 
 def import_kinetic_model(rmg_model_name, thermo_path, kinetics_path, source_path, models):
     now = datetime.now()
-    kinetic_model = models.KineticModel.objects.create(
-        model_name=rmg_model_name, info=f"Imported via RMG-models migration at {now.isoformat()}"
+    kinetic_model, created = models.KineticModel.objects.get_or_create(
+        model_name=rmg_model_name,
+        defaults={"info": f"Imported via RMG-models migration at {now.isoformat()}"},
     )
-
-    kinetic_model.save()
+    if not created:
+        # Keep the import idempotent: update the info timestamp but don't crash.
+        kinetic_model.info = f"Re-imported via RMG-models migration at {now.isoformat()}"
+        kinetic_model.save(update_fields=["info"])
     logger.info(f"Importing Source {source_path}")
     safe_import(import_source, source_path, kinetic_model, models)
     logger.info(f"Importing Thermo Library {thermo_path}")

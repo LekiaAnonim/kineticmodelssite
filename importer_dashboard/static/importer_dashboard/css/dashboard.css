@@ -100,18 +100,6 @@ body {
     margin-bottom: 24px;
 }
 
-.stat-card {
-    background: #ffffff;
-    border: 1px solid #e5e7eb;
-    border-radius: 8px;
-    padding: 20px;
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    transition: all 0.2s ease;
-    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
-}
-
 .stat-card:hover {
     border-color: #d1d5db;
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
@@ -788,6 +776,23 @@ td a:focus-visible {
     min-width: 600px;
 }
 
+.stat-card{
+    display: flex;
+    flex-direction: column;
+    padding: 0 !important;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    transition: all 0.2s ease;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+}
+.stats-grid .stat-card div{
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    margin: 0;
+}
+
 /* Log Tabs */
 .log-tabs {
     display: flex;
@@ -1299,6 +1304,8 @@ body:has(.activity-log-fixed).log-minimized {
 .activity-log-fixed.minimized ~ .floating-log-toggle {
     display: flex !important;
 }
+
+
 
 /* Responsive: On mobile, overlay instead of pushing content */
 @media (max-width: 1024px) {

@@ -1,790 +1,874 @@
 """
-Incremental Vote Database Sync
+Incremental Sync Module for RMG Importer Dashboard
 
-Implements efficient incremental synchronization of vote data from cluster
-to Django dashboard. Only transfers updates since last sync instead of
-copying entire database each time.
+This module handles syncing vote databases from the cluster to Django via SSH,
+bypassing the cluster's Squid proxy which blocks HTTP requests.
 
-Architecture:
-1. Track last sync timestamp in Django
-2. Query remote DB for records updated after last sync
-3. Transfer only delta data via SSH
-4. Update local Django models
-5. Record sync timestamp for next iteration
-
-Advantages over full DB copy:
-- Minimal data transfer (KB instead of MB)
-- Faster sync cycles (seconds instead of minutes)
-- Less network bandwidth usage
-- Real-time updates possible
-- Works with large databases
+The sync process:
+1. Connect to cluster via SSH
+2. Query the SQLite vote database directly
+3. Create/update Django models with the synced data
 """
 
-import os
 import json
 import logging
+import sqlite3
 import tempfile
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple
-from django.db import transaction
+import os
+from datetime import datetime, timedelta
 from django.utils import timezone
-
-from .models import (
-    ClusterJob, Species, CandidateSpecies, Vote, 
-    ThermoMatch, SyncLog
-)
-from .ssh_manager import SSHJobManager
+from django.db import transaction
 
 logger = logging.getLogger(__name__)
 
 
-class IncrementalVoteSync:
+class IncrementalSync:
     """
-    Manages incremental synchronization of vote data from cluster to Django
+    Syncs vote database from cluster to Django via SSH
     """
     
-    def __init__(self, ssh_manager: SSHJobManager, job: ClusterJob):
+    def __init__(self, ssh_manager, job):
         """
-        Initialize sync manager
+        Initialize the sync manager
         
         Args:
-            ssh_manager: Connected SSH manager instance
-            job: ClusterJob to sync
+            ssh_manager: SSHManager instance with active connection
+            job: ClusterJob instance to sync
         """
-        import re
-        
-        self.ssh_manager = ssh_manager
+        self.ssh = ssh_manager
         self.job = job
-        self.job_path = f"{ssh_manager.config.root_path}/{job.name}"
+        self.config = job.config
         
-        # Find the actual votes database file in the job directory
-        # The job_id hash is generated from input file paths in importChemkin.py,
-        # so we need to discover it by listing files
-        stdout, stderr = ssh_manager.exec_command(f'ls {self.job_path}/votes_*.db 2>/dev/null || echo "NOTFOUND"')
+        # Build path to vote database on cluster
+        self.job_path = f"{self.config.root_path}/{job.name}"
+        self.vote_db_pattern = f"{self.job_path}/votes_*.db"
+    
+    def find_vote_database(self):
+        """
+        Find the vote database file on the cluster
         
-        if 'NOTFOUND' in stdout or not stdout.strip():
-            # No database found yet - this might be a new job
-            logger.warning(f"No votes database found in {self.job_path}")
-            # Use a placeholder - the database will be created by importChemkin.py
-            self.db_path = None
-            self.job_id = None
-        else:
-            # Extract the first database file found
-            db_files = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
-            if db_files:
-                self.db_path = db_files[0]
-                # Extract job_id hash from filename: votes_{hash}.db
-                match = re.search(r'votes_([a-f0-9]{32})\.db', self.db_path)
-                if match:
-                    self.job_id = match.group(1)
-                    logger.info(f"Found vote DB: {self.db_path} (job_id: {self.job_id})")
-                else:
-                    logger.error(f"Could not parse job_id from {self.db_path}")
-                    self.job_id = None
+        Returns:
+            str: Path to vote database, or None if not found
+        """
+        try:
+            # Find vote database files
+            cmd = f"ls -t {self.vote_db_pattern} 2>/dev/null | head -1"
+            logger.info(f"Looking for vote database: {cmd}")
+            stdout, stderr = self.ssh.exec_command(cmd)
+            
+            if stderr and stderr.strip():
+                logger.warning(f"stderr when finding vote db: {stderr}")
+            
+            if stdout and stdout.strip():
+                db_path = stdout.strip()
+                logger.info(f"Found vote database: {db_path}")
+                return db_path
             else:
-                self.db_path = None
-                self.job_id = None
-        
-    def check_remote_db_exists(self):
-        """Check if votes database exists on cluster"""
-        if not self.db_path:
-            return False
-        stdout, stderr = self.ssh_manager.exec_command(f'test -f {self.db_path} && echo "EXISTS"')
-        return 'EXISTS' in stdout
-    
-    def get_remote_db_size(self):
-        """Get size of remote database in bytes"""
-        if not self.db_path:
-            return 0
-        stdout, stderr = self.ssh_manager.exec_command(f'stat -f%z {self.db_path} 2>/dev/null || stat -c%s {self.db_path}')
-        try:
-            return int(stdout.strip())
-        except:
-            return 0
-    
-    def get_last_sync_time(self):
-        """
-        Get timestamp of last successful sync for this job
-        
-        Returns:
-            ISO format timestamp string or None if never synced
-        """
-        try:
-            last_sync = SyncLog.objects.filter(
-                job=self.job,
-                sync_type='votes',
-                direction='pull',
-                success=True
-            ).order_by('-synced_at').first()
-            
-            if last_sync:
-                # Format for SQLite: 'YYYY-MM-DD HH:MM:SS'
-                return last_sync.synced_at.strftime('%Y-%m-%d %H:%M:%S')
-            return None
+                # Try alternate pattern - list all .db files
+                alt_cmd = f"ls -la {self.job_path}/*.db 2>/dev/null"
+                logger.info(f"Trying alternate search: {alt_cmd}")
+                stdout2, stderr2 = self.ssh.exec_command(alt_cmd)
+                if stdout2:
+                    logger.info(f"Found .db files: {stdout2}")
+                else:
+                    logger.warning(f"No .db files found in {self.job_path}")
+                
+                logger.warning(f"No vote database found matching {self.vote_db_pattern}")
+                return None
         except Exception as e:
-            logger.warning(f"Could not get last sync time: {e}")
+            logger.error(f"Error finding vote database: {e}")
             return None
     
-    def get_total_counts(self):
+    def query_remote_db(self, db_path, query):
         """
-        Get total counts from the remote database
+        Execute a SQL query on the remote SQLite database
         
+        Args:
+            db_path: Path to SQLite database on cluster
+            query: SQL query to execute
+            
         Returns:
-            Dictionary with total_species and total_reactions
+            list: Query results as list of dicts, or empty list on error
         """
-        result = {'total_species': 0, 'total_reactions': 0}
-        
         try:
-            # Count total species from identified_species table (species that have been matched)
-            # Plus any remaining unmatched species in species_votes
-            identified_query = "SELECT COUNT(*) as count FROM identified_species"
-            cmd = f"""sqlite3 {self.db_path} -json '{identified_query}'"""
-            stdout, stderr = self.ssh_manager.exec_command(cmd)
+            # Use sqlite3 command on cluster to execute query
+            escaped_query = query.replace('"', '\\"')
+            cmd = f'sqlite3 -json "{db_path}" "{escaped_query}"'
+            stdout, stderr = self.ssh.exec_command(cmd)
             
-            identified_count = 0
-            if stdout.strip():
-                data = json.loads(stdout)
-                if data and len(data) > 0:
-                    identified_count = data[0].get('count', 0)
+            # Check for errors in stderr (e.g., "no such column")
+            if stderr and stderr.strip():
+                logger.error(f"SQLite query error: {stderr.strip()}")
+                logger.error(f"Failed query: {query}")
+                return []
             
-            # Also count species_votes (candidates being voted on)
-            votes_query = "SELECT COUNT(*) as count FROM species_votes"
-            cmd = f"""sqlite3 {self.db_path} -json '{votes_query}'"""
-            stdout, stderr = self.ssh_manager.exec_command(cmd)
+            if stdout and stdout.strip():
+                try:
+                    return json.loads(stdout)
+                except json.JSONDecodeError:
+                    # Log the actual output for debugging
+                    logger.warning(f"JSON parse failed for query: {query}")
+                    logger.warning(f"Raw output: {stdout[:500]}")
+                    return []
             
-            votes_count = 0
-            if stdout.strip():
-                data = json.loads(stdout)
-                if data and len(data) > 0:
-                    votes_count = data[0].get('count', 0)
-            
-            # Total is the sum of identified + unidentified (in voting)
-            result['total_species'] = identified_count + votes_count
-            
-            # Count total reactions from voting_reactions table
-            reactions_query = "SELECT COUNT(DISTINCT chemkin_reaction_str) as count FROM voting_reactions"
-            cmd = f"""sqlite3 {self.db_path} -json '{reactions_query}'"""
-            stdout, stderr = self.ssh_manager.exec_command(cmd)
-            
-            if stdout.strip():
-                data = json.loads(stdout)
-                if data and len(data) > 0:
-                    result['total_reactions'] = data[0].get('count', 0)
-                    
+            # Empty result - could be valid or could indicate an issue
+            logger.debug(f"Empty result for query: {query}")
+            return []
         except Exception as e:
-            logger.warning(f"Could not get total counts: {e}")
-        
-        return result
+            logger.error(f"Error querying remote database: {e}")
+            logger.error(f"Query was: {query}")
+            return []
     
-    def get_updated_votes(self, since: Optional[str] = None):
+    def get_total_counts(self, db_path):
         """
-        Query remote database for votes updated since timestamp
+        Get total species and reaction counts from the vote database
         
         Args:
-            since: ISO timestamp string, or None for all votes
+            db_path: Path to vote database
             
         Returns:
-            Dictionary with votes data
+            dict: {'total_species': int, 'total_reactions': int}
         """
-        # Build SQL query for updated votes
-        if since:
-            where_clause = f"WHERE updated_at > '{since}'"
-        else:
-            where_clause = ""
-        
-        query = f"""
-        SELECT 
-            sv.id,
-            sv.job_id,
-            sv.chemkin_label,
-            sv.chemkin_formula,
-            sv.rmg_species_label,
-            sv.rmg_species_smiles,
-            sv.rmg_species_index,
-            sv.rmg_species_formula,
-            sv.vote_count,
-            sv.enthalpy_discrepancy,
-            sv.confidence_score,
-            sv.created_at,
-            sv.updated_at
-        FROM species_votes sv
-        {where_clause}
-        ORDER BY sv.updated_at
-        """
-        
-        # Execute query via SSH and capture JSON output
-        cmd = f"""sqlite3 {self.db_path} -json '{query}'"""
-        stdout, stderr = self.ssh_manager.exec_command(cmd)
-        
-        if stderr:
-            logger.warning(f"SQLite query stderr: {stderr}")
+        counts = {'total_species': 0, 'total_reactions': 0}
         
         try:
-            votes = json.loads(stdout) if stdout.strip() else []
-            return {'votes': votes, 'count': len(votes)}
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse votes JSON: {e}")
-            logger.debug(f"Raw output: {stdout[:500]}")
-            return {'votes': [], 'count': 0}
-    
-    def get_voting_reactions(self, species_vote_ids: List[int]):
-        """
-        Get voting reactions for specific species votes
-        
-        Args:
-            species_vote_ids: List of species_vote.id values
-            
-        Returns:
-            Dictionary mapping species_vote_id to list of reactions
-        """
-        if not species_vote_ids:
-            return {}
-        
-        # Create comma-separated list for SQL IN clause
-        ids_str = ','.join(str(id) for id in species_vote_ids)
-        
-        query = f"""
-        SELECT 
-            vr.id,
-            vr.species_vote_id,
-            vr.chemkin_reaction_str,
-            vr.edge_reaction_str,
-            vr.reaction_family,
-            vr.created_at
-        FROM voting_reactions vr
-        WHERE vr.species_vote_id IN ({ids_str})
-        ORDER BY vr.species_vote_id, vr.created_at
-        """
-        
-        cmd = f"""sqlite3 {self.db_path} -json '{query}'"""
-        stdout, stderr = self.ssh_manager.exec_command(cmd)
-        
-        try:
-            reactions = json.loads(stdout) if stdout.strip() else []
-            
-            # Group by species_vote_id
-            grouped = {}
-            for rxn in reactions:
-                species_vote_id = rxn['species_vote_id']
-                if species_vote_id not in grouped:
-                    grouped[species_vote_id] = []
-                grouped[species_vote_id].append(rxn)
-            
-            return grouped
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse reactions JSON: {e}")
-            return {}
-    
-    def get_thermo_matches(self, species_vote_ids: List[int]):
-        """
-        Get thermo matches for specific species votes
-        
-        Args:
-            species_vote_ids: List of species_vote.id values
-            
-        Returns:
-            Dictionary mapping species_vote_id to list of thermo matches
-        """
-        if not species_vote_ids:
-            return {}
-        
-        # Create comma-separated list for SQL IN clause
-        ids_str = ','.join(str(id) for id in species_vote_ids)
-        
-        query = f"""
-        SELECT 
-            tm.id,
-            tm.species_vote_id,
-            tm.library_name,
-            tm.library_species_name,
-            tm.name_matches,
-            tm.created_at
-        FROM thermo_matches tm
-        WHERE tm.species_vote_id IN ({ids_str})
-        ORDER BY tm.species_vote_id, tm.name_matches DESC, tm.library_name
-        """
-        
-        cmd = f"""sqlite3 {self.db_path} -json '{query}'"""
-        stdout, stderr = self.ssh_manager.exec_command(cmd)
-        
-        try:
-            matches = json.loads(stdout) if stdout.strip() else []
-            
-            # Group by species_vote_id
-            grouped = {}
-            for match in matches:
-                species_vote_id = match['species_vote_id']
-                if species_vote_id not in grouped:
-                    grouped[species_vote_id] = []
-                grouped[species_vote_id].append({
-                    'library': match['library_name'],
-                    'species_name': match['library_species_name'],
-                    'name_matches': bool(match['name_matches'])
-                })
-            
-            return grouped
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse thermo matches JSON: {e}")
-            return {}
-    
-    def get_updated_identified_species(self, since: Optional[str] = None):
-        """Get identified species updated since timestamp"""
-        if since:
-            where_clause = f"WHERE identified_at > '{since}'"
-        else:
-            where_clause = ""
-        
-        query = f"""
-        SELECT 
-            id,
-            job_id,
-            chemkin_label,
-            chemkin_formula,
-            rmg_species_label,
-            rmg_species_smiles,
-            rmg_species_index,
-            identification_method,
-            identified_by,
-            enthalpy_discrepancy,
-            notes,
-            identified_at
-        FROM identified_species
-        {where_clause}
-        ORDER BY identified_at
-        """
-        
-        cmd = f"""sqlite3 {self.db_path} -json '{query}'"""
-        stdout, stderr = self.ssh_manager.exec_command(cmd)
-        
-        try:
-            species = json.loads(stdout) if stdout.strip() else []
-            return {'species': species, 'count': len(species)}
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse identified species JSON: {e}")
-            return {'species': [], 'count': 0}
-    
-    def get_updated_blocked_matches(self, since: Optional[str] = None):
-        """Get blocked matches updated since timestamp"""
-        if since:
-            where_clause = f"WHERE blocked_at > '{since}'"
-        else:
-            where_clause = ""
-        
-        query = f"""
-        SELECT 
-            id,
-            job_id,
-            chemkin_label,
-            rmg_species_label,
-            rmg_species_smiles,
-            rmg_species_index,
-            blocked_by,
-            reason,
-            blocked_at
-        FROM blocked_matches
-        {where_clause}
-        ORDER BY blocked_at
-        """
-        
-        cmd = f"""sqlite3 {self.db_path} -json '{query}'"""
-        stdout, stderr = self.ssh_manager.exec_command(cmd)
-        
-        try:
-            blocked = json.loads(stdout) if stdout.strip() else []
-            return {'blocked': blocked, 'count': len(blocked)}
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse blocked matches JSON: {e}")
-            return {'blocked': [], 'count': 0}
-    
-    def sync_votes_to_django(self, votes_data: List[Dict], reactions_data: Dict, 
-                            thermo_matches_data: Dict = None):
-        """
-        Sync vote data to Django models
-        
-        Args:
-            votes_data: List of vote records from SQLite
-            reactions_data: Dictionary of reactions grouped by species_vote_id
-            thermo_matches_data: Dictionary of thermo matches grouped by species_vote_id
-            
-        Returns:
-            Number of votes synced
-        """
-        if thermo_matches_data is None:
-            thermo_matches_data = {}
-        
-        synced_count = 0
-        
-        with transaction.atomic():
-            for vote_record in votes_data:
-                chemkin_label = vote_record['chemkin_label']
-                rmg_species_smiles = vote_record.get('rmg_species_smiles', '')
-                rmg_species_index = vote_record.get('rmg_species_index')
-                
-                # Get or create Species with correct field names
-                species, _ = Species.objects.get_or_create(
-                    job=self.job,
-                    chemkin_label=chemkin_label,
-                    defaults={
-                        'formula': vote_record.get('chemkin_formula', ''),  # Field is 'formula', not 'chemkin_formula'
-                        'identification_status': 'unidentified'  # Field is 'identification_status', not 'status'
-                    }
-                )
-                
-                # Get or create CandidateSpecies with correct field names
-                candidate, created = CandidateSpecies.objects.get_or_create(
-                    species=species,
-                    rmg_index=rmg_species_index,  # Field is 'rmg_index', not 'rmg_species_index'
-                    defaults={
-                        'rmg_label': vote_record.get('rmg_species_label', ''),  # Field is 'rmg_label'
-                        'smiles': rmg_species_smiles,  # Field is 'smiles'
-                        'vote_count': vote_record.get('vote_count', 0),
-                        'enthalpy_discrepancy': vote_record.get('enthalpy_discrepancy')
-                        # Note: confidence_score doesn't exist in CandidateSpecies model
-                    }
-                )
-                
-                # Update if exists
-                if not created:
-                    candidate.vote_count = vote_record.get('vote_count', 0)
-                    candidate.enthalpy_discrepancy = vote_record.get('enthalpy_discrepancy')
-                    candidate.save()
-                
-                # Sync voting reactions
-                species_vote_id = vote_record['id']
-                reactions = reactions_data.get(species_vote_id, [])
-                
-                for rxn in reactions:
-                    Vote.objects.get_or_create(
-                        candidate=candidate,
-                        chemkin_reaction_str=rxn.get('chemkin_reaction_str', ''),
-                        defaults={
-                            'edge_reaction_str': rxn.get('edge_reaction_str', ''),
-                            'reaction_family': rxn.get('reaction_family', '')
-                        }
-                    )
-                
-                # Sync thermo matches (NEW)
-                thermo_matches = thermo_matches_data.get(species_vote_id, [])
-                
-                for match in thermo_matches:
-                    ThermoMatch.objects.get_or_create(
-                        species=species,
-                        candidate=candidate,
-                        library_name=match.get('library', ''),
-                        defaults={
-                            'library_species_name': match.get('species_name', ''),
-                            'name_matches': match.get('name_matches', False)
-                        }
-                    )
-                
-                synced_count += 1
-        
-        return synced_count
-    
-    def sync_identified_species_to_django(self, species_data: List[Dict]):
-        """Sync identified species to Django models"""
-        synced_count = 0
-        
-        with transaction.atomic():
-            for record in species_data:
-                chemkin_label = record['chemkin_label']
-                rmg_species_smiles = record.get('rmg_species_smiles', '')
-                rmg_species_index = record.get('rmg_species_index')
-                enthalpy_discrepancy = record.get('enthalpy_discrepancy')
-                
-                # Map to importer_dashboard.Species field names
-                species_defaults = {
-                    'formula': record.get('chemkin_formula', ''),
-                    'identification_status': 'confirmed',
-                    'smiles': rmg_species_smiles,
-                    'rmg_label': record.get('rmg_species_label', ''),
-                    'rmg_index': rmg_species_index,
-                    'identification_method': record.get('identification_method', 'auto'),
-                    'enthalpy_discrepancy': enthalpy_discrepancy
-                }
-                
-                # Update or create Species as identified
-                species, created = Species.objects.update_or_create(
-                    job=self.job,
-                    chemkin_label=chemkin_label,
-                    defaults=species_defaults
-                )
-                
-                # Also create/update CandidateSpecies for the identified match
-                # This is what the dashboard displays
-                if rmg_species_smiles and rmg_species_index is not None:
-                    candidate_defaults = {
-                        'rmg_label': record.get('rmg_species_label', ''),
-                        'smiles': rmg_species_smiles,
-                        'enthalpy_discrepancy': enthalpy_discrepancy,
-                        'is_confirmed': True,
-                        'vote_count': 0  # Identified species may not have votes
-                    }
-                    
-                    CandidateSpecies.objects.update_or_create(
-                        species=species,
-                        rmg_index=rmg_species_index,
-                        defaults=candidate_defaults
-                    )
-                
-                synced_count += 1
-        
-        return synced_count
-    
-    def sync_blocked_matches_to_django(self, blocked_data: List[Dict]):
-        """Sync blocked matches to Django models"""
-        synced_count = 0
-        
-        with transaction.atomic():
-            for record in blocked_data:
-                chemkin_label = record['chemkin_label']
-                rmg_species_index = record.get('rmg_species_index')
-                
-                # Get Species
-                try:
-                    species = Species.objects.get(
-                        job=self.job,
-                        chemkin_label=chemkin_label
-                    )
-                except Species.DoesNotExist:
-                    logger.warning(f"Species {chemkin_label} not found when syncing blocked match")
-                    continue
-                
-                # Get CandidateSpecies
-                try:
-                    candidate = CandidateSpecies.objects.get(
-                        species=species,
-                        rmg_index=rmg_species_index
-                    )
-                    
-                    # Mark as blocked
-                    candidate.is_blocked = True
-                    candidate.blocked_by = record.get('blocked_by', '')
-                    candidate.blocked_reason = record.get('reason', '')
-                    candidate.save()
-                    
-                    synced_count += 1
-                except CandidateSpecies.DoesNotExist:
-                    logger.warning(f"Candidate not found for {chemkin_label} index {rmg_species_index}")
-        
-        return synced_count
-    
-    def record_sync(self, sync_type: str, record_count: int, success: bool, 
-                   error_message: str = None):
-        """Record sync operation in SyncLog"""
-        try:
-            SyncLog.objects.create(
-                job=self.job,
-                sync_type=sync_type,
-                direction='pull',
-                record_count=record_count,
-                success=success,
-                error_message=error_message,
-                synced_at=timezone.now()
+            # Count species from identified_species table (more reliable than species_votes)
+            species_result = self.query_remote_db(
+                db_path, 
+                "SELECT COUNT(*) as count FROM identified_species"
             )
+            if species_result and len(species_result) > 0:
+                counts['total_species'] = species_result[0].get('count', 0)
+            
+            # Also check species_votes table (use chemkin_label - correct column name)
+            if counts['total_species'] == 0:
+                species_result = self.query_remote_db(
+                    db_path,
+                    "SELECT COUNT(DISTINCT chemkin_label) as count FROM species_votes"
+                )
+                if species_result and len(species_result) > 0:
+                    counts['total_species'] = species_result[0].get('count', 0)
+            
+            # Count reactions
+            reaction_result = self.query_remote_db(
+                db_path,
+                "SELECT COUNT(*) as count FROM voting_reactions"
+            )
+            if reaction_result and len(reaction_result) > 0:
+                counts['total_reactions'] = reaction_result[0].get('count', 0)
+                
         except Exception as e:
-            logger.error(f"Failed to record sync: {e}")
+            logger.error(f"Error getting counts: {e}")
+        
+        return counts
+    
+    def sync_identified_species(self, db_path):
+        """
+        Sync identified species from cluster to Django
+        
+        Args:
+            db_path: Path to vote database
+            
+        Returns:
+            int: Number of species synced
+        """
+        from .models import Species, CandidateSpecies
+        
+        try:
+            # Query identified species (use correct column names from vote_local_db.py)
+            query = """
+                SELECT 
+                    chemkin_label,
+                    chemkin_formula,
+                    rmg_species_smiles,
+                    rmg_species_index,
+                    rmg_species_label,
+                    identification_method,
+                    enthalpy_discrepancy,
+                    identified_at
+                FROM identified_species
+            """
+            results = self.query_remote_db(db_path, query)
+            
+            if not results:
+                logger.info("No identified species found in database")
+                return 0
+            
+            synced = 0
+            with transaction.atomic():
+                for row in results:
+                    chemkin_label = row.get('chemkin_label', '')
+                    smiles = row.get('rmg_species_smiles', '')
+                    rmg_index = row.get('rmg_species_index')
+                    rmg_label = row.get('rmg_species_label', '')
+                    method = row.get('identification_method', 'auto')
+                    formula = row.get('chemkin_formula', '')
+                    enthalpy_disc = row.get('enthalpy_discrepancy')
+                    
+                    if not chemkin_label:
+                        continue
+                    
+                    # Get or create Species
+                    species, created = Species.objects.get_or_create(
+                        job=self.job,
+                        chemkin_label=chemkin_label,
+                        defaults={
+                            'formula': formula or self._extract_formula(chemkin_label),
+                            'smiles': smiles,
+                            'rmg_label': rmg_label,
+                            'rmg_index': rmg_index,
+                            'identification_status': 'confirmed',
+                            'identification_method': method,
+                            'enthalpy_discrepancy': enthalpy_disc,
+                        }
+                    )
+                    
+                    if not created:
+                        # Update existing species
+                        species.smiles = smiles
+                        species.rmg_label = rmg_label
+                        species.rmg_index = rmg_index
+                        species.identification_status = 'confirmed'
+                        species.identification_method = method
+                        if formula:
+                            species.formula = formula
+                        if enthalpy_disc is not None:
+                            species.enthalpy_discrepancy = enthalpy_disc
+                        species.save()
+                    
+                    # Create candidate if we have SMILES
+                    if smiles:
+                        if rmg_index is not None:
+                        # Use rmg_index for lookup (matches constraint)
+                            CandidateSpecies.objects.update_or_create(
+                                species=species,
+                                rmg_index=rmg_index,
+                                defaults={
+                                    'rmg_label': rmg_label or smiles,
+                                    'smiles': smiles,
+                                    'is_confirmed': True,
+                                    'vote_count': 0,
+                                    'unique_vote_count': 0,
+                                }
+                            )
+                        else:
+                            # No rmg_index - use filter + update or create
+                            existing = CandidateSpecies.objects.filter(
+                                species=species,
+                                smiles=smiles
+                            ).first()
+                            
+                            if existing:
+                                existing.is_confirmed = True
+                                existing.rmg_label = rmg_label or existing.rmg_label
+                                existing.save()
+                            else:
+                                CandidateSpecies.objects.create(
+                                    species=species,
+                                    smiles=smiles,
+                                    rmg_label=rmg_label or smiles,
+                                    is_confirmed=True,
+                                    vote_count=0,
+                                    unique_vote_count=0,
+                                )
+                        
+                    synced += 1
+            
+            logger.info(f"Synced {synced} identified species")
+            return synced
+            
+        except Exception as e:
+            logger.error(f"Error syncing identified species: {e}")
+            return 0
+    
+    def sync_vote_candidates(self, db_path):
+        """
+        Sync vote candidates from cluster to Django
+        
+        Args:
+            db_path: Path to vote database
+            
+        Returns:
+            int: Number of candidates synced
+        """
+        from .models import Species, CandidateSpecies, VoteCandidate
+        
+        try:
+            # Query species_votes table for candidates (use correct column names)
+            query = """
+                SELECT 
+                    id,
+                    chemkin_label,
+                    chemkin_formula,
+                    rmg_species_label,
+                    rmg_species_index,
+                    rmg_species_smiles,
+                    rmg_species_formula,
+                    vote_count,
+                    enthalpy_discrepancy
+                FROM species_votes
+            """
+            results = self.query_remote_db(db_path, query)
+            
+            if not results:
+                logger.info("No vote candidates found in database")
+                return 0
+            
+            synced = 0
+            with transaction.atomic():
+                for row in results:
+                    chemkin_label = row.get('chemkin_label', '')
+                    chemkin_formula = row.get('chemkin_formula', '')
+                    rmg_index = row.get('rmg_species_index')
+                    rmg_label = row.get('rmg_species_label', '')
+                    smiles = row.get('rmg_species_smiles', '')
+                    rmg_formula = row.get('rmg_species_formula', '')
+                    vote_count = row.get('vote_count', 0)
+                    species_vote_id = row.get('id')  # Save for later use
+                    enthalpy_disc = row.get('enthalpy_discrepancy')
+                    
+                    if not chemkin_label:
+                        continue
+                    
+                    # Get or create Species
+                    species, _ = Species.objects.get_or_create(
+                        job=self.job,
+                        chemkin_label=chemkin_label,
+                        defaults={
+                            'formula': chemkin_formula or self._extract_formula(chemkin_label),
+                            'identification_status': 'unidentified',
+                        }
+                    )
+                    
+                    # Create VoteCandidate
+                    if rmg_index is not None:
+                        VoteCandidate.objects.update_or_create(
+                            species=species,
+                            rmg_index=rmg_index,
+                            defaults={
+                                'smiles': smiles,
+                                'vote_count': vote_count,
+                            }
+                        )
+                        
+                        # Also create CandidateSpecies
+                        CandidateSpecies.objects.update_or_create(
+                            species=species,
+                            rmg_index=rmg_index,
+                            defaults={
+                                'rmg_label': rmg_label or smiles or f"Species({rmg_index})",
+                                'smiles': smiles,
+                                'vote_count': vote_count,
+                                'unique_vote_count': vote_count,
+                                'enthalpy_discrepancy': enthalpy_disc,
+                            }
+                        )
+                    
+                    synced += 1
+            
+            logger.info(f"Synced {synced} vote candidates")
+            return synced
+            
+        except Exception as e:
+            logger.error(f"Error syncing vote candidates: {e}")
+            return 0
+    
+    def sync_voting_reactions(self, db_path):
+        """
+        Sync voting reactions from cluster to Django
+        
+        Args:
+            db_path: Path to vote database
+            
+        Returns:
+            int: Number of reactions synced
+        """
+        from .models import Species, VoteCandidate, VotingReaction
+        
+        try:
+            # Query voting_reactions with JOIN to species_votes (correct schema)
+            query = """
+                SELECT 
+                    sv.chemkin_label,
+                    sv.rmg_species_index,
+                    vr.chemkin_reaction_str,
+                    vr.edge_reaction_str,
+                    vr.reaction_family
+                FROM voting_reactions vr
+                JOIN species_votes sv ON vr.species_vote_id = sv.id
+            """
+            results = self.query_remote_db(db_path, query)
+            
+            if not results:
+                logger.info("No voting reactions found")
+                return 0
+            
+            synced = 0
+            with transaction.atomic():
+                for row in results:
+                    chemkin_label = row.get('chemkin_label', '')
+                    rmg_index = row.get('rmg_species_index')
+                    chemkin_rxn = row.get('chemkin_reaction_str', '')
+                    rmg_rxn = row.get('edge_reaction_str', '')
+                    family = row.get('reaction_family', '')
+                    
+                    if not chemkin_label or rmg_index is None:
+                        continue
+                    
+                    try:
+                        species = Species.objects.get(job=self.job, chemkin_label=chemkin_label)
+                        candidate = VoteCandidate.objects.get(species=species, rmg_index=rmg_index)
+                        
+                        VotingReaction.objects.get_or_create(
+                            candidate=candidate,
+                            chemkin_reaction=chemkin_rxn,
+                            defaults={
+                                'rmg_reaction': rmg_rxn,
+                                'family': family,
+                            }
+                        )
+                        synced += 1
+                    except (Species.DoesNotExist, VoteCandidate.DoesNotExist):
+                        continue
+            
+            logger.info(f"Synced {synced} voting reactions")
+            return synced
+            
+        except Exception as e:
+            logger.error(f"Error syncing voting reactions: {e}")
+            return 0
+    
+    def sync_blocked_matches(self, db_path):
+        """
+        Sync blocked matches from cluster to Django
+        
+        Args:
+            db_path: Path to vote database
+            
+        Returns:
+            int: Number of blocked matches synced
+        """
+        from .models import BlockedMatch
+        
+        try:
+            # Use correct column names from vote_local_db.py
+            query = """
+                SELECT 
+                    chemkin_label,
+                    rmg_species_smiles,
+                    rmg_species_label,
+                    rmg_species_index,
+                    reason,
+                    blocked_at
+                FROM blocked_matches
+            """
+            results = self.query_remote_db(db_path, query)
+            
+            if not results:
+                return 0
+            
+            synced = 0
+            with transaction.atomic():
+                for row in results:
+                    BlockedMatch.objects.get_or_create(
+                        job=self.job,
+                        chemkin_label=row.get('chemkin_label', ''),
+                        smiles=row.get('rmg_species_smiles', ''),
+                        defaults={
+                            'rmg_label': row.get('rmg_species_label', ''),
+                            'reason': row.get('reason', ''),
+                        }
+                    )
+                    synced += 1
+            
+            logger.info(f"Synced {synced} blocked matches")
+            return synced
+            
+        except Exception as e:
+            logger.error(f"Error syncing blocked matches: {e}")
+            return 0
+    
+    def sync_thermo_matches(self, db_path):
+        """
+        Sync thermo library matches from cluster to Django
+        
+        Args:
+            db_path: Path to vote database
+            
+        Returns:
+            int: Number of thermo matches synced
+        """
+        from .models import Species, CandidateSpecies, ThermoMatch
+        
+        try:
+            # Query thermo_matches with JOIN to species_votes
+            query = """
+                SELECT 
+                    sv.chemkin_label,
+                    sv.rmg_species_index,
+                    tm.library_name,
+                    tm.library_species_name,
+                    tm.name_matches
+                FROM thermo_matches tm
+                JOIN species_votes sv ON tm.species_vote_id = sv.id
+            """
+            results = self.query_remote_db(db_path, query)
+            
+            if not results:
+                logger.info("No thermo matches found")
+                return 0
+            
+            synced = 0
+            with transaction.atomic():
+                for row in results:
+                    chemkin_label = row.get('chemkin_label', '')
+                    rmg_index = row.get('rmg_species_index')
+                    library_name = row.get('library_name', '')
+                    library_species_name = row.get('library_species_name', '')
+                    name_matches = row.get('name_matches', False)
+                    
+                    if not chemkin_label or not library_name:
+                        continue
+                    
+                    try:
+                        # Get the species
+                        species = Species.objects.get(job=self.job, chemkin_label=chemkin_label)
+                        
+                        # Get or create candidate - required for ThermoMatch
+                        candidate = None
+                        if rmg_index is not None:
+                            candidate = CandidateSpecies.objects.filter(
+                                species=species, 
+                                rmg_index=rmg_index
+                            ).first()
+                        
+                        # Skip if no candidate (ThermoMatch requires a candidate)
+                        if not candidate:
+                            logger.debug(f"Skipping thermo match for {chemkin_label} - no candidate found")
+                            continue
+                        
+                        # Create ThermoMatch
+                        ThermoMatch.objects.get_or_create(
+                            species=species,
+                            candidate=candidate,
+                            library_name=library_name,
+                            defaults={
+                                'library_species_name': library_species_name,
+                                'name_matches': name_matches,
+                            }
+                        )
+                        synced += 1
+                    except Species.DoesNotExist:
+                        continue
+            
+            logger.info(f"Synced {synced} thermo matches")
+            return synced
+            
+        except Exception as e:
+            logger.error(f"Error syncing thermo matches: {e}")
+            return 0
+    
+    def sync_chemkin_reactions(self, db_path):
+        """
+        Sync CHEMKIN reactions from cluster to Django
+        
+        Args:
+            db_path: Path to vote database
+            
+        Returns:
+            int: Number of reactions synced
+        """
+        from .models import ChemkinReaction
+        
+        try:
+            # Query chemkin_reactions table
+            query = """
+                SELECT 
+                    reaction_index,
+                    reaction_string,
+                    reactant_labels,
+                    product_labels,
+                    kinetics_type,
+                    kinetics_comment,
+                    is_matched,
+                    is_identified
+                FROM chemkin_reactions
+                ORDER BY reaction_index
+            """
+            results = self.query_remote_db(db_path, query)
+            
+            if not results:
+                logger.info("No chemkin reactions found in database")
+                return 0
+            
+            synced = 0
+            with transaction.atomic():
+                for row in results:
+                    reaction_index = row.get('reaction_index')
+                    reaction_string = row.get('reaction_string', '')
+                    reactant_labels = row.get('reactant_labels', '')
+                    product_labels = row.get('product_labels', '')
+                    kinetics_type = row.get('kinetics_type', '')
+                    kinetics_comment = row.get('kinetics_comment', '')
+                    is_matched = row.get('is_matched', 0)
+                    is_identified = row.get('is_identified', 0)
+                    
+                    if reaction_index is None or not reaction_string:
+                        continue
+                    
+                    # Get or create ChemkinReaction
+                    # Note: The Django model has more fields (A, n, Ea) that the vote_local_db
+                    # doesn't store. We'll set defaults for those.
+                    ChemkinReaction.objects.update_or_create(
+                        job=self.job,
+                        index=reaction_index,
+                        defaults={
+                            'equation': reaction_string,
+                            'reactants': reactant_labels,
+                            'products': product_labels,
+                            # Default kinetics values (not available in vote_local_db)
+                            'A': 0.0,
+                            'n': 0.0,
+                            'Ea': 0.0,
+                            # Store kinetics info in family field as fallback
+                            'family': kinetics_type or '',
+                        }
+                    )
+                    synced += 1
+            
+            logger.info(f"Synced {synced} chemkin reactions")
+            return synced
+            
+        except Exception as e:
+            logger.error(f"Error syncing chemkin reactions: {e}")
+            return 0
+    
+    def sync_job_statistics(self, db_path):
+        """
+        Sync job statistics from cluster's import_jobs table
+        
+        Args:
+            db_path: Path to vote database
+            
+        Returns:
+            dict: Job statistics or empty dict on failure
+        """
+        try:
+            # Query import_jobs table for this job's statistics (including new progress fields)
+            query = """
+                SELECT 
+                    total_species,
+                    identified_species,
+                    processed_species,
+                    unprocessed_species,
+                    tentative_species,
+                    unidentified_species,
+                    total_reactions,
+                    matched_reactions,
+                    unmatched_reactions,
+                    thermo_matches_count,
+                    status
+                FROM import_jobs
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """
+            results = self.query_remote_db(db_path, query)
+            
+            if results and len(results) > 0:
+                row = results[0]
+                stats = {
+                    'total_species': row.get('total_species', 0),
+                    'identified_species': row.get('identified_species', 0),
+                    'processed_species': row.get('processed_species', 0),
+                    'unprocessed_species': row.get('unprocessed_species', 0),
+                    'tentative_species': row.get('tentative_species', 0),
+                    'unidentified_species': row.get('unidentified_species', 0),
+                    'total_reactions': row.get('total_reactions', 0),
+                    'matched_reactions': row.get('matched_reactions', 0),
+                    'unmatched_reactions': row.get('unmatched_reactions', 0),
+                    'thermo_matches_count': row.get('thermo_matches_count', 0),
+                    'cluster_status': row.get('status', 'unknown'),
+                }
+                logger.info(f"Synced job statistics: {stats}")
+                return stats
+            
+            return {}
+            
+        except Exception as e:
+            logger.error(f"Error syncing job statistics: {e}")
+            return {}
     
     def sync_incremental(self):
         """
-        Perform incremental sync of all data types
+        Perform incremental sync of all data
         
         Returns:
-            Dictionary with sync results
+            dict: Sync results with counts
         """
+        from .models import SyncLog
+        
         result = {
             'success': False,
-            'message': '',
-            'votes_synced': 0,
             'identified_synced': 0,
+            'candidates_synced': 0,
+            'votes_synced': 0,  # Alias for candidates_synced for backward compatibility
+            'reactions_synced': 0,
             'blocked_synced': 0,
-            'db_size': 0,
-            'incremental': False,
+            'thermo_synced': 0,
+            'chemkin_reactions_synced': 0,
             'total_species': 0,
-            'total_reactions': 0
+            'total_reactions': 0,
+            'error': None,
+            'message': '',
         }
         
         try:
-            # Check if DB exists
-            if not self.check_remote_db_exists():
-                result['message'] = 'Votes database not found on cluster'
+            # Find vote database
+            db_path = self.find_vote_database()
+            if not db_path:
+                result['error'] = "Vote database not found"
                 return result
             
-            # Get DB size for reporting
-            result['db_size'] = self.get_remote_db_size()
-            logger.info(f"Remote database size: {result['db_size']:,} bytes")
-            
-            # Get total counts from database
-            counts = self.get_total_counts()
+            # Get total counts from identified_species/species_votes tables
+            counts = self.get_total_counts(db_path)
             result['total_species'] = counts['total_species']
             result['total_reactions'] = counts['total_reactions']
-            logger.info(f"Database contains {result['total_species']} species, {result['total_reactions']} reactions")
             
-            # Get last sync time
-            last_sync = self.get_last_sync_time()
+            # Also try to get stats from import_jobs table (more reliable for totals)
+            job_stats = self.sync_job_statistics(db_path)
+            if job_stats:
+                # Use import_jobs stats if available (they include all species, not just identified)
+                if job_stats.get('total_species', 0) > result['total_species']:
+                    result['total_species'] = job_stats['total_species']
+                if job_stats.get('total_reactions', 0) > result['total_reactions']:
+                    result['total_reactions'] = job_stats['total_reactions']
+                result['matched_reactions'] = job_stats.get('matched_reactions', 0)
             
-            if last_sync:
-                logger.info(f"Last sync: {last_sync} - performing incremental sync")
-                result['incremental'] = True
-            else:
-                logger.info("No previous sync - performing full sync")
-                result['incremental'] = False
+            # Sync identified species
+            result['identified_synced'] = self.sync_identified_species(db_path)
             
-            # 1. Sync votes
-            logger.info("Fetching updated votes...")
-            votes_result = self.get_updated_votes(since=last_sync)
-            votes_data = votes_result['votes']
+            # Sync vote candidates
+            result['candidates_synced'] = self.sync_vote_candidates(db_path)
+            result['votes_synced'] = result['candidates_synced']  # Alias
             
-            if votes_data:
-                logger.info(f"Found {len(votes_data)} updated votes")
-                
-                # Get reactions and thermo matches for these votes
-                species_vote_ids = [v['id'] for v in votes_data]
-                reactions_data = self.get_voting_reactions(species_vote_ids)
-                thermo_matches_data = self.get_thermo_matches(species_vote_ids)
-                
-                # Sync to Django
-                result['votes_synced'] = self.sync_votes_to_django(
-                    votes_data, reactions_data, thermo_matches_data
+            # Sync voting reactions
+            result['reactions_synced'] = self.sync_voting_reactions(db_path)
+            
+            # Sync blocked matches
+            result['blocked_synced'] = self.sync_blocked_matches(db_path)
+            
+            # Sync thermo matches
+            result['thermo_synced'] = self.sync_thermo_matches(db_path)
+            
+            # Sync chemkin reactions
+            result['chemkin_reactions_synced'] = self.sync_chemkin_reactions(db_path)
+            
+            # Update ClusterJob model with synced statistics
+            if job_stats:
+                self.job.total_species = job_stats.get('total_species', self.job.total_species)
+                self.job.total_reactions = job_stats.get('total_reactions', self.job.total_reactions)
+                self.job.identified_species = job_stats.get('identified_species', self.job.identified_species)
+                self.job.processed_species = job_stats.get('processed_species', self.job.processed_species)
+                self.job.unprocessed_species = job_stats.get('unprocessed_species', self.job.unprocessed_species)
+                self.job.tentative_species = job_stats.get('tentative_species', self.job.tentative_species)
+                self.job.unidentified_species = job_stats.get('unidentified_species', self.job.unidentified_species)
+                self.job.matched_reactions = job_stats.get('matched_reactions', self.job.matched_reactions)
+                self.job.unmatched_reactions = job_stats.get('unmatched_reactions', self.job.unmatched_reactions)
+                self.job.thermo_matches_count = job_stats.get('thermo_matches_count', self.job.thermo_matches_count)
+                self.job.save(update_fields=[
+                    'total_species', 'total_reactions', 
+                    'identified_species', 'processed_species', 'unprocessed_species',
+                    'tentative_species', 'unidentified_species',
+                    'matched_reactions', 'unmatched_reactions', 'thermo_matches_count'
+                ])
+                logger.info(
+                    f"Updated ClusterJob stats: "
+                    f"total={self.job.total_species}, identified={self.job.identified_species}, "
+                    f"processed={self.job.processed_species}, tentative={self.job.tentative_species}, "
+                    f"unidentified={self.job.unidentified_species}, "
+                    f"reactions={self.job.total_reactions}, unmatched={self.job.unmatched_reactions}"
                 )
-                self.record_sync('votes', result['votes_synced'], True)
             
-            # 2. Sync identified species
-            logger.info("Fetching updated identified species...")
-            identified_result = self.get_updated_identified_species(since=last_sync)
-            identified_data = identified_result['species']
-            
-            if identified_data:
-                logger.info(f"Found {len(identified_data)} updated identified species")
-                result['identified_synced'] = self.sync_identified_species_to_django(identified_data)
-                self.record_sync('identified_species', result['identified_synced'], True)
-            
-            # 3. Sync blocked matches
-            logger.info("Fetching updated blocked matches...")
-            blocked_result = self.get_updated_blocked_matches(since=last_sync)
-            blocked_data = blocked_result['blocked']
-            
-            if blocked_data:
-                logger.info(f"Found {len(blocked_data)} updated blocked matches")
-                result['blocked_synced'] = self.sync_blocked_matches_to_django(blocked_data)
-                self.record_sync('blocked_matches', result['blocked_synced'], True)
+            # Log success
+            SyncLog.objects.create(
+                job=self.job,
+                sync_type='incremental',
+                direction='pull',
+                record_count=result['identified_synced'] + result['candidates_synced'],
+                success=True,
+            )
             
             result['success'] = True
             result['message'] = (
-                f"Synced {result['votes_synced']} votes, "
-                f"{result['identified_synced']} identified, "
-                f"{result['blocked_synced']} blocked"
+                f"Synced {result['identified_synced']} identified, "
+                f"{result['candidates_synced']} candidates, "
+                f"{result['reactions_synced']} voting reactions, "
+                f"{result['thermo_synced']} thermo, "
+                f"{result['chemkin_reactions_synced']} chemkin reactions"
             )
-            
-            logger.info(f"✓ Incremental sync complete: {result['message']}")
+            logger.info(f"Incremental sync completed: {result}")
             
         except Exception as e:
-            result['message'] = f"Sync failed: {str(e)}"
-            logger.error(f"Incremental sync failed: {e}", exc_info=True)
-            self.record_sync('error', 0, False, str(e))
+            result['error'] = str(e)
+            logger.error(f"Incremental sync failed: {e}")
+            
+            SyncLog.objects.create(
+                job=self.job,
+                sync_type='incremental',
+                direction='pull',
+                record_count=0,
+                success=False,
+                error_message=str(e),
+            )
         
         return result
     
-    def sync_full_fallback(self):
+    def _extract_formula(self, label):
         """
-        Fallback: Download entire DB and read with VoteReader
+        Extract chemical formula from species label
         
-        Used when incremental sync fails or for first sync
-        """
-        from .vote_reader import VoteReader
-        
-        result = {
-            'success': False,
-            'message': '',
-            'votes_synced': 0,
-            'identified_synced': 0,
-            'blocked_synced': 0
-        }
-        
-        try:
-            # Check if DB exists
-            if not self.db_path or not self.check_remote_db_exists():
-                result['message'] = 'Votes database not found on cluster'
-                return result
+        Args:
+            label: Species label (e.g., "CH4", "C2H6O")
             
-            # Create temp directory for DB
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Use job_id for local filename to match cluster filename
-                local_filename = f'votes_{self.job_id}.db' if self.job_id else 'votes_temp.db'
-                local_db_path = os.path.join(temp_dir, local_filename)
-                
-                # Download DB via SCP
-                logger.info(f"Downloading database from {self.db_path} to {local_db_path}...")
-                
-                # Use SCP via SSH
-                scp_command = f'scp {self.db_path} {local_db_path}'
-                # Note: This assumes SSH keys are set up, otherwise use paramiko SFTPClient
-                
-                # For paramiko SFTPClient:
-                sftp = self.ssh_manager.ssh_client.open_sftp()
-                sftp.get(self.db_path, local_db_path)
-                sftp.close()
-                
-                logger.info("✓ Database downloaded, reading with VoteReader...")
-                
-                # Read with VoteReader
-                reader = VoteReader(local_db_path)
-                
-                # Get all data
-                all_votes = reader.get_all_votes(self.job.name)
-                identified_species = reader.get_identified_species(self.job.name)
-                blocked_matches = reader.get_blocked_matches(self.job.name)
-                
-                # Convert to format expected by sync methods
-                # (This would need implementation based on VoteReader output format)
-                
-                result['success'] = True
-                result['message'] = "Full database sync completed"
-                
-        except Exception as e:
-            result['message'] = f"Full sync failed: {str(e)}"
-            logger.error(f"Full sync failed: {e}", exc_info=True)
-        
-        return result
+        Returns:
+            str: Chemical formula or empty string
+        """
+        import re
+        # Simple extraction - just use the label if it looks like a formula
+        if re.match(r'^[A-Z][a-z]?[\dA-Za-z]*$', label):
+            return label
+        return ''
 
 
-def sync_job_votes_incremental(job: ClusterJob):
+def sync_job_votes(job, ssh_manager=None):
     """
-    Convenience function to perform incremental sync for a job
+    Convenience function to sync votes for a single job
     
     Args:
         job: ClusterJob instance
+        ssh_manager: Optional SSHJobManager instance (will create if not provided)
         
     Returns:
-        Dictionary with sync results
+        dict: Sync results
     """
-    from .models import ImportJobConfig
+    from .ssh_manager import SSHJobManager
+    
+    close_ssh = False
+    if ssh_manager is None:
+        ssh_manager = SSHJobManager(job.config)
+        try:
+            ssh_manager.connect()
+        except Exception as e:
+            return {'success': False, 'error': f'Failed to connect to SSH: {e}'}
+        close_ssh = True
     
     try:
-        # Get SSH connection
-        config = job.config or ImportJobConfig.objects.filter(is_default=True).first()
-        if not config:
-            return {
-                'success': False,
-                'message': 'No configuration found',
-                'votes_synced': 0
-            }
-        
-        ssh_manager = SSHJobManager(config=config)
-        ssh_manager.connect()
-        
-        # Create sync manager and run
-        syncer = IncrementalVoteSync(ssh_manager, job)
-        result = syncer.sync_incremental()
-        
-        ssh_manager.disconnect()
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Job vote sync failed: {e}", exc_info=True)
-        return {
-            'success': False,
-            'message': str(e),
-            'votes_synced': 0
-        }
+        syncer = IncrementalSync(ssh_manager, job)
+        return syncer.sync_incremental()
+    finally:
+        if close_ssh:
+            ssh_manager.disconnect()
+
+
+# Alias for backward compatibility
+sync_job_votes_incremental = sync_job_votes

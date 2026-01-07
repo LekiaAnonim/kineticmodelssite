@@ -9,13 +9,13 @@ from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.http import require_http_methods
-from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
+from django.db.models import Case, When, Value, IntegerField
 import json
 import logging
 import os
 
-from .models import ClusterJob, ImportJobConfig, SpeciesIdentification, JobLog, ImportJobStatus
+from .models import ClusterJob, ImportJobConfig, JobLog, ImportJobStatus, VotingReaction
 from .ssh_manager import SSHJobManager
 from .logger import dashboard_logger, setup_dashboard_logging
 
@@ -48,10 +48,16 @@ def dashboard_index(request):
             'rmg_py_path': '/projects/westgroup/lekia.p/RMG/RMG-Py',
         }
     )
-    
-    # Get all jobs ordered by status and updated time
-    jobs = ClusterJob.objects.all().order_by('-updated_at')
-    
+
+    # Get all jobs ordered with running jobs first, then alphabetically by name
+    jobs = ClusterJob.objects.annotate(
+        status_priority=Case(
+            When(status='running', then=Value(0)),
+            default=Value(1),
+            output_field=IntegerField(),
+        )
+    ).order_by('status_priority', 'name')
+
     # Calculate stats
     stats = {
         'total_jobs': jobs.count(),
@@ -61,10 +67,10 @@ def dashboard_index(request):
         'completed_jobs': jobs.filter(status='completed').count(),
         'failed_jobs': jobs.filter(status='failed').count(),
     }
-    
+
     # Get list of running job IDs for AJAX updates
     running_job_ids = json.dumps(list(jobs.filter(status='running').values_list('id', flat=True)))
-    
+
     context = {
         'jobs': jobs,
         'config': config,
@@ -72,7 +78,7 @@ def dashboard_index(request):
         'running_job_ids': running_job_ids,
         'page_title': 'RMG Importer Dashboard',
     }
-    
+
     return render(request, 'importer_dashboard/index.html', context)
 
 
@@ -83,6 +89,38 @@ def job_detail(request, job_id):
     """
     job = get_object_or_404(ClusterJob, id=job_id)
     config = job.config or ImportJobConfig.objects.filter(is_default=True).first()
+
+    # Get all species with their related data (prefetch for efficiency)
+    species_list = job.species.prefetch_related(
+        'votes',
+        'votes__candidate',
+        'vote_candidates',
+        'vote_candidates__voting_reactions',
+        'thermo_matches',
+        'thermo_matches__candidate',
+        'candidates',
+    ).select_related(
+        'chemkin_thermo',
+        'identified_by',
+    ).all()
+
+    # Get other related data
+    species_identifications = job.species_identifications.select_related('identified_by').all()
+    identified_species_list = job.species.filter(
+        identification_status='confirmed'
+    ).select_related('identified_by').order_by('-confirmed_at', 'chemkin_label')
+    blocked_matches = job.blocked_matches.select_related('blocked_by').all()
+
+    # Calculate summary statistics
+    stats = {
+        'total_species': species_list.count(),
+        'identified_species': species_list.filter(identification_status='confirmed').count(),
+        'processed_species': species_list.filter(identification_status='processed').count(),
+        'unidentified_species': species_list.filter(identification_status='unidentified').count(),
+        'total_votes': VotingReaction.objects.filter(candidate__species__job=job).count(),
+        'total_candidates': sum(s.candidates.count() for s in species_list),
+        'blocked_matches': blocked_matches.count(),
+    }
     
     dashboard_logger.info(
         f"Viewing job details", 
@@ -135,8 +173,8 @@ def job_detail(request, job_id):
     if job.status == 'running' and job.host and job.host != 'Pending...' and config:
         try:
             ssh_manager = SSHJobManager(config=config) if 'ssh_manager' not in locals() else ssh_manager
-            progress_url = f"http://localhost:{job.port}/progress.json"
-            
+            progress_url = (job.ood_url + 'progress.json') if job.ood_url else f"http://localhost:{job.port}/progress.json"
+
             dashboard_logger.info(
                 "Attempting to fetch live progress", 
                 "dashboard",
@@ -149,7 +187,7 @@ def job_detail(request, job_id):
                     'tunnel_active': job.tunnel_active
                 }
             )
-            
+
             progress = ssh_manager.get_progress_json(job)
             if progress:
                 # Update job progress from live data
@@ -174,12 +212,12 @@ def job_detail(request, job_id):
                 )
             else:
                 dashboard_logger.warning(
-                    "No progress data returned - port forwarding may not be active", 
+                    "No progress data returned - job may still be initializing or OOD endpoint unavailable", 
                     "dashboard",
                     job_id=job.id,
                     job_name=job.name,
                     details={
-                        'suggestion': 'Start an Interactive Session to enable port forwarding',
+                        'suggestion': 'If using OOD, verify the compute-node web URL is reachable; otherwise job may still be starting.',
                         'progress_url': progress_url
                     }
                 )
@@ -192,10 +230,10 @@ def job_detail(request, job_id):
                 details={
                     'error': str(e),
                     'error_type': type(e).__name__,
-                    'suggestion': 'Ensure port forwarding is active via Interactive Session'
+                    'suggestion': 'Verify OOD base URL configuration and that the job has an assigned host'
                 }
             )
-    
+
     # For completed jobs with no stats, try to fetch from output files
     if job.status == 'completed' and job.total_species == 0 and config:
         try:
@@ -243,15 +281,13 @@ def job_detail(request, job_id):
                 'type': 'warning',
                 'message': 'Job is running but compute node not yet assigned. Progress will be available once SLURM assigns a node.'
             }
-        elif not job.tunnel_active:
-            progress_status = {
-                'type': 'info',
-                'message': f'Port forwarding not active. Click "Interactive Session" to enable live progress tracking on port {job.port}.'
-            }
         elif job.total_species == 0:
             progress_status = {
                 'type': 'warning',
-                'message': f'RMG job is initializing on {job.host}. The web server on port {job.port} may not be ready yet. Progress data will appear once RMG starts processing species. This can take several minutes.'
+                'message': (
+                    f'RMG job is initializing on {job.host}. Live progress will appear once RMG starts processing. '
+                    f'If using Open OnDemand, progress is fetched from {job.ood_url or "the configured OOD URL"}.'
+                )
             }
     elif job.status == 'completed':
         if job.total_species > 0:
@@ -278,18 +314,31 @@ def job_detail(request, job_id):
     # Get recent logs
     recent_logs = job.logs.all()[:50]
     
-    # Get species identifications
-    identifications = job.species_identifications.all()[:20]
-    
     context = {
         'job': job,
         'recent_logs': recent_logs,
-        'identifications': identifications,
         'page_title': f'Job: {job.name}',
         'progress_status': progress_status,
+        'species_list': species_list,
+        'species_identifications': species_identifications,
+        'identified_species_list': identified_species_list,
+        'blocked_matches': blocked_matches,
+        'stats': stats,
     }
     
     return render(request, 'importer_dashboard/job_detail.html', context)
+
+
+# --------------------------------------------------------------------------------------
+# Removed features
+# --------------------------------------------------------------------------------------
+#
+# The following endpoints existed in earlier iterations of this Django dashboard but are
+# not part of the legacy `dashboard_no_tunnel.py` feature set (species identification,
+# interactive sessions, log streaming experiments, mechanism coverage, etc.).
+#
+# We intentionally removed their view functions to keep this app aligned with the legacy
+# dashboard and avoid maintaining unused code paths.
 
 
 @login_required
@@ -998,7 +1047,7 @@ def refresh_progress(request):
             try:
                 # Check if we should sync (avoid syncing too frequently)
                 last_sync = job.sync_logs.filter(
-                    sync_type='votes',
+                    sync_type='incremental',
                     success=True
                 ).order_by('-synced_at').first()
                 
@@ -1118,92 +1167,6 @@ def settings_view(request):
     return render(request, 'importer_dashboard/settings.html', context)
 
 
-# API Endpoints for interactive use
-
-@csrf_exempt
-def api_job_progress(request, job_id):
-    """
-    API endpoint to get job progress (JSON)
-    """
-    job = get_object_or_404(ClusterJob, id=job_id)
-    
-    data = {
-        'job_id': job.id,
-        'name': job.name,
-        'status': job.status,
-        'progress': {
-            'total': job.total_species,
-            'identified': job.identified_species,
-            'processed': job.processed_species,
-            'confirmed': job.confirmed_species,
-            'percentage': job.progress_percentage,
-        },
-        'reactions': {
-            'total': job.total_reactions,
-            'unmatched': job.unmatched_reactions,
-        },
-        'updated_at': job.updated_at.isoformat() if job.updated_at else None,
-    }
-    
-    return JsonResponse(data)
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-def api_species_identify(request, job_id):
-    """
-    API endpoint to record a species identification
-    """
-    job = get_object_or_404(ClusterJob, id=job_id)
-    
-    try:
-        data = json.loads(request.body)
-        chemkin_label = data.get('chemkin_label')
-        smiles = data.get('smiles')
-        
-        identification, created = SpeciesIdentification.objects.get_or_create(
-            job=job,
-            chemkin_label=chemkin_label,
-            defaults={
-                'smiles': smiles,
-                'identified_by': request.user if request.user.is_authenticated else None,
-                'identification_method': data.get('method', 'manual'),
-            }
-        )
-        
-        if not created:
-            identification.smiles = smiles
-            identification.save()
-        
-        return JsonResponse({
-            'success': True,
-            'identification_id': identification.id,
-            'created': created,
-        })
-        
-    except Exception as e:
-        logger.error(f"Failed to record identification: {str(e)}")
-        return JsonResponse({'success': False, 'error': str(e)}, status=400)
-
-
-@login_required
-def interactive_session(request, job_id):
-    """
-    Legacy interactive session view - redirects to Species Queue
-    
-    The old interactive session required SSH tunnels to RMG's web server,
-    which is blocked by the cluster's Squid proxy. Use Species Queue instead,
-    which syncs data via SSH and provides a better identification workflow.
-    """
-    # Redirect to the modern Species Queue interface
-    messages.info(
-        request,
-        'The interactive session has been replaced with the Species Queue, '
-        'which works better with cluster firewall restrictions.'
-    )
-    return redirect('importer_dashboard:species_queue', job_id=job_id)
-
-
 @login_required
 @require_http_methods(["POST"])
 def reconnect(request):
@@ -1282,55 +1245,59 @@ def job_pause(request, job_id):
     return redirect('importer_dashboard:interactive_session', job_id=job_id)
 
 
+# --------------------------------------------------------------------------------------
+# Log Streaming Views
+# --------------------------------------------------------------------------------------
+
 @login_required
-def log_stream(request):
+def stream_logs(request):
     """
-    Server-Sent Events endpoint for real-time log streaming
+    Server-Sent Events endpoint for streaming dashboard logs in real-time
     """
-    import time
-    
     def event_stream():
-        """Generator that yields SSE formatted messages"""
+        """Generator function for SSE"""
         # Send initial connection message
         yield f"data: {json.dumps({'type': 'connected', 'message': 'Log stream connected'})}\n\n"
         
-        # Get recent messages
-        recent = dashboard_logger.get_recent_messages(50)
-        for msg in recent:
+        # Send recent messages (last 20)
+        recent_messages = dashboard_logger.get_recent_messages(count=20)
+        for msg in recent_messages:
             yield f"data: {json.dumps(msg)}\n\n"
         
-        # Keep connection alive and send new messages
+        # Keep connection alive with periodic heartbeat
+        # In a production system, you'd use proper async/channels for this
+        # For now, this is a simple implementation
+        import time
         last_count = len(dashboard_logger.messages)
         
         while True:
-            time.sleep(0.5)  # Poll every 500ms
-            
             current_count = len(dashboard_logger.messages)
             if current_count > last_count:
                 # New messages available
-                new_messages = dashboard_logger.get_recent_messages(current_count - last_count)
+                new_messages = dashboard_logger.get_recent_messages(count=current_count - last_count)
                 for msg in new_messages:
                     yield f"data: {json.dumps(msg)}\n\n"
                 last_count = current_count
             
-            # Send heartbeat every 15 seconds
+            # Heartbeat to keep connection alive
             yield f": heartbeat\n\n"
+            time.sleep(2)  # Check every 2 seconds
     
     response = HttpResponse(event_stream(), content_type='text/event-stream')
     response['Cache-Control'] = 'no-cache'
-    response['X-Accel-Buffering'] = 'no'
+    response['X-Accel-Buffering'] = 'no'  # Disable nginx buffering
     return response
 
 
 @login_required
 def get_logs(request):
     """
-    Get recent log messages as JSON
+    Polling endpoint for getting recent log messages (fallback for SSE)
     """
-    count = int(request.GET.get('count', 100))
+    count = int(request.GET.get('count', 20))
     category = request.GET.get('category', None)
     
-    messages = dashboard_logger.get_recent_messages(count, category)
+    messages = dashboard_logger.get_recent_messages(count=count, category=category)
     
     return JsonResponse({
         'messages': messages,
@@ -1341,361 +1308,17 @@ def get_logs(request):
 @login_required
 @require_http_methods(["POST"])
 def clear_logs(request):
-    """Clear all log messages"""
+    """
+    Clear all dashboard logs
+    """
     dashboard_logger.clear()
-    dashboard_logger.info("🗑️ Logs cleared", "dashboard")
-    messages.success(request, "Logs cleared")
+    dashboard_logger.info(
+        f"Logs cleared by {request.user.username}", 
+        "dashboard",
+        details={
+            'user': request.user.username,
+            'action': 'clear_logs'
+        }
+    )
+    messages.success(request, "All logs cleared")
     return redirect('importer_dashboard:index')
-
-
-@login_required
-def log_stream_test(request):
-    """Diagnostic page for testing log stream"""
-    return render(request, 'importer_dashboard/log_stream_test.html', {
-        'page_title': 'Log Stream Test',
-    })
-
-
-@login_required
-def test_progress_fetch(request, job_id):
-    """
-    Debug endpoint to manually test progress.json fetching
-    """
-    job = get_object_or_404(ClusterJob, id=job_id)
-    config = job.config or ImportJobConfig.objects.filter(is_default=True).first()
-    
-    result = {
-        'job_id': job.id,
-        'job_name': job.name,
-        'port': job.port,
-        'host': job.host,
-        'status': job.status,
-        'tunnel_active': job.tunnel_active,
-        'progress_url': f'http://localhost:{job.port}/progress.json',
-        'current_stats': {
-            'total_species': job.total_species,
-            'processed': job.processed_species,
-            'identified': job.identified_species,
-            'confirmed': job.confirmed_species,
-            'total_reactions': job.total_reactions,
-        },
-        'fetch_result': None,
-        'error': None,
-    }
-    
-    # Try to fetch progress
-    try:
-        import urllib.request
-        import urllib.error
-        url = f'http://localhost:{job.port}/progress.json'
-        
-        dashboard_logger.info(
-            f"Testing progress fetch from {url}",
-            "dashboard",
-            job_id=job.id,
-            job_name=job.name,
-            details={
-                'url': url,
-                'tunnel_active': job.tunnel_active,
-                'host': job.host
-            }
-        )
-        
-        with urllib.request.urlopen(url, timeout=5) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            result['fetch_result'] = data
-            result['success'] = True
-            
-            dashboard_logger.success(
-                f"Successfully fetched progress data",
-                "dashboard",
-                job_id=job.id,
-                job_name=job.name,
-                details={
-                    'total': data.get('total', 0),
-                    'processed': data.get('processed', 0),
-                    'confirmed': data.get('confirmed', 0)
-                }
-            )
-            
-    except urllib.error.URLError as e:
-        error_str = str(e)
-        # Check if it's a ConnectionResetError or ConnectionRefusedError
-        if 'Connection reset' in error_str or 'Errno 54' in error_str:
-            result['error'] = f"Connection reset by peer - RMG web server not ready yet"
-            result['suggestion'] = f"The RMG job is still initializing on {job.host}. Wait a few minutes and refresh. The web server on port {job.port} will start once RMG begins processing."
-            dashboard_logger.warning(
-                f"RMG web server not ready yet - connection reset",
-                "dashboard",
-                job_id=job.id,
-                job_name=job.name,
-                details={
-                    'error_type': 'ConnectionResetError',
-                    'host': job.host,
-                    'port': job.port,
-                    'suggestion': 'Job is initializing. Web server will start shortly.'
-                }
-            )
-        elif 'Connection refused' in error_str or 'Errno 61' in error_str:
-            result['error'] = f"Connection refused - RMG web server not running"
-            result['suggestion'] = f"The RMG web server on {job.host}:{job.port} is not running yet. Check the job's RMG.log to see if it has started."
-            dashboard_logger.warning(
-                f"RMG web server not running - connection refused",
-                "dashboard",
-                job_id=job.id,
-                job_name=job.name,
-                details={
-                    'error_type': 'ConnectionRefusedError',
-                    'host': job.host,
-                    'port': job.port,
-                    'suggestion': 'Check RMG.log for startup status'
-                }
-            )
-        else:
-            result['error'] = f"URLError: {error_str}"
-            result['suggestion'] = "Port forwarding may not be active"
-            dashboard_logger.error(
-                f"Failed to fetch progress: {error_str}",
-                "dashboard",
-                job_id=job.id,
-                job_name=job.name,
-                details={
-                    'error_type': 'URLError',
-                    'error': error_str,
-                    'suggestion': 'Ensure SSH tunnel is active on port ' + str(job.port)
-                }
-            )
-        result['success'] = False
-    except Exception as e:
-        result['error'] = f"{type(e).__name__}: {str(e)}"
-        result['success'] = False
-        dashboard_logger.error(
-            f"Failed to fetch progress: {str(e)}",
-            "dashboard",
-            job_id=job.id,
-            job_name=job.name,
-            details={
-                'error_type': type(e).__name__,
-                'error': str(e)
-            }
-        )
-    
-    return JsonResponse(result, json_dumps_params={'indent': 2})
-
-
-@login_required
-@require_http_methods(["POST"])
-def job_resume(request, job_id):
-    """Resume a paused job"""
-    try:
-        job = get_object_or_404(ClusterJob, id=job_id)
-        
-        if job.status != 'paused':
-            messages.error(request, "Job is not paused")
-            return redirect('importer_dashboard:interactive_session', job_id=job_id)
-        
-        # Resume job
-        job.status = 'running'
-        job.save()
-        
-        JobLog.objects.create(
-            job=job,
-            level='info',
-            message=f"Job resumed by {request.user.username}"
-        )
-        
-        messages.success(request, f"Job {job.name} resumed")
-    except Exception as e:
-        logger.error(f"Failed to resume job: {str(e)}")
-        messages.error(request, f"Failed to resume job: {str(e)}")
-    
-    return redirect('importer_dashboard:interactive_session', job_id=job_id)
-
-
-@login_required
-@require_http_methods(["POST"])
-def sync_votes_incremental(request, job_id):
-    """
-    Trigger incremental sync of vote data from cluster
-    
-    Only syncs records updated since last sync (or all if first sync).
-    Much faster than full DB copy for ongoing jobs.
-    """
-    from .incremental_sync import sync_job_votes_incremental
-    
-    try:
-        job = get_object_or_404(ClusterJob, id=job_id)
-        
-        dashboard_logger.info(
-            f"Starting incremental vote sync for {job.name}",
-            "sync",
-            job_id=job.id,
-            job_name=job.name
-        )
-        
-        # Perform sync
-        result = sync_job_votes_incremental(job)
-        
-        if result['success']:
-            dashboard_logger.success(
-                f"✓ Incremental sync complete: {result['message']}",
-                "sync",
-                job_id=job.id,
-                job_name=job.name,
-                details={
-                    'votes_synced': result['votes_synced'],
-                    'identified_synced': result['identified_synced'],
-                    'blocked_synced': result['blocked_synced'],
-                    'incremental': result.get('incremental', False),
-                    'db_size_bytes': result.get('db_size', 0)
-                }
-            )
-            messages.success(request, result['message'])
-        else:
-            dashboard_logger.error(
-                f"✗ Sync failed: {result['message']}",
-                "sync",
-                job_id=job.id,
-                job_name=job.name
-            )
-            messages.error(request, f"Sync failed: {result['message']}")
-        
-        return JsonResponse(result)
-        
-    except Exception as e:
-        error_msg = f"Sync error: {str(e)}"
-        dashboard_logger.error(error_msg, "sync", job_id=job_id)
-        logger.error(error_msg, exc_info=True)
-        return JsonResponse({
-            'success': False,
-            'message': error_msg
-        }, status=500)
-
-
-@login_required
-def sync_status(request, job_id):
-    """
-    View sync history and statistics for a job
-    """
-    from .models import SyncLog
-    
-    job = get_object_or_404(ClusterJob, id=job_id)
-    
-    # Get recent sync logs
-    sync_logs = SyncLog.objects.filter(job=job).order_by('-synced_at')[:50]
-    
-    # Calculate statistics
-    total_syncs = sync_logs.count()
-    successful_syncs = sync_logs.filter(success=True).count()
-    failed_syncs = sync_logs.filter(success=False).count()
-    
-    # Get last successful sync by type
-    last_votes_sync = SyncLog.objects.filter(
-        job=job,
-        sync_type='votes',
-        success=True
-    ).order_by('-synced_at').first()
-    
-    last_identified_sync = SyncLog.objects.filter(
-        job=job,
-        sync_type='identified_species',
-        success=True
-    ).order_by('-synced_at').first()
-    
-    context = {
-        'job': job,
-        'sync_logs': sync_logs,
-        'total_syncs': total_syncs,
-        'successful_syncs': successful_syncs,
-        'failed_syncs': failed_syncs,
-        'success_rate': (successful_syncs / total_syncs * 100) if total_syncs > 0 else 0,
-        'last_votes_sync': last_votes_sync,
-        'last_identified_sync': last_identified_sync,
-    }
-    
-    return render(request, 'importer_dashboard/sync_status.html', context)
-
-
-@login_required
-def mechanism_coverage(request, job_id):
-    """
-    Show what percentage of mechanism is usable with current identifications
-    
-    Analyzes reactions to determine:
-    - Fully usable (all species identified)
-    - Partially identified (some species identified)
-    - Not yet usable (no species identified)
-    """
-    job = get_object_or_404(ClusterJob, id=job_id)
-    
-    from .models import ChemkinReaction, Species
-    from django.db.models import Q
-    
-    total_reactions = ChemkinReaction.objects.filter(job=job).count()
-    
-    # Get identified species labels
-    identified_labels = set(Species.objects.filter(
-        job=job,
-        identification_status='confirmed'
-    ).values_list('chemkin_label', flat=True))
-    
-    # Count usable reactions (all species identified)
-    usable_reactions = 0
-    partially_identified = 0
-    unidentified_reactions = 0
-    
-    # Sample reactions for each category
-    usable_examples = []
-    partial_examples = []
-    unidentified_examples = []
-    
-    reactions = ChemkinReaction.objects.filter(job=job)
-    for reaction in reactions:
-        all_species = set()
-        for s in reaction.reactants.split('+'):
-            all_species.add(s.strip())
-        for s in reaction.products.split('+'):
-            all_species.add(s.strip())
-        
-        identified_in_rxn = all_species & identified_labels
-        
-        if len(identified_in_rxn) == len(all_species):
-            usable_reactions += 1
-            if len(usable_examples) < 10:
-                usable_examples.append(reaction)
-        elif len(identified_in_rxn) > 0:
-            partially_identified += 1
-            if len(partial_examples) < 10:
-                partial_examples.append(reaction)
-        else:
-            unidentified_reactions += 1
-            if len(unidentified_examples) < 10:
-                unidentified_examples.append(reaction)
-    
-    coverage_percent = (usable_reactions / total_reactions) * 100 if total_reactions > 0 else 0
-    partial_percent = (partially_identified / total_reactions) * 100 if total_reactions > 0 else 0
-    unidentified_percent = (unidentified_reactions / total_reactions) * 100 if total_reactions > 0 else 0
-    
-    total_species_count = Species.objects.filter(job=job).count()
-    identified_species_count = len(identified_labels)
-    species_percent = (identified_species_count / total_species_count) * 100 if total_species_count > 0 else 0
-    
-    context = {
-        'job': job,
-        'total_reactions': total_reactions,
-        'usable_reactions': usable_reactions,
-        'partially_identified': partially_identified,
-        'unidentified_reactions': unidentified_reactions,
-        'coverage_percent': coverage_percent,
-        'partial_percent': partial_percent,
-        'unidentified_percent': unidentified_percent,
-        'total_species': total_species_count,
-        'identified_species': identified_species_count,
-        'species_percent': species_percent,
-        'usable_examples': usable_examples,
-        'partial_examples': partial_examples,
-        'unidentified_examples': unidentified_examples,
-    }
-    
-    return render(request, 'importer_dashboard/mechanism_coverage.html', context)
-

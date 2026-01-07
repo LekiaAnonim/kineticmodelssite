@@ -3,7 +3,7 @@ Django admin configuration for the importer dashboard
 """
 
 from django.contrib import admin
-from .models import ImportJobConfig, ClusterJob, SpeciesIdentification, JobLog
+from .models import ImportJobConfig, ClusterJob, JobLog
 
 
 @admin.register(ImportJobConfig)
@@ -32,13 +32,6 @@ class ImportJobConfigAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
-
-
-class SpeciesIdentificationInline(admin.TabularInline):
-    model = SpeciesIdentification
-    extra = 0
-    readonly_fields = ('created_at', 'updated_at')
-    fields = ('chemkin_label', 'smiles', 'identified_by', 'confidence', 'vote_count')
 
 
 class JobLogInline(admin.TabularInline):
@@ -87,7 +80,7 @@ class ClusterJobAdmin(admin.ModelAdmin):
         }),
     )
     
-    inlines = [SpeciesIdentificationInline, JobLogInline]
+    inlines = [JobLogInline]
     
     actions = ['mark_as_pending', 'mark_as_running', 'mark_as_completed', 'mark_as_failed']
     
@@ -106,28 +99,6 @@ class ClusterJobAdmin(admin.ModelAdmin):
     def mark_as_failed(self, request, queryset):
         queryset.update(status='failed')
     mark_as_failed.short_description = "Mark selected jobs as failed"
-
-
-@admin.register(SpeciesIdentification)
-class SpeciesIdentificationAdmin(admin.ModelAdmin):
-    list_display = ('chemkin_label', 'smiles', 'job', 'identified_by', 
-                   'confidence', 'vote_count', 'created_at')
-    list_filter = ('identification_method', 'identified_by', 'job__config')
-    search_fields = ('chemkin_label', 'smiles', 'rmg_species_label', 'job__name')
-    readonly_fields = ('created_at', 'updated_at')
-    
-    fieldsets = (
-        ('Species Information', {
-            'fields': ('job', 'chemkin_label', 'smiles', 'rmg_species_label')
-        }),
-        ('Identification Details', {
-            'fields': ('identified_by', 'identification_method', 'confidence', 'vote_count')
-        }),
-        ('Metadata', {
-            'fields': ('created_at', 'updated_at'),
-            'classes': ('collapse',)
-        }),
-    )
 
 
 @admin.register(JobLog)

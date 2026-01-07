@@ -1,14 +1,15 @@
 """
 Django management command to run SSH tunnels for import jobs
 
-This is a long-running process that maintains SSH tunnels to running jobs,
-allowing the dashboard to access job progress via http://localhost:port/
+DEPRECATED: Explorer no longer supports SSH tunneling for compute-node web interfaces.
+Use Open OnDemand (OOD) URLs instead.
+
+This command is kept only for legacy deployments where localhost port forwarding is
+still required. For new setups, you should not need to run this.
 
 Usage:
     python manage.py run_tunnels
 
-This command should be run in a separate terminal/process and kept running
-while you want to access job progress information.
 """
 
 from django.core.management.base import BaseCommand
@@ -17,10 +18,15 @@ import time
 import logging
 import signal
 import sys
+from typing import TYPE_CHECKING
 try:
     import socketserver
 except ImportError:
-    import SocketServer as socketserver
+    # Python 2 fallback (kept for historical reasons)
+    if TYPE_CHECKING:
+        import socketserver as socketserver  # type: ignore
+    else:
+        import SocketServer as socketserver  # type: ignore
 
 import select
 
