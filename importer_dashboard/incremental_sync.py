@@ -240,41 +240,62 @@ class IncrementalSync:
                             species.enthalpy_discrepancy = enthalpy_disc
                         species.save()
                     
-                    # Create candidate if we have SMILES
+                    # Create/update confirmed candidate if we have SMILES
+                    # For confirmed species, consolidate by SMILES to avoid duplicates
                     if smiles:
-                        if rmg_index is not None:
-                        # Use rmg_index for lookup (matches constraint)
-                            CandidateSpecies.objects.update_or_create(
+                        # First check if a confirmed candidate with this SMILES already exists
+                        existing = CandidateSpecies.objects.filter(
+                            species=species,
+                            smiles=smiles,
+                            is_confirmed=True
+                        ).first()
+                        
+                        if existing:
+                            # Update existing confirmed candidate
+                            existing.rmg_label = rmg_label or existing.rmg_label
+                            if rmg_index is not None and existing.rmg_index is None:
+                                existing.rmg_index = rmg_index
+                            if enthalpy_disc is not None:
+                                existing.enthalpy_discrepancy = enthalpy_disc
+                            existing.save()
+                        elif rmg_index is not None:
+                            # Check if this rmg_index already exists (unconfirmed)
+                            existing_by_index = CandidateSpecies.objects.filter(
                                 species=species,
-                                rmg_index=rmg_index,
-                                defaults={
-                                    'rmg_label': rmg_label or smiles,
-                                    'smiles': smiles,
-                                    'is_confirmed': True,
-                                    'vote_count': 0,
-                                    'unique_vote_count': 0,
-                                }
-                            )
-                        else:
-                            # No rmg_index - use filter + update or create
-                            existing = CandidateSpecies.objects.filter(
-                                species=species,
-                                smiles=smiles
+                                rmg_index=rmg_index
                             ).first()
                             
-                            if existing:
-                                existing.is_confirmed = True
-                                existing.rmg_label = rmg_label or existing.rmg_label
-                                existing.save()
+                            if existing_by_index:
+                                # Mark existing as confirmed
+                                existing_by_index.is_confirmed = True
+                                existing_by_index.rmg_label = rmg_label or existing_by_index.rmg_label
+                                existing_by_index.smiles = smiles
+                                if enthalpy_disc is not None:
+                                    existing_by_index.enthalpy_discrepancy = enthalpy_disc
+                                existing_by_index.save()
                             else:
+                                # Create new confirmed candidate
                                 CandidateSpecies.objects.create(
                                     species=species,
-                                    smiles=smiles,
+                                    rmg_index=rmg_index,
                                     rmg_label=rmg_label or smiles,
+                                    smiles=smiles,
                                     is_confirmed=True,
+                                    enthalpy_discrepancy=enthalpy_disc,
                                     vote_count=0,
                                     unique_vote_count=0,
                                 )
+                        else:
+                            # No rmg_index - create by SMILES
+                            CandidateSpecies.objects.create(
+                                species=species,
+                                smiles=smiles,
+                                rmg_label=rmg_label or smiles,
+                                is_confirmed=True,
+                                enthalpy_discrepancy=enthalpy_disc,
+                                vote_count=0,
+                                unique_vote_count=0,
+                            )
                         
                     synced += 1
             
