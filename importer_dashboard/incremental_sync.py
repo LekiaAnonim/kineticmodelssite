@@ -184,6 +184,7 @@ class IncrementalSync:
                     rmg_species_index,
                     rmg_species_label,
                     identification_method,
+                    identified_by,
                     enthalpy_discrepancy,
                     identified_at
                 FROM identified_species
@@ -204,6 +205,7 @@ class IncrementalSync:
                     method = row.get('identification_method', 'auto')
                     formula = row.get('chemkin_formula', '')
                     enthalpy_disc = row.get('enthalpy_discrepancy')
+                    identified_by_name = row.get('identified_by', 'Auto') or 'Auto'
                     
                     if not chemkin_label:
                         continue
@@ -219,6 +221,7 @@ class IncrementalSync:
                             'rmg_index': rmg_index,
                             'identification_status': 'confirmed',
                             'identification_method': method,
+                            'identified_by_name': identified_by_name,
                             'enthalpy_discrepancy': enthalpy_disc,
                         }
                     )
@@ -230,6 +233,7 @@ class IncrementalSync:
                         species.rmg_index = rmg_index
                         species.identification_status = 'confirmed'
                         species.identification_method = method
+                        species.identified_by_name = identified_by_name
                         if formula:
                             species.formula = formula
                         if enthalpy_disc is not None:
@@ -654,11 +658,12 @@ class IncrementalSync:
             dict: Job statistics or empty dict on failure
         """
         try:
-            # Query import_jobs table for this job's statistics (including new progress fields)
+            # First try with all columns (new schema)
             query = """
                 SELECT 
                     total_species,
                     identified_species,
+                    confirmed_species,
                     processed_species,
                     unprocessed_species,
                     tentative_species,
@@ -674,11 +679,39 @@ class IncrementalSync:
             """
             results = self.query_remote_db(db_path, query)
             
+            # If query failed (likely missing columns), try with basic columns only
+            if not results:
+                logger.warning("Full query failed, trying basic columns only")
+                query = """
+                    SELECT 
+                        total_species,
+                        identified_species,
+                        total_reactions,
+                        status
+                    FROM import_jobs
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                """
+                results = self.query_remote_db(db_path, query)
+            
+            # If still no results, try minimal query (just get what exists)
+            if not results:
+                logger.warning("Basic query failed, trying minimal query")
+                query = """
+                    SELECT * FROM import_jobs
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                """
+                results = self.query_remote_db(db_path, query)
+            
             if results and len(results) > 0:
                 row = results[0]
+                # Use identified_species as fallback for confirmed_species
+                identified = row.get('identified_species', 0)
                 stats = {
                     'total_species': row.get('total_species', 0),
-                    'identified_species': row.get('identified_species', 0),
+                    'identified_species': identified,
+                    'confirmed_species': row.get('confirmed_species', identified),  # fallback to identified
                     'processed_species': row.get('processed_species', 0),
                     'unprocessed_species': row.get('unprocessed_species', 0),
                     'tentative_species': row.get('tentative_species', 0),
@@ -768,6 +801,7 @@ class IncrementalSync:
                 self.job.total_species = job_stats.get('total_species', self.job.total_species)
                 self.job.total_reactions = job_stats.get('total_reactions', self.job.total_reactions)
                 self.job.identified_species = job_stats.get('identified_species', self.job.identified_species)
+                self.job.confirmed_species = job_stats.get('confirmed_species', self.job.confirmed_species)
                 self.job.processed_species = job_stats.get('processed_species', self.job.processed_species)
                 self.job.unprocessed_species = job_stats.get('unprocessed_species', self.job.unprocessed_species)
                 self.job.tentative_species = job_stats.get('tentative_species', self.job.tentative_species)
@@ -777,13 +811,13 @@ class IncrementalSync:
                 self.job.thermo_matches_count = job_stats.get('thermo_matches_count', self.job.thermo_matches_count)
                 self.job.save(update_fields=[
                     'total_species', 'total_reactions', 
-                    'identified_species', 'processed_species', 'unprocessed_species',
+                    'identified_species', 'confirmed_species', 'processed_species', 'unprocessed_species',
                     'tentative_species', 'unidentified_species',
                     'matched_reactions', 'unmatched_reactions', 'thermo_matches_count'
                 ])
                 logger.info(
                     f"Updated ClusterJob stats: "
-                    f"total={self.job.total_species}, identified={self.job.identified_species}, "
+                    f"total={self.job.total_species}, confirmed={self.job.confirmed_species}, "
                     f"processed={self.job.processed_species}, tentative={self.job.tentative_species}, "
                     f"unidentified={self.job.unidentified_species}, "
                     f"reactions={self.job.total_reactions}, unmatched={self.job.unmatched_reactions}"

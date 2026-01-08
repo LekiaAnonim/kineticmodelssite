@@ -306,6 +306,8 @@ class Species(models.Model):
     # User tracking
     identified_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
                                      related_name='identified_species')
+    identified_by_name = models.CharField(max_length=100, blank=True, default='',
+                                         help_text="Username or 'Auto' from cluster database")
     identification_method = models.CharField(max_length=100, blank=True,
                                             help_text="auto, manual, vote, thermo")
     

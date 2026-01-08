@@ -43,19 +43,19 @@
     <!-- Statistics Cards -->
     <div class="stats-grid">
         <div class="stat-card">
-            <div class="stat-value">{{ job.total_species }}</div>
+            <div class="stat-value">{{ job.total_species|default:stats.total_species }}</div>
             <div class="stat-label">Total Species</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value">{{ stats.identified_species }}</div>
-            <div class="stat-label">Identified</div>
+            <div class="stat-value">{{ job.confirmed_species|default:stats.identified_species }}</div>
+            <div class="stat-label">Confirmed</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value">{{ job.processed_species }}</div>
-            <div class="stat-label">Processed</div>
+            <div class="stat-value">{{ job.tentative_species|default:0 }}</div>
+            <div class="stat-label">Tentative</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value">{{ stats.unidentified_species }}</div>
+            <div class="stat-value">{{ job.unidentified_species|default:stats.unidentified_species }}</div>
             <div class="stat-label">Unidentified</div>
         </div>
         <div class="stat-card">
@@ -129,7 +129,7 @@
                             <tr><th>SMILES</th><td><code>{{ species.smiles|default:"N/A" }}</code></td></tr>
                             <tr><th>Enthalpy Discrepancy</th><td>{{ species.enthalpy_discrepancy|default:"N/A" }} kJ/mol</td></tr>
                             <tr><th>Identification Method</th><td>{{ species.identification_method|default:"N/A" }}</td></tr>
-                            <tr><th>Identified By</th><td>{{ species.identified_by|default:"Auto" }}</td></tr>
+                            <tr><th>Identified By</th><td>{{ species.identified_by_name|default:species.identified_by|default:"Auto" }}</td></tr>
                         </table>
                     </div>
 
@@ -302,7 +302,7 @@
                     <td>{{ species.rmg_index|default:"N/A" }}</td>
                     <td>{{ species.enthalpy_discrepancy|floatformat:2|default:"N/A" }}</td>
                     <td><span class="badge">{{ species.identification_method|default:"auto" }}</span></td>
-                    <td>{{ species.identified_by|default:"Auto" }}</td>
+                    <td>{{ species.identified_by_name|default:species.identified_by|default:"Auto" }}</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -311,8 +311,6 @@
         <p class="empty-message">No species identifications recorded yet.</p>
         {% endif %}
     </div>
-
-    <!-- Blocked Matches -->
     <div class="section">
         <h3>Blocked Matches ({{ blocked_matches.count }})</h3>
         {% if blocked_matches %}
