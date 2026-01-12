@@ -190,13 +190,18 @@ def job_detail(request, job_id):
 
             progress = ssh_manager.get_progress_json(job)
             if progress:
-                # Update job progress from live data
+                # Update job progress from live data - map ALL progress.json fields
                 job.total_species = progress.get('total', 0)
-                job.identified_species = progress.get('confirmed', 0)
                 job.processed_species = progress.get('processed', 0)
+                job.unprocessed_species = progress.get('unprocessed', 0)
                 job.confirmed_species = progress.get('confirmed', 0)
+                job.tentative_species = progress.get('tentative', 0)
+                job.unidentified_species = progress.get('unidentified', 0)
+                job.identified_species = progress.get('confirmed', 0) + progress.get('tentative', 0)
                 job.total_reactions = progress.get('totalreactions', 0)
                 job.unmatched_reactions = progress.get('unmatchedreactions', 0)
+                job.matched_reactions = progress.get('totalreactions', 0) - progress.get('unmatchedreactions', 0)
+                job.thermo_matches_count = progress.get('thermomatches', 0)
                 job.save()
                 dashboard_logger.success(
                     f"Updated progress: {job.total_species} species, {job.total_reactions} reactions", 

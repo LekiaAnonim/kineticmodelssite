@@ -1,1 +1,0 @@
-# Import Voting Django App

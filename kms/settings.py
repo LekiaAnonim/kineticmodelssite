@@ -43,7 +43,7 @@ ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split(" ")
 
 INSTALLED_APPS = [
     "importer_dashboard.apps.ImporterDashboardConfig",
-    "import_voting.apps.ImportVotingConfig",
+    # "import_voting.apps.ImportVotingConfig",  # REMOVED: Duplicate of importer_dashboard functionality
     "database.apps.DatabaseConfig",
     "api.apps.ApiConfig",
     "dal",

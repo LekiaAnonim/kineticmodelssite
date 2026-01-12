@@ -86,58 +86,45 @@ class SSHJobManager:
           so it can appear on the homepage as an "IDLE" job.
         - Scans for import.sh files containing a port marker and assigns that port
           to the corresponding job.
+        
+        OPTIMIZED: Uses batch SSH commands instead of per-directory checks for speed.
         """
         discovered_jobs = []
 
-        def _looks_like_model_dir(name: str, ssh_abs_path: str) -> bool:
-            """Heuristic filter to keep non-model directories off the dashboard."""
-            if not name:
-                return False
-            # Hidden/system dirs
-            if name.startswith('.'):
-                return False
-            # Common non-model folders
-            if name in {
-                '__pycache__',
-                'archive',
-                'archives',
-                'backup',
-                'backups',
-                'tmp',
-                'temp',
-                'logs',
-                'log',
-            }:
-                return False
+        # Directories to exclude (non-model folders)
+        EXCLUDED_DIRS = {
+            '__pycache__', 'archive', 'archives', 'backup', 'backups',
+            'tmp', 'temp', 'logs', 'log',
+        }
 
-            # Fast positive: has import.sh
-            stdout, _ = self.exec_command(f'test -f "{ssh_abs_path}/import.sh" && echo yes || echo no')
-            if stdout.strip() == 'yes':
-                return True
-
-            # Otherwise require at least one common RMG model marker.
-            marker_cmd = (
-                f'test -f "{ssh_abs_path}/input.py" && echo yes || '
-                f'test -f "{ssh_abs_path}/RMG-Py-output/RMG.log" && echo yes || '
-                f'test -f "{ssh_abs_path}/chemkin/chem_annotated.inp" && echo yes || '
-                f'test -f "{ssh_abs_path}/chemkin/chem.inp" && echo yes || '
-                f'test -f "{ssh_abs_path}/chemkin/chem_annotated.inp" && echo yes || '
-                f'echo no'
-            )
-            stdout, _ = self.exec_command(marker_cmd)
-            return stdout.strip() == 'yes'
-
-        # 1) First, create "possible jobs" from *all* immediate subfolders.
-        # We treat each subfolder as a potential model import job.
-        list_dirs_cmd = f"find {self.config.root_path} -mindepth 1 -maxdepth 1 -type d"
-        dirs_stdout, dirs_stderr = self.exec_command(list_dirs_cmd)
+        # 1) Use a SINGLE batch command to find all model directories
+        # This finds directories that have any of the marker files
+        batch_find_cmd = f'''
+find {self.config.root_path} -mindepth 1 -maxdepth 1 -type d | while read dir; do
+    name=$(basename "$dir")
+    # Skip hidden directories
+    [[ "$name" == .* ]] && continue
+    # Check for any marker file (fast short-circuit)
+    if [[ -f "$dir/import.sh" ]] || [[ -f "$dir/input.py" ]] || \
+       [[ -f "$dir/RMG-Py-output/RMG.log" ]] || \
+       [[ -f "$dir/chemkin/chem_annotated.inp" ]] || \
+       [[ -f "$dir/chemkin/chem.inp" ]]; then
+        echo "$dir"
+    fi
+done
+'''
+        dirs_stdout, dirs_stderr = self.exec_command(batch_find_cmd)
         if dirs_stderr.strip():
             logger.warning(f"Directory listing stderr: {dirs_stderr.strip()}")
 
+        # Process discovered model directories (already filtered by batch command)
         for abs_path in sorted([p.strip() for p in dirs_stdout.splitlines() if p.strip()]):
             name = abs_path.replace(self.config.root_path, '').lstrip('/')
-            if not _looks_like_model_dir(name=name, ssh_abs_path=abs_path):
+            
+            # Skip excluded directories
+            if not name or name in EXCLUDED_DIRS:
                 continue
+                
             job, created = ClusterJob.objects.get_or_create(
                 name=name,
                 config=self.config,
@@ -467,6 +454,10 @@ class SSHJobManager:
                 ssl_context = ssl._create_unverified_context()
             elif ca_bundle:
                 ssl_context = ssl.create_default_context(cafile=ca_bundle)
+        
+        # Default to insecure SSL if no context set (common macOS issue with Python)
+        if ssl_context is None:
+            ssl_context = ssl._create_unverified_context()
 
         urls_to_try = []
         if ood_url:
@@ -530,17 +521,30 @@ class SSHJobManager:
         running_jobs = ClusterJob.objects.filter(status=ImportJobStatus.RUNNING)
         updated_count = 0
         
+        logger.info(f"Refreshing progress for {running_jobs.count()} running jobs")
+        
         for job in running_jobs:
+            logger.info(f"Fetching progress for {job.name} (host={job.host}, port={job.port}, ood_url={job.ood_url})")
             progress = self.get_progress_json(job)
             if progress:
+                logger.info(f"Got progress for {job.name}: {progress}")
+                # Map all progress.json fields to model fields
                 job.total_species = progress.get('total', 0)
-                job.identified_species = progress.get('confirmed', 0)
                 job.processed_species = progress.get('processed', 0)
+                job.unprocessed_species = progress.get('unprocessed', 0)
                 job.confirmed_species = progress.get('confirmed', 0)
+                job.tentative_species = progress.get('tentative', 0)
+                job.unidentified_species = progress.get('unidentified', 0)
+                job.identified_species = progress.get('confirmed', 0) + progress.get('tentative', 0)
                 job.total_reactions = progress.get('totalreactions', 0)
                 job.unmatched_reactions = progress.get('unmatchedreactions', 0)
+                job.matched_reactions = progress.get('totalreactions', 0) - progress.get('unmatchedreactions', 0)
+                job.thermo_matches_count = progress.get('thermomatches', 0)
                 job.save()
+                logger.info(f"Updated {job.name}: processed={job.processed_species}, confirmed={job.confirmed_species}, total={job.total_species}")
                 updated_count += 1
+            else:
+                logger.warning(f"No progress data for {job.name} - fetch failed")
         
         return updated_count
     

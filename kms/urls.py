@@ -23,7 +23,7 @@ from django.urls import path, include
 urlpatterns = [
     path("", include("database.urls")),
     path("api/", include("api.urls")),
-    path("api/import-voting/", include("import_voting.urls")),
+    # path("api/import-voting/", include("import_voting.urls")),  # REMOVED: Unused prototype
     path(
         "importer/",
         include(("importer_dashboard.urls", "importer_dashboard"), namespace="importer_dashboard"),

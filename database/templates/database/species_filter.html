@@ -5,48 +5,205 @@
 {% load renders %}
 
 {% block content %}
-<h1>Species Search</h1>
-<form method="get">
-    {{ filter.form.media }}
-    {{ filter.form|crispy }}
-    <button type="submit" class="btn btn-primary">Submit</button>
-</form>
-<br />
-{% render_pagination objects=page_obj page_name="page" %}
-<br />
-<div class="list-group">
-    {% for species in object_list %}
-    <a
-        href="{% url 'species-detail' species.pk %}"
-        class="list-group-item list-group-item-action flex-column align-items-start"
-    >
-        <div class="d-flex w-100 justify-content-between">
-            <h5 class="mb-1">{{ species.formula }}</h5>
-            <small>ID: {{ species.pk }}</small>
+<!-- Compact Page Header -->
+<div class="page-header-compact">
+    <div class="d-flex justify-content-between align-items-center">
+        <div>
+            <h1 class="h4 mb-0">Species Search</h1>
         </div>
-        {% if species.enthalpy_formation %}
-        <p class="mb-1">
-            $\Delta H_f^\circ = {{ species.enthalpy_formation }} \left(\frac{J}{mol}\right)$
-        </p>
-        {% endif %} {% if species.names %}
-        <h6>Names</h6>
-        <ul class="list-group">
-            {% for name in species.names %}
-            <li class="list-group-item">{{ name }}</li>
-            {% endfor %}
-        </ul>
-        <br />
-        {% endif %} {% if species.structures %}
-        <h6>Structures</h6>
-        <ul class="list-group">
-            {% for structure in species.structures %}
-            <li class="list-group-item"><img src="{% url 'draw-structure' structure.pk %}" /></li>
-            {% endfor %}
-        </ul>
-        {% endif %}
-    </a>
-    {% endfor %}
+        <div class="d-flex align-items-center gap-2">
+            <span class="text-muted small">{{ page_obj.paginator.count|default:0 }} results</span>
+            <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" 
+                    data-bs-target="#searchPanel" aria-expanded="false" aria-controls="searchPanel">
+                <i class="bi bi-funnel me-1"></i>Filters
+            </button>
+        </div>
+    </div>
 </div>
-<br />
-{% render_pagination objects=page_obj page_name="page" %}
+
+<!-- Collapsible Search Panel -->
+<div class="collapse mb-3" id="searchPanel">
+    <div class="search-panel">
+        <form method="get" id="species-search-form">
+            {{ filter.form.media }}
+            <div class="row g-2 align-items-end">
+                {{ filter.form|crispy }}
+                <div class="col-auto">
+                    <button type="submit" class="btn btn-primary btn-sm">
+                        <i class="bi bi-search"></i> Search
+                    </button>
+                    <a href="{% url 'species-search' %}" class="btn btn-outline-secondary btn-sm">
+                        Clear
+                    </a>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Results Table -->
+<div class="table-container">
+    <table class="table table-hover table-sm mb-0">
+        <thead>
+            <tr>
+                <th style="width: 60px;">ID</th>
+                <th style="width: 80px;">Structure</th>
+                <th>Formula</th>
+                <th>Names</th>
+                <th class="text-end">H°<sub>298</sub> (J/mol)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for species in object_list %}
+            <tr class="clickable-row" data-href="{% url 'species-detail' species.pk %}">
+                <td class="text-muted small">{{ species.pk }}</td>
+                <td>
+                    {% if species.structures %}
+                    {% with species.structures|to_list|first as structure %}
+                    <img src="{% url 'draw-structure' structure.pk %}" alt="" class="structure-thumb" loading="lazy">
+                    {% endwith %}
+                    {% else %}
+                    <span class="text-muted">—</span>
+                    {% endif %}
+                </td>
+                <td><strong class="formula">{{ species.formula }}</strong></td>
+                <td class="text-muted small">
+                    {% if species.names %}
+                    {% with species.names|to_list as names_list %}
+                    {{ names_list.0 }}
+                    {% if names_list|length > 1 %}
+                    <span class="text-muted">(+{{ names_list|length|add:"-1" }})</span>
+                    {% endif %}
+                    {% endwith %}
+                    {% else %}—{% endif %}
+                </td>
+                <td class="text-end font-monospace small">
+                    {% if species.enthalpy_formation %}{{ species.enthalpy_formation }}{% else %}—{% endif %}
+                </td>
+            </tr>
+            {% empty %}
+            <tr>
+                <td colspan="5" class="text-center text-muted py-4">
+                    <i class="bi bi-search me-1"></i>No species found. Try adjusting your filters.
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Pagination -->
+{% if page_obj.paginator.num_pages > 1 %}
+<div class="pagination-compact">
+    {% render_pagination objects=page_obj page_name="page" %}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.page-header-compact {
+    padding: 1rem 0;
+    margin-bottom: 0.5rem;
+    border-bottom: 1px solid var(--color-gray-200);
+}
+
+.search-panel {
+    background: var(--color-gray-50);
+    border: 1px solid var(--color-gray-200);
+    border-radius: var(--radius-md);
+    padding: 1rem;
+}
+
+.table-container {
+    background: var(--color-white);
+    border: 1px solid var(--color-gray-200);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+.table {
+    margin-bottom: 0;
+}
+
+.table th {
+    background: var(--color-gray-50);
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--color-gray-600);
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--color-gray-200);
+}
+
+.table td {
+    padding: 0.5rem 0.75rem;
+    vertical-align: middle;
+    border-bottom: 1px solid var(--color-gray-100);
+}
+
+.table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.clickable-row {
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.clickable-row:hover {
+    background-color: var(--color-primary-bg) !important;
+}
+
+.structure-thumb {
+    width: 50px;
+    height: 40px;
+    object-fit: contain;
+    background: var(--color-gray-50);
+    border-radius: 4px;
+}
+
+.formula {
+    font-family: var(--font-mono);
+    color: var(--color-gray-900);
+}
+
+.pagination-compact {
+    padding: 0.75rem;
+    border-top: 1px solid var(--color-gray-200);
+    background: var(--color-gray-50);
+}
+
+/* Compact crispy forms */
+.search-panel .form-group {
+    margin-bottom: 0;
+}
+
+.search-panel label {
+    font-size: 0.75rem;
+    margin-bottom: 0.25rem;
+}
+
+.search-panel .form-control {
+    font-size: 0.875rem;
+    padding: 0.375rem 0.5rem;
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Make table rows clickable
+document.querySelectorAll('.clickable-row').forEach(row => {
+    row.addEventListener('click', function() {
+        window.location.href = this.dataset.href;
+    });
+});
+
+// Auto-expand search panel if filters are active
+{% if request.GET %}
+document.getElementById('searchPanel').classList.add('show');
+{% endif %}
+</script>
 {% endblock %}

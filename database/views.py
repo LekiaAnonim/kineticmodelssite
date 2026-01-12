@@ -3,13 +3,15 @@ from itertools import zip_longest
 from collections import defaultdict
 
 from dal import autocomplete
+from django.contrib import messages
 from django.contrib.auth import login
+from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import HttpResponseRedirect
-from django.urls import reverse
+from django.urls import reverse, reverse_lazy
 from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage
 from django.views import View
-from django.views.generic import TemplateView, DetailView
-from django.views.generic.edit import FormView
+from django.views.generic import TemplateView, DetailView, ListView
+from django.views.generic.edit import FormView, CreateView, UpdateView, DeleteView
 from django_filters.views import FilterView
 from django.http import HttpResponse
 from django.utils.html import format_html
@@ -25,9 +27,11 @@ from .models import (
     Source,
     Reaction,
     Kinetics,
+    Author,
+    Authorship,
 )
 from .filters import SpeciesFilter, ReactionFilter, SourceFilter
-from .forms import RegistrationForm
+from .forms import RegistrationForm, SourceForm, AuthorshipFormSet, KineticModelForm, AuthorForm
 from database.templatetags import renders
 
 
@@ -109,7 +113,20 @@ class SidebarLookup:
 @SidebarLookup
 class BaseView(TemplateView):
     template_name = "database/home.html"
+    # Get counts for display on home page
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["species_count"] = Species.objects.count()
+        context["model_count"] = KineticModel.objects.count()
+        context["reaction_count"] = Reaction.objects.count()
+        context["source_count"] = Source.objects.count()
+        return context
 
+class KineticModelFilterView(ListView):
+    model = KineticModel
+    paginate_by = 25
+    queryset = KineticModel.objects.order_by("id")
+    template_name = "database/kineticmodel_filter.html"
 
 @SidebarLookup
 class SpeciesFilterView(FilterView):
@@ -239,9 +256,25 @@ class KineticModelDetail(DetailView):
     def get_context_data(self, **kwargs):
         kinetic_model = self.get_object()
         context = super().get_context_data(**kwargs)
-        thermo = kinetic_model.thermocomment_set.order_by("thermo__species__id")
-        transport = kinetic_model.transportcomment_set.order_by("transport__species__id")
-        thermo_transport = list(zip_longest(thermo, transport))
+        
+        # Get thermo and transport comments
+        thermo_comments = kinetic_model.thermocomment_set.select_related('thermo__species')
+        transport_comments = kinetic_model.transportcomment_set.select_related('transport__species')
+        
+        # Build dictionaries keyed by species ID for proper matching
+        thermo_by_species = {tc.thermo.species_id: tc for tc in thermo_comments}
+        transport_by_species = {tc.transport.species_id: tc for tc in transport_comments}
+        
+        # Get all unique species IDs from both thermo and transport
+        all_species_ids = set(thermo_by_species.keys()) | set(transport_by_species.keys())
+        
+        # Create paired list: (thermo_comment, transport_comment) matched by species
+        thermo_transport = []
+        for species_id in sorted(all_species_ids):
+            thermo_comment = thermo_by_species.get(species_id)
+            transport_comment = transport_by_species.get(species_id)
+            thermo_transport.append((thermo_comment, transport_comment))
+        
         kinetics_data = kinetic_model.kineticscomment_set.order_by("kinetics__reaction__id")
 
         paginator1 = Paginator(thermo_transport, self.paginate_per_page)
@@ -357,3 +390,271 @@ class StructureAutocompleteView(AutocompleteView):
     def get_result_label(self, item):
         draw_url = reverse("draw-structure", args=[item.pk])
         return format_html(f'<img src="{draw_url}" />')
+
+
+# =============================================================================
+# Source CRUD Views
+# =============================================================================
+
+class SourceCreateView(LoginRequiredMixin, CreateView):
+    """Create a new Source (publication)."""
+    model = Source
+    form_class = SourceForm
+    template_name = 'database/source_form.html'
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        if self.request.POST:
+            context['authorship_formset'] = AuthorshipFormSet(self.request.POST, instance=self.object)
+        else:
+            context['authorship_formset'] = AuthorshipFormSet(instance=self.object)
+        context['form_title'] = 'Add New Source'
+        context['submit_text'] = 'Create Source'
+        return context
+    
+    def form_valid(self, form):
+        context = self.get_context_data()
+        authorship_formset = context['authorship_formset']
+        
+        if authorship_formset.is_valid():
+            self.object = form.save()
+            authorship_formset.instance = self.object
+            
+            # Process authorships, creating new authors if needed
+            for authorship_form in authorship_formset:
+                if authorship_form.cleaned_data and not authorship_form.cleaned_data.get('DELETE'):
+                    firstname = authorship_form.cleaned_data.get('author_firstname', '').strip()
+                    lastname = authorship_form.cleaned_data.get('author_lastname', '').strip()
+                    author = authorship_form.cleaned_data.get('author')
+                    
+                    # Create new author if names provided but no author selected
+                    if firstname and lastname and not author:
+                        author, _ = Author.objects.get_or_create(
+                            firstname=firstname,
+                            lastname=lastname
+                        )
+                        authorship_form.instance.author = author
+            
+            authorship_formset.save()
+            messages.success(self.request, f'Source "{self.object.source_title}" created successfully.')
+            return HttpResponseRedirect(self.get_success_url())
+        else:
+            return self.render_to_response(self.get_context_data(form=form))
+    
+    def get_success_url(self):
+        return reverse('source-detail', kwargs={'pk': self.object.pk})
+
+
+class SourceUpdateView(LoginRequiredMixin, UpdateView):
+    """Update an existing Source."""
+    model = Source
+    form_class = SourceForm
+    template_name = 'database/source_form.html'
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        if self.request.POST:
+            context['authorship_formset'] = AuthorshipFormSet(self.request.POST, instance=self.object)
+        else:
+            context['authorship_formset'] = AuthorshipFormSet(instance=self.object)
+        context['form_title'] = 'Edit Source'
+        context['submit_text'] = 'Save Changes'
+        return context
+    
+    def form_valid(self, form):
+        context = self.get_context_data()
+        authorship_formset = context['authorship_formset']
+        
+        if authorship_formset.is_valid():
+            self.object = form.save()
+            
+            # Process authorships, creating new authors if needed
+            for authorship_form in authorship_formset:
+                if authorship_form.cleaned_data and not authorship_form.cleaned_data.get('DELETE'):
+                    firstname = authorship_form.cleaned_data.get('author_firstname', '').strip()
+                    lastname = authorship_form.cleaned_data.get('author_lastname', '').strip()
+                    author = authorship_form.cleaned_data.get('author')
+                    
+                    if firstname and lastname and not author:
+                        author, _ = Author.objects.get_or_create(
+                            firstname=firstname,
+                            lastname=lastname
+                        )
+                        authorship_form.instance.author = author
+            
+            authorship_formset.save()
+            messages.success(self.request, f'Source "{self.object.source_title}" updated successfully.')
+            return HttpResponseRedirect(self.get_success_url())
+        else:
+            return self.render_to_response(self.get_context_data(form=form))
+    
+    def get_success_url(self):
+        return reverse('source-detail', kwargs={'pk': self.object.pk})
+
+
+class SourceDeleteView(LoginRequiredMixin, DeleteView):
+    """Delete a Source."""
+    model = Source
+    template_name = 'database/confirm_delete.html'
+    success_url = reverse_lazy('source-search')
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['object_type'] = 'Source'
+        context['object_name'] = self.object.source_title or f'Source #{self.object.pk}'
+        context['cancel_url'] = reverse('source-detail', kwargs={'pk': self.object.pk})
+        return context
+    
+    def delete(self, request, *args, **kwargs):
+        source = self.get_object()
+        title = source.source_title or f'Source #{source.pk}'
+        messages.success(request, f'Source "{title}" deleted successfully.')
+        return super().delete(request, *args, **kwargs)
+
+
+# =============================================================================
+# KineticModel CRUD Views
+# =============================================================================
+
+class KineticModelCreateView(LoginRequiredMixin, CreateView):
+    """Create a new KineticModel."""
+    model = KineticModel
+    form_class = KineticModelForm
+    template_name = 'database/kineticmodel_form.html'
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['form_title'] = 'Add New Kinetic Model'
+        context['submit_text'] = 'Create Model'
+        return context
+    
+    def form_valid(self, form):
+        self.object = form.save()
+        messages.success(self.request, f'Kinetic Model "{self.object.model_name}" created successfully.')
+        return HttpResponseRedirect(self.get_success_url())
+    
+    def get_success_url(self):
+        return reverse('kinetic-model-detail', kwargs={'pk': self.object.pk})
+
+
+class KineticModelUpdateView(LoginRequiredMixin, UpdateView):
+    """Update an existing KineticModel."""
+    model = KineticModel
+    form_class = KineticModelForm
+    template_name = 'database/kineticmodel_form.html'
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['form_title'] = 'Edit Kinetic Model'
+        context['submit_text'] = 'Save Changes'
+        return context
+    
+    def form_valid(self, form):
+        self.object = form.save()
+        messages.success(self.request, f'Kinetic Model "{self.object.model_name}" updated successfully.')
+        return HttpResponseRedirect(self.get_success_url())
+    
+    def get_success_url(self):
+        return reverse('kinetic-model-detail', kwargs={'pk': self.object.pk})
+
+
+class KineticModelDeleteView(LoginRequiredMixin, DeleteView):
+    """Delete a KineticModel."""
+    model = KineticModel
+    template_name = 'database/confirm_delete.html'
+    success_url = reverse_lazy('kinetic-model-list')
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['object_type'] = 'Kinetic Model'
+        context['object_name'] = self.object.model_name
+        context['cancel_url'] = reverse('kinetic-model-detail', kwargs={'pk': self.object.pk})
+        # Warning about related data
+        context['warning'] = (
+            f'This will also remove all {self.object.species.count()} species names, '
+            f'{self.object.kinetics.count()} kinetics comments, '
+            f'{self.object.thermo.count()} thermo comments, and '
+            f'{self.object.transport.count()} transport comments associated with this model.'
+        )
+        return context
+    
+    def delete(self, request, *args, **kwargs):
+        model = self.get_object()
+        messages.success(request, f'Kinetic Model "{model.model_name}" deleted successfully.')
+        return super().delete(request, *args, **kwargs)
+
+
+# =============================================================================
+# Author CRUD Views
+# =============================================================================
+
+class AuthorListView(ListView):
+    """List all Authors."""
+    model = Author
+    template_name = 'database/author_list.html'
+    paginate_by = 50
+    ordering = ['lastname', 'firstname']
+
+
+class AuthorCreateView(LoginRequiredMixin, CreateView):
+    """Create a new Author."""
+    model = Author
+    form_class = AuthorForm
+    template_name = 'database/author_form.html'
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['form_title'] = 'Add New Author'
+        context['submit_text'] = 'Create Author'
+        return context
+    
+    def form_valid(self, form):
+        self.object = form.save()
+        messages.success(self.request, f'Author "{self.object.name}" created successfully.')
+        return HttpResponseRedirect(self.get_success_url())
+    
+    def get_success_url(self):
+        return reverse('author-list')
+
+
+class AuthorUpdateView(LoginRequiredMixin, UpdateView):
+    """Update an existing Author."""
+    model = Author
+    form_class = AuthorForm
+    template_name = 'database/author_form.html'
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['form_title'] = 'Edit Author'
+        context['submit_text'] = 'Save Changes'
+        return context
+    
+    def form_valid(self, form):
+        self.object = form.save()
+        messages.success(self.request, f'Author "{self.object.name}" updated successfully.')
+        return HttpResponseRedirect(self.get_success_url())
+    
+    def get_success_url(self):
+        return reverse('author-list')
+
+
+class AuthorDeleteView(LoginRequiredMixin, DeleteView):
+    """Delete an Author."""
+    model = Author
+    template_name = 'database/confirm_delete.html'
+    success_url = reverse_lazy('author-list')
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['object_type'] = 'Author'
+        context['object_name'] = self.object.name
+        context['cancel_url'] = reverse('author-list')
+        pub_count = self.object.authorship_set.count()
+        if pub_count:
+            context['warning'] = f'This author is associated with {pub_count} publication(s).'
+        return context
+    
+    def delete(self, request, *args, **kwargs):
+        author = self.get_object()
+        messages.success(request, f'Author "{author.name}" deleted successfully.')
+        return super().delete(request, *args, **kwargs)

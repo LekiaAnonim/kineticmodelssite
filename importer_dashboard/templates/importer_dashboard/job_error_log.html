@@ -1,6 +1,11 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block title %}{{ job.name }} - Error Log{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'importer_dashboard/css/dashboard.css' %}">
+{% endblock %}
 
 {% block header_subtitle %}Live Error and Debug Information{% endblock %}
 

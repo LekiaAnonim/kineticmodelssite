@@ -1129,6 +1129,7 @@ td a:focus-visible {
     border-radius: 4px;
     border: 1px solid #ddd;
     background: white;
+    color: #374151;
     cursor: pointer;
     transition: all 0.2s;
 }
@@ -1136,15 +1137,19 @@ td a:focus-visible {
 .btn-small:hover {
     background: #f5f5f5;
     border-color: #0078d4;
+    color: #374151;
 }
 
 .btn-secondary.btn-small {
-    background: #606060;
-    border-color: #ccc;
+    background: #f3f4f6;
+    border-color: #d1d5db;
+    color: #374151;
 }
 
 .btn-secondary.btn-small:hover {
-    background: #e0e0e0;
+    background: #e5e7eb;
+    border-color: #9ca3af;
+    color: #1f2937;
 }
 
 /* Animation for new log entries */

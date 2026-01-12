@@ -175,20 +175,8 @@ class IncrementalSync:
         from .models import Species, CandidateSpecies
         
         try:
-            # Query identified species (use correct column names from vote_local_db.py)
-            query = """
-                SELECT 
-                    chemkin_label,
-                    chemkin_formula,
-                    rmg_species_smiles,
-                    rmg_species_index,
-                    rmg_species_label,
-                    identification_method,
-                    identified_by,
-                    enthalpy_discrepancy,
-                    identified_at
-                FROM identified_species
-            """
+            # Use SELECT * to handle schema variations gracefully
+            query = "SELECT * FROM identified_species"
             results = self.query_remote_db(db_path, query)
             
             if not results:
@@ -319,20 +307,8 @@ class IncrementalSync:
         from .models import Species, CandidateSpecies, VoteCandidate
         
         try:
-            # Query species_votes table for candidates (use correct column names)
-            query = """
-                SELECT 
-                    id,
-                    chemkin_label,
-                    chemkin_formula,
-                    rmg_species_label,
-                    rmg_species_index,
-                    rmg_species_smiles,
-                    rmg_species_formula,
-                    vote_count,
-                    enthalpy_discrepancy
-                FROM species_votes
-            """
+            # Use SELECT * to handle schema variations gracefully
+            query = "SELECT * FROM species_votes"
             results = self.query_remote_db(db_path, query)
             
             if not results:
@@ -411,14 +387,9 @@ class IncrementalSync:
         from .models import Species, VoteCandidate, VotingReaction
         
         try:
-            # Query voting_reactions with JOIN to species_votes (correct schema)
+            # Use SELECT * with JOIN to handle schema variations
             query = """
-                SELECT 
-                    sv.chemkin_label,
-                    sv.rmg_species_index,
-                    vr.chemkin_reaction_str,
-                    vr.edge_reaction_str,
-                    vr.reaction_family
+                SELECT sv.*, vr.*
                 FROM voting_reactions vr
                 JOIN species_votes sv ON vr.species_vote_id = sv.id
             """
@@ -476,17 +447,8 @@ class IncrementalSync:
         from .models import BlockedMatch
         
         try:
-            # Use correct column names from vote_local_db.py
-            query = """
-                SELECT 
-                    chemkin_label,
-                    rmg_species_smiles,
-                    rmg_species_label,
-                    rmg_species_index,
-                    reason,
-                    blocked_at
-                FROM blocked_matches
-            """
+            # Use SELECT * to handle schema variations
+            query = "SELECT * FROM blocked_matches"
             results = self.query_remote_db(db_path, query)
             
             if not results:
@@ -526,14 +488,9 @@ class IncrementalSync:
         from .models import Species, CandidateSpecies, ThermoMatch
         
         try:
-            # Query thermo_matches with JOIN to species_votes
+            # Use SELECT * with JOIN to handle schema variations
             query = """
-                SELECT 
-                    sv.chemkin_label,
-                    sv.rmg_species_index,
-                    tm.library_name,
-                    tm.library_species_name,
-                    tm.name_matches
+                SELECT sv.*, tm.*
                 FROM thermo_matches tm
                 JOIN species_votes sv ON tm.species_vote_id = sv.id
             """
@@ -606,20 +563,8 @@ class IncrementalSync:
         from .models import ChemkinReaction
         
         try:
-            # Query chemkin_reactions table
-            query = """
-                SELECT 
-                    reaction_index,
-                    reaction_string,
-                    reactant_labels,
-                    product_labels,
-                    kinetics_type,
-                    kinetics_comment,
-                    is_matched,
-                    is_identified
-                FROM chemkin_reactions
-                ORDER BY reaction_index
-            """
+            # Use SELECT * to handle schema variations
+            query = "SELECT * FROM chemkin_reactions ORDER BY reaction_index"
             results = self.query_remote_db(db_path, query)
             
             if not results:
@@ -679,51 +624,13 @@ class IncrementalSync:
             dict: Job statistics or empty dict on failure
         """
         try:
-            # First try with all columns (new schema)
+            # Use SELECT * to avoid column name issues with different schema versions
             query = """
-                SELECT 
-                    total_species,
-                    identified_species,
-                    confirmed_species,
-                    processed_species,
-                    unprocessed_species,
-                    tentative_species,
-                    unidentified_species,
-                    total_reactions,
-                    matched_reactions,
-                    unmatched_reactions,
-                    thermo_matches_count,
-                    status
-                FROM import_jobs
+                SELECT * FROM import_jobs
                 ORDER BY updated_at DESC
                 LIMIT 1
             """
             results = self.query_remote_db(db_path, query)
-            
-            # If query failed (likely missing columns), try with basic columns only
-            if not results:
-                logger.warning("Full query failed, trying basic columns only")
-                query = """
-                    SELECT 
-                        total_species,
-                        identified_species,
-                        total_reactions,
-                        status
-                    FROM import_jobs
-                    ORDER BY updated_at DESC
-                    LIMIT 1
-                """
-                results = self.query_remote_db(db_path, query)
-            
-            # If still no results, try minimal query (just get what exists)
-            if not results:
-                logger.warning("Basic query failed, trying minimal query")
-                query = """
-                    SELECT * FROM import_jobs
-                    ORDER BY updated_at DESC
-                    LIMIT 1
-                """
-                results = self.query_remote_db(db_path, query)
             
             if results and len(results) > 0:
                 row = results[0]

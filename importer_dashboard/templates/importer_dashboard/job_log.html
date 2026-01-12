@@ -1,6 +1,11 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block title %}{{ job.name }} - RMG Log{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'importer_dashboard/css/dashboard.css' %}">
+{% endblock %}
 
 {% block header_subtitle %}Real-time Job Logs{% endblock %}
 

@@ -76,6 +76,17 @@ class Species(models.Model):
         if isomers:
             return isomers.first().formula.formula
 
+    @property
+    def enthalpy_formation(self):
+        """Return the enthalpy at 298K from the first associated Thermo entry."""
+        thermo = self.thermo_set.first()
+        if thermo:
+            try:
+                return f"{thermo.enthalpy298:,.0f}"
+            except (ValueError, TypeError):
+                pass
+        return None
+
 
 class Reaction(models.Model):
     hash = models.CharField(max_length=32, unique=True)

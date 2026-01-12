@@ -1,240 +1,273 @@
 {% load static %}
 {% load crispy_forms_tags %}
-
 <!DOCTYPE html>
-<html>
-    <head>
-        <!-- Required meta tags -->
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
-
-        <link rel="stylesheet" href="{% static 'importer_dashboard/css/dashboard.css' %}" />
-
-        <!-- Bootstrap CSS -->
-        <link
-            rel="stylesheet"
-            href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css"
-            crossorigin="anonymous"
-        />
-        
-        <!-- Custom styles for lookup dropdown -->
-        <style>
-            /* Prevent dropdown from closing when clicking inside */
-            .dropdown-menu-lg {
-                padding: 0;
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <meta name="description" content="Kinetic Models Database - A comprehensive database of chemical kinetic models for combustion and atmospheric chemistry research.">
+    <meta name="keywords" content="kinetics, chemical reactions, combustion, thermodynamics, RMG, kinetic models">
+    
+    <!-- Preconnect for performance -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    
+    <!-- Professional Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    
+    <!-- Bootstrap 5 (upgraded from 4) -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <!-- Bootstrap Icons -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+    
+    <!-- Custom Scientific Stylesheet -->
+    <link rel="stylesheet" href="{% static 'database/css/scientific.css' %}">
+    
+    <!-- MathJax for equations -->
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [["$", "$"], ["\\(", "\\)"]],
+                displayMath: [["$$", "$$"], ["\\[", "\\]"]]
+            },
+            svg: {
+                fontCache: "global"
             }
+        };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    
+    {% block extra_css %}{% endblock %}
+    
+    <title>{% if title %}{{ title }} | {% endif %}Kinetic Models Database</title>
+</head>
+<body>
+    <!-- Skip to main content link for accessibility -->
+    <a href="#main-content" class="sr-only sr-only-focusable">Skip to main content</a>
+    
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-light bg-white sticky-top">
+        <div class="container">
+            <a class="navbar-brand d-flex align-items-center" href="{% url 'home' %}">
+                <i class="bi bi-diagram-3 me-2" style="font-size: 1.5rem; color: var(--color-primary);"></i>
+                <span>Kinetic Models Database</span>
+            </a>
             
-            .dropdown-menu form {
-                margin-bottom: 0;
-            }
-            
-            /* Make dropdown scrollable on small screens */
-            @media (max-height: 768px) {
-                .dropdown-menu {
-                    max-height: 400px;
-                    overflow-y: auto;
-                }
-            }
-            
-            /* Better mobile responsiveness */
-            @media (max-width: 576px) {
-                .dropdown-menu-lg {
-                    min-width: 280px !important;
-                    left: 50% !important;
-                    transform: translateX(-50%);
-                }
-            }
-            
-            /* Improve form spacing in dropdown */
-            .dropdown-menu .input-group-sm {
-                margin-bottom: 0.5rem;
-            }
-            
-            .dropdown-menu .dropdown-header {
-                font-size: 0.9rem;
-                color: #495057;
-                font-weight: 600;
-            }
-        </style>
-        
-        <!-- Allow templates to add extra CSS -->
-        {% block extra_css %}{% endblock %}
-
-        <!--MathJax-->
-        <script>
-            window.MathJax = {
-                tex: {
-                    inlineMath: [
-                        ["$", "$"],
-                        ["\\(", "\\)"],
-                    ],
-                },
-                svg: {
-                    fontCache: "global",
-                },
-                displayAlign: "left",
-            };
-        </script>
-        <script
-            type="text/javascript"
-            id="MathJax-script"
-            async
-            src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"
-        ></script>
-        <script
-            src="https://code.jquery.com/jquery-3.5.1.slim.min.js"
-            integrity="sha384-DfXdz2htPH0lsSSs5nCTpuj/zy4C+OGpamoFVy38MVBnE+IbbVYUew+OrCXaRkfj"
-            crossorigin="anonymous"
-        ></script>
-        <script type="text/javascript" src="{% static 'admin/js/vendor/jquery/jquery.js' %}"></script>
-        {% load static %}
-        <script type="text/javascript">
-            // Only load formset if it exists
-            var formsetScript = document.createElement('script');
-            formsetScript.src = '{% static "database/jquery.formset.js" %}';
-            formsetScript.onerror = function() {
-                console.log('jquery.formset.js not found (optional dependency)');
-            };
-            document.head.appendChild(formsetScript);
-        </script>
-        {% if title %}
-        <title>Kinetic Models Site - {{ title }}</title>
-        {% else %}
-        <title>Kinetic Models Site</title>
-        {% endif %}
-    </head>
-    <body>
-        <nav class="navbar navbar-expand-md navbar-dark bg-primary">
-            <a class="navbar-brand" href="#">Kinetic Models Site</a>
-            <button
-                class="navbar-toggler"
-                type="button"
-                data-toggle="collapse"
-                data-target="#navbarSupportedContent"
-                aria-controls="navbarSupportedContent"
-                aria-expanded="false"
-                aria-label="Toggle navigation"
-            >
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav" 
+                    aria-controls="mainNav" aria-expanded="false" aria-label="Toggle navigation">
                 <span class="navbar-toggler-icon"></span>
             </button>
-
-            <div class="collapse navbar-collapse" id="navbarSupportedContent">
-                <ul class="navbar-nav mr-auto">
-                    <li class="nav-item active">
-                        <a class="nav-link" href="{% url 'home' %}">Home <span class="sr-only">(current)</span></a>
+            
+            <div class="collapse navbar-collapse" id="mainNav">
+                <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.resolver_match.url_name == 'home' %}active{% endif %}" href="{% url 'home' %}">
+                            <i class="bi bi-house-door me-1"></i>Home
+                        </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" href="{% url 'species-search' %}">Species Search</a>
+                        <a class="nav-link {% if 'species' in request.resolver_match.url_name %}active{% endif %}" href="{% url 'species-search' %}">
+                            <i class="bi bi-droplet me-1"></i>Species
+                        </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" href="{% url 'reaction-search' %}">Reaction Search</a>
+                        <a class="nav-link {% if 'reaction' in request.resolver_match.url_name %}active{% endif %}" href="{% url 'reaction-search' %}">
+                            <i class="bi bi-arrow-left-right me-1"></i>Reactions
+                        </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" href="{% url 'source-search' %}">Source Search</a>
+                        <a class="nav-link {% if 'source' in request.resolver_match.url_name %}active{% endif %}" href="{% url 'source-search' %}">
+                            <i class="bi bi-journal-text me-1"></i>Sources
+                        </a>
                     </li>
                     
-                    <!-- Lookups Dropdown Menu -->
+                    <!-- Quick Lookup Dropdown -->
                     <li class="nav-item dropdown">
-                        <a class="nav-link dropdown-toggle" href="#" id="lookupsDropdown" role="button" 
-                           data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
-                            Lookups
+                        <a class="nav-link dropdown-toggle" href="#" id="lookupDropdown" role="button" 
+                           data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="bi bi-search me-1"></i>Quick Lookup
                         </a>
-                        <div class="dropdown-menu dropdown-menu-lg p-3" aria-labelledby="lookupsDropdown" 
-                             style="min-width: 320px;" onclick="event.stopPropagation();">
-                            <h6 class="dropdown-header">Species, Reaction & Source Lookups</h6>
-                            <div class="dropdown-divider"></div>
+                        <div class="dropdown-menu dropdown-menu-end p-3" style="min-width: 280px;">
+                            <h6 class="dropdown-header px-0">
+                                <i class="bi bi-lightning me-1"></i>Direct ID Lookup
+                            </h6>
                             
                             <!-- Species Lookup -->
-                            <form action="" method="get" class="px-2 py-2">
-                                <label class="font-weight-bold small mb-1">Species Lookup</label>
-                                <div class="input-group input-group-sm mb-2">
-                                    <input
-                                        type="number"
-                                        min="1"
-                                        name="species_pk"
-                                        placeholder="Enter Species ID"
-                                        class="form-control form-control-sm"
-                                    />
-                                    <div class="input-group-append">
-                                        <button type="submit" class="btn btn-sm btn-primary">Go</button>
-                                    </div>
+                            <form action="" method="get" class="mb-3">
+                                <label class="form-label small fw-semibold">Species ID</label>
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text"><i class="bi bi-droplet"></i></span>
+                                    <input type="number" name="species_pk" class="form-control" placeholder="Enter ID" min="1">
+                                    <button class="btn btn-primary" type="submit">Go</button>
                                 </div>
-                                {% if species_invalid %}<small class="text-danger">{{species_invalid}}</small>{% endif %}
+                                {% if species_invalid %}<small class="text-danger">{{ species_invalid }}</small>{% endif %}
                             </form>
-                            
-                            <div class="dropdown-divider"></div>
                             
                             <!-- Reaction Lookup -->
-                            <form action="" method="get" class="px-2 py-2">
-                                <label class="font-weight-bold small mb-1">Reaction Lookup</label>
-                                <div class="input-group input-group-sm mb-2">
-                                    <input
-                                        type="number"
-                                        min="1"
-                                        name="reaction_pk"
-                                        placeholder="Enter Reaction ID"
-                                        class="form-control form-control-sm"
-                                    />
-                                    <div class="input-group-append">
-                                        <button type="submit" class="btn btn-sm btn-primary">Go</button>
-                                    </div>
+                            <form action="" method="get" class="mb-3">
+                                <label class="form-label small fw-semibold">Reaction ID</label>
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text"><i class="bi bi-arrow-left-right"></i></span>
+                                    <input type="number" name="reaction_pk" class="form-control" placeholder="Enter ID" min="1">
+                                    <button class="btn btn-primary" type="submit">Go</button>
                                 </div>
-                                {% if reaction_invalid %}<small class="text-danger">{{reaction_invalid}}</small>{% endif %}
+                                {% if reaction_invalid %}<small class="text-danger">{{ reaction_invalid }}</small>{% endif %}
                             </form>
                             
-                            <div class="dropdown-divider"></div>
-                            
                             <!-- Source Lookup -->
-                            <form action="" method="get" class="px-2 py-2">
-                                <label class="font-weight-bold small mb-1">Source Lookup</label>
-                                <div class="input-group input-group-sm mb-2">
-                                    <input
-                                        type="number"
-                                        min="1"
-                                        name="source_pk"
-                                        id="source_pk"
-                                        placeholder="Enter Source ID"
-                                        class="form-control form-control-sm"
-                                    />
-                                    <div class="input-group-append">
-                                        <button type="submit" class="btn btn-sm btn-primary">Go</button>
-                                    </div>
+                            <form action="" method="get">
+                                <label class="form-label small fw-semibold">Source ID</label>
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text"><i class="bi bi-journal"></i></span>
+                                    <input type="number" name="source_pk" class="form-control" placeholder="Enter ID" min="1">
+                                    <button class="btn btn-primary" type="submit">Go</button>
                                 </div>
-                                {% if source_invalid %}<small class="text-danger">{{source_invalid}}</small>{% endif %}
+                                {% if source_invalid %}<small class="text-danger">{{ source_invalid }}</small>{% endif %}
                             </form>
                         </div>
                     </li>
-                    
-                    <li class="nav-item">
-                        <a class="nav-link" href="{% url 'login' %}">Login</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="{% url 'register' %}">Register</a>
-                    </li>
                 </ul>
-                <form class="form-inline my-2 my-lg-0">
-                    <input
-                        class="form-control mr-sm-2"
-                        type="search"
-                        placeholder="Search"
-                        aria-label="Search"
-                    />
-                    <button class="btn btn-outline-success my-2 my-sm-0" type="submit">
-                        Search
-                    </button>
-                </form>
+                
+                <!-- Right-side items -->
+                <ul class="navbar-nav">
+                    {% if user.is_authenticated %}
+                    <!-- Importer Dashboard -->
+                    <li class="nav-item">
+                        <a class="nav-link {% if 'importer' in request.resolver_match.namespace %}active{% endif %}" href="{% url 'importer_dashboard:index' %}">
+                            <i class="bi bi-cloud-upload me-1"></i>Importer
+                        </a>
+                    </li>
+                    <!-- Data Management Menu -->
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle" href="#" id="dataDropdown" role="button" 
+                           data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="bi bi-plus-circle me-1"></i>Add Data
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-end">
+                            <li class="dropdown-header">Create New</li>
+                            <li><a class="dropdown-item" href="{% url 'source-create' %}"><i class="bi bi-journal-plus me-2"></i>Source</a></li>
+                            <li><a class="dropdown-item" href="{% url 'kinetic-model-create' %}"><i class="bi bi-diagram-3 me-2"></i>Kinetic Model</a></li>
+                            <li><a class="dropdown-item" href="{% url 'author-create' %}"><i class="bi bi-person-plus me-2"></i>Author</a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li class="dropdown-header">Manage</li>
+                            <li><a class="dropdown-item" href="{% url 'author-list' %}"><i class="bi bi-people me-2"></i>Authors</a></li>
+                        </ul>
+                    </li>
+                    <!-- User Menu -->
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" 
+                           data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="bi bi-person-circle me-1"></i>{{ user.username }}
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-end">
+                            <li><a class="dropdown-item" href="{% url 'admin:index' %}"><i class="bi bi-gear me-2"></i>Admin</a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item" href="{% url 'logout' %}"><i class="bi bi-box-arrow-right me-2"></i>Logout</a></li>
+                        </ul>
+                    </li>
+                    {% else %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="{% url 'login' %}">
+                            <i class="bi bi-box-arrow-in-right me-1"></i>Login
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="btn btn-outline-primary btn-sm ms-2" href="{% url 'register' %}">
+                            Register
+                        </a>
+                    </li>
+                    {% endif %}
+                </ul>
             </div>
-        </nav>
-        <main role="main">
-            {% block content %}{% endblock %}
-        </main>
-        <!-- Bootstrap JS-->
-        <script
-            src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.bundle.min.js"
-            crossorigin="anonymous"
-        ></script>
-        <!-- Static JavaScript-->
-        <script src="{% static 'database/main.js' %}"></script>
-        {% block extra_js %}{% endblock %}
-    </body>
+        </div>
+    </nav>
+    
+    <!-- Messages -->
+    {% if messages %}
+    <div class="container mt-3">
+        {% for message in messages %}
+        <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+            {% if message.tags == 'success' %}
+            <i class="bi bi-check-circle-fill me-2"></i>
+            {% elif message.tags == 'error' %}
+            <i class="bi bi-exclamation-triangle-fill me-2"></i>
+            {% elif message.tags == 'warning' %}
+            <i class="bi bi-exclamation-circle-fill me-2"></i>
+            {% else %}
+            <i class="bi bi-info-circle-fill me-2"></i>
+            {% endif %}
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    
+    <!-- Main Content -->
+    <main role="main" id="main-content">
+        {% block content %}{% endblock %}
+    </main>
+    
+    <!-- Footer -->
+    <footer class="site-footer">
+        <div class="footer-content">
+            <div class="footer-section">
+                <h4>About</h4>
+                <p class="small mb-3" style="color: #adb5bd;">
+                    The Kinetic Models Database is a comprehensive repository of validated chemical kinetic models 
+                    for combustion and atmospheric chemistry research.
+                </p>
+                <div class="nsf-badge">
+                    <i class="bi bi-award"></i>
+                    NSF-Funded Research Project
+                </div>
+            </div>
+            
+            <div class="footer-section">
+                <h4>Resources</h4>
+                <a href="{% url 'species-search' %}">Browse Species</a>
+                <a href="{% url 'reaction-search' %}">Browse Reactions</a>
+                <a href="{% url 'source-search' %}">Browse Sources</a>
+            </div>
+            
+            <div class="footer-section">
+                <h4>Tools</h4>
+                <a href="{% url 'importer_dashboard:index' %}">RMG Importer</a>
+                <a href="#">API Documentation</a>
+                <a href="#">Download Data</a>
+            </div>
+            
+            <div class="footer-section">
+                <h4>Connect</h4>
+                <a href="https://github.com/ReactionMechanismGenerator" target="_blank" rel="noopener">
+                    <i class="bi bi-github me-1"></i>GitHub
+                </a>
+                <a href="#">
+                    <i class="bi bi-envelope me-1"></i>Contact Us
+                </a>
+                <a href="#">
+                    <i class="bi bi-file-text me-1"></i>Cite This Database
+                </a>
+            </div>
+        </div>
+        
+        <div class="footer-bottom">
+            <p class="mb-1">
+                &copy; {% now "Y" %} Reaction Mechanism Generator. All rights reserved.
+            </p>
+            <p class="small mb-0">
+                Developed at Northeastern University | West Research Group
+            </p>
+        </div>
+    </footer>
+    
+    <!-- Bootstrap 5 JS Bundle -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Custom JS -->
+    <script src="{% static 'database/main.js' %}"></script>
+    
+    {% block extra_js %}{% endblock %}
+</body>
 </html>

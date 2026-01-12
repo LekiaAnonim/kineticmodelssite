@@ -4,74 +4,204 @@
 {% load renders %}
 
 {% block content %}
-<h1>{{kinetic_model.model_name}}</h1>
+<!-- Compact Header -->
+<div class="detail-header">
+    <nav aria-label="breadcrumb" class="small mb-1">
+        <ol class="breadcrumb mb-0">
+            <li class="breadcrumb-item"><a href="{% url 'home' %}">Home</a></li>
+            <li class="breadcrumb-item"><a href="{% url 'kinetic-model-list' %}">Models</a></li>
+            <li class="breadcrumb-item active">{{ kinetic_model.model_name }}</li>
+        </ol>
+    </nav>
+    <div class="d-flex align-items-center gap-3 flex-wrap">
+        <h1 class="h4 mb-0">{{ kinetic_model.model_name }}</h1>
+        <span class="badge bg-secondary">ID: {{ kinetic_model.pk }}</span>
+        {% if kinetic_model.species.count %}<span class="badge bg-primary-subtle text-primary"><i class="bi bi-droplet me-1"></i>{{ kinetic_model.species.count }} species</span>{% endif %}
+        {% if kinetic_model.kinetics.count %}<span class="badge bg-success-subtle text-success"><i class="bi bi-arrow-left-right me-1"></i>{{ kinetic_model.kinetics.count }} kinetics</span>{% endif %}
+        {% if user.is_authenticated %}
+        <a href="{% url 'kinetic-model-update' kinetic_model.pk %}" class="btn btn-outline-primary btn-sm ms-auto" title="Edit">
+            <i class="bi bi-pencil me-1"></i>Edit
+        </a>
+        {% endif %}
+    </div>
+</div>
 
-    {% if kinetic_model.chemkin_reactions_file or kinetic_model.chemkin_transport_file or kinetic_model.chemkin_thermo_file %}
-    <h2>Downloads</h2>
-    <ul class="list-group">
-        {% if kinetic_model.chemkin_reactions_file %}
-        <li class="list-group-item"><a href="{{ kinetic_model.chemkin_reactions_file.url }}" download>Chemkin Reactions File</a></li>
-        {% endif %}
-        {% if kinetic_model.chemkin_thermo_file %}
-        <li class="list-group-item"><a href="{{ kinetic_model.chemkin_thermo_file.url }}" download>Chemkin Thermo File</a></li>
-        {% endif %}
-        {% if kinetic_model.chemkin_transport_file %}
-        <li class="list-group-item"><a href="{{ kinetic_model.chemkin_transport_file.url }}" download>Chemkin Transport File</a></li>
-        {% endif %}
-    </ul>
-    {% endif %}
-    {% if source %}
-    <h2>Source</h2>
-    <div class="card">
-            <a href="{% url 'source-detail' source.pk %}"
-               class="list-group-item list-group-item-action flex-column align-items-start"
-            >
-                <div class="d-flex w-100 justify-content-between">
-                    <h6 class="mb-1">{{ source.source_title.title|titlecase }}</h6>
-                </div>
-                <i>{{ source.pub_info }}</i>
-                <br>
-                {{ source.author_line }}
-            </a>
-    </div>
-    <br>
-    {% endif %}
-    {% if thermo_transport %}
-    <h2>Species</h2>
-    <div class="card">
-    {% for th, tr in thermo_transport %}
-    {% with thermo=th.thermo transport=tr.transport%}
-    {% if thermo %}
-    <a href="{% url 'species-detail' thermo.species.pk %}" class="list-group-item list-group-item-action">
-    {% else %}
-    <a href="{% url 'species-detail' transport.species.pk %}" class="list-group-item list-group-item-action">
-    {% endif %}
-        <div class="d-flex w-100 justify-content-between">
-            <h5 class="mb-1">{% firstof thermo.species.formula transport.species.formula %}</h5>
-            <small>ID: {% firstof thermo.species.pk transport.species.pk %}</small>
+<div class="row g-3">
+    <!-- Main Content -->
+    <div class="col-lg-8">
+        <!-- Downloads -->
+        {% if kinetic_model.chemkin_reactions_file or kinetic_model.chemkin_transport_file or kinetic_model.chemkin_thermo_file %}
+        <div class="data-section mb-3">
+            <div class="section-header">
+                <h6 class="mb-0"><i class="bi bi-download me-2"></i>Downloads</h6>
+            </div>
+            <div class="section-body p-0">
+                <table class="table table-sm table-hover mb-0">
+                    {% if kinetic_model.chemkin_reactions_file %}
+                    <tr>
+                        <td><i class="bi bi-file-code text-primary me-2"></i>Mechanism File</td>
+                        <td class="text-muted small">Reactions & rate parameters</td>
+                        <td class="text-end"><a href="{{ kinetic_model.chemkin_reactions_file.url }}" download class="btn btn-sm btn-outline-primary"><i class="bi bi-download"></i></a></td>
+                    </tr>
+                    {% endif %}
+                    {% if kinetic_model.chemkin_thermo_file %}
+                    <tr>
+                        <td><i class="bi bi-thermometer-half text-warning me-2"></i>Thermo File</td>
+                        <td class="text-muted small">NASA polynomials</td>
+                        <td class="text-end"><a href="{{ kinetic_model.chemkin_thermo_file.url }}" download class="btn btn-sm btn-outline-primary"><i class="bi bi-download"></i></a></td>
+                    </tr>
+                    {% endif %}
+                    {% if kinetic_model.chemkin_transport_file %}
+                    <tr>
+                        <td><i class="bi bi-arrows-move text-info me-2"></i>Transport File</td>
+                        <td class="text-muted small">Transport properties</td>
+                        <td class="text-end"><a href="{{ kinetic_model.chemkin_transport_file.url }}" download class="btn btn-sm btn-outline-primary"><i class="bi bi-download"></i></a></td>
+                    </tr>
+                    {% endif %}
+                </table>
+            </div>
         </div>
-        {% if thermo %}
-        <h6 class="mb-1">Thermo Data</h6>
-        {% if th.comment %}<p class="mb-1">{{ th.comment }}</p>{% endif %}
-        {{ thermo|render_thermo_table:True }}
         {% endif %}
-        {% if transport %}
-        <h6 class="mb-1">Transport Data</h6>
-        {% if tr.comment %}<p class="mb-1">{{ tr.comment }}</p>{% endif %}
-        {{ transport|render_transport_table:True }}
+
+        <!-- Species -->
+        {% if thermo_transport %}
+        <div class="data-section mb-3">
+            <div class="section-header" data-bs-toggle="collapse" data-bs-target="#speciesSection">
+                <h6 class="mb-0"><i class="bi bi-droplet me-2"></i>Species ({{ thermo_transport|length }})</h6>
+                <i class="bi bi-chevron-down"></i>
+            </div>
+            <div class="collapse show" id="speciesSection">
+                <div class="section-body p-0">
+                    <table class="table table-sm table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>Formula</th>
+                                <th class="text-center" style="width:60px;">Thermo</th>
+                                <th class="text-center" style="width:60px;">Trans.</th>
+                                <th style="width:40px;"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for th, tr in thermo_transport %}
+                            {% with thermo=th.thermo transport=tr.transport %}
+                            <tr class="clickable-row" data-href="{% firstof thermo.species.pk transport.species.pk as spk %}{% url 'species-detail' spk %}">
+                                <td class="font-monospace fw-medium">{% firstof thermo.species.formula transport.species.formula %}</td>
+                                <td class="text-center">{% if thermo %}<i class="bi bi-check text-success"></i>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+                                <td class="text-center">{% if transport %}<i class="bi bi-check text-success"></i>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+                                <td class="text-end"><i class="bi bi-chevron-right text-muted"></i></td>
+                            </tr>
+                            {% endwith %}
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
         {% endif %}
-    </a>
-    {% endwith %}
-    {% endfor %}
+
+        <!-- Reactions -->
+        {% if reactions %}
+        <div class="data-section">
+            <div class="section-header" data-bs-toggle="collapse" data-bs-target="#reactionsSection">
+                <h6 class="mb-0"><i class="bi bi-arrow-left-right me-2"></i>Reactions ({{ reactions.paginator.count }})</h6>
+                <i class="bi bi-chevron-down"></i>
+            </div>
+            <div class="collapse show" id="reactionsSection">
+                <div class="section-body">
+                    <div class="d-flex justify-content-between align-items-center mb-2 small">
+                        <span class="text-muted">{{ reactions.paginator.count }} reactions</span>
+                        {% render_pagination objects=reactions page_name="page" %}
+                    </div>
+                    {{ reactions|render_reaction_list }}
+                    <div class="mt-2">
+                        {% render_pagination objects=reactions page_name="page" %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
     </div>
-    <br>
-    {% render_pagination objects=thermo_transport page_name="page1" %}
-    <br>
-    {% endif %}
-    {% if kinetics_data %}
-    <h2>Reactions</h2>
-    {{ kinetics_data|render_kinetics_list:True }}
-    <br>
-    {% render_pagination objects=kinetics_data page_name="page2" %}
-    {% endif %}
+
+    <!-- Sidebar -->
+    <div class="col-lg-4">
+        <!-- Model Info -->
+        <div class="data-section mb-3">
+            <div class="section-header">
+                <h6 class="mb-0"><i class="bi bi-info-circle me-2"></i>Model Info</h6>
+            </div>
+            <div class="section-body p-0">
+                <table class="table table-sm mb-0">
+                    <tr><td class="text-muted">Database ID</td><td class="text-end fw-medium">{{ kinetic_model.pk }}</td></tr>
+                    <tr><td class="text-muted">Model Name</td><td class="text-end">{{ kinetic_model.model_name }}</td></tr>
+                    {% if kinetic_model.species_count %}<tr><td class="text-muted">Species</td><td class="text-end">{{ kinetic_model.species_count }}</td></tr>{% endif %}
+                    {% if kinetic_model.reaction_count %}<tr><td class="text-muted">Reactions</td><td class="text-end">{{ kinetic_model.reaction_count }}</td></tr>{% endif %}
+                </table>
+            </div>
+        </div>
+
+        <!-- Source -->
+        {% if kinetic_model.source %}
+        <div class="data-section">
+            <div class="section-header">
+                <h6 class="mb-0"><i class="bi bi-journal-text me-2"></i>Source</h6>
+            </div>
+            <div class="section-body">
+                <a href="{% url 'source-detail' kinetic_model.source.pk %}" class="text-decoration-none">
+                    <strong class="d-block small">{{ kinetic_model.source.source_title|titlecase|truncatewords:12 }}</strong>
+                </a>
+                {% if kinetic_model.source.author_line %}
+                <small class="text-muted">{{ kinetic_model.source.author_line|truncatewords:8 }}</small>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.detail-header {
+    padding: 0.75rem 0;
+    margin-bottom: 0.75rem;
+    border-bottom: 1px solid var(--color-gray-200);
+}
+
+.data-section {
+    background: var(--color-white);
+    border: 1px solid var(--color-gray-200);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    background: var(--color-gray-50);
+    border-bottom: 1px solid var(--color-gray-200);
+    cursor: pointer;
+}
+
+.section-header h6 { font-size: 0.8rem; font-weight: 600; }
+.section-body { padding: 0.75rem; }
+
+.table td, .table th { padding: 0.4rem 0.75rem; vertical-align: middle; }
+.clickable-row { cursor: pointer; }
+.clickable-row:hover { background-color: var(--color-primary-bg) !important; }
+
+.bg-primary-subtle { background-color: #cfe2ff; }
+.bg-success-subtle { background-color: #d1e7dd; }
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.querySelectorAll('.clickable-row').forEach(row => {
+    row.addEventListener('click', function() {
+        window.location.href = this.dataset.href;
+    });
+});
+</script>
 {% endblock %}
