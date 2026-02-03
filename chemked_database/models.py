@@ -1,0 +1,1165 @@
+"""
+ChemKED Database Models
+
+Models for storing experimental combustion data in ChemKED format.
+Supports ignition delay experiments from shock tubes and rapid compression machines.
+
+Reference: https://github.com/pr-omethe-us/ChemKED
+Schema: https://github.com/pr-omethe-us/PyKED
+"""
+
+from django.db import models
+from django.core.validators import MinValueValidator
+
+
+class ApparatusKind(models.TextChoices):
+    """Types of experimental apparatus"""
+    SHOCK_TUBE = 'shock tube', 'Shock Tube'
+    RCM = 'rapid compression machine', 'Rapid Compression Machine'
+    STIRRED_REACTOR = 'stirred reactor', 'Stirred Reactor'
+    JET_STIRRED_REACTOR = 'jet stirred reactor', 'Jet Stirred Reactor'
+    FLOW_REACTOR = 'flow reactor', 'Flow Reactor'
+    FLAME = 'flame', 'Flame'
+
+
+class ExperimentType(models.TextChoices):
+    """Types of experiments"""
+    IGNITION_DELAY = 'ignition delay', 'Ignition Delay'
+    FLAME_SPEED = 'laminar flame speed', 'Laminar Flame Speed'
+    SPECIES_PROFILE = 'species profile', 'Species Profile'
+    RATE_COEFFICIENT = 'rate coefficient', 'Rate Coefficient'
+    THERMOCHEMICAL = 'thermochemical', 'Thermochemical'
+    JSR_MEASUREMENT = 'jet stirred reactor measurement', 'Jet Stirred Reactor Measurement'
+    CONCENTRATION_PROFILE = 'concentration profile', 'Concentration Profile'
+    OUTLET_CONCENTRATION = 'outlet concentration measurement', 'Outlet Concentration Measurement'
+
+
+class IgnitionTarget(models.TextChoices):
+    """Target species/property for ignition detection"""
+    TEMPERATURE = 'temperature', 'Temperature'
+    PRESSURE = 'pressure', 'Pressure'
+    OH = 'OH', 'OH'
+    OH_STAR = 'OH*', 'OH*'
+    CH = 'CH', 'CH'
+    CH_STAR = 'CH*', 'CH*'
+
+
+class IgnitionType(models.TextChoices):
+    """Method of detecting ignition"""
+    DDT_MAX = 'd/dt max', 'd/dt max'
+    MAX = 'max', 'max'
+    HALF_MAX = '1/2 max', '1/2 max'
+    MIN = 'min', 'min'
+    DDT_MAX_EXTRAPOLATED = 'd/dt max extrapolated', 'd/dt max extrapolated'
+
+
+class CompositionKind(models.TextChoices):
+    """Units for composition specification"""
+    MOLE_FRACTION = 'mole fraction', 'Mole Fraction'
+    MASS_FRACTION = 'mass fraction', 'Mass Fraction'
+    MOLE_PERCENT = 'mole percent', 'Mole Percent'
+
+
+class UncertaintyType(models.TextChoices):
+    """Types of uncertainty specification"""
+    ABSOLUTE = 'absolute', 'Absolute'
+    RELATIVE = 'relative', 'Relative'
+
+
+class TimeHistoryType(models.TextChoices):
+    """Types of time history data"""
+    VOLUME = 'volume', 'Volume'
+    TEMPERATURE = 'temperature', 'Temperature'
+    PRESSURE = 'pressure', 'Pressure'
+    PISTON_POSITION = 'piston position', 'Piston Position'
+    LIGHT_EMISSION = 'light emission', 'Light Emission'
+    OH_EMISSION = 'OH emission', 'OH Emission'
+    ABSORPTION = 'absorption', 'Absorption'
+
+
+class ValueWithUnit(models.Model):
+    """
+    Generic value-unit container aligned with PyKED value_unit_schema.
+    """
+    value = models.FloatField(null=True, blank=True)
+    value_text = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Raw value string if provided as text"
+    )
+    units = models.CharField(max_length=50)
+
+    uncertainty_type = models.CharField(
+        max_length=20,
+        choices=UncertaintyType.choices,
+        blank=True
+    )
+    uncertainty = models.FloatField(null=True, blank=True)
+    uncertainty_text = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Raw uncertainty string if provided as text"
+    )
+    upper_uncertainty = models.FloatField(null=True, blank=True)
+    lower_uncertainty = models.FloatField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'chemked_value_units'
+
+    def __str__(self):
+        value = self.value if self.value is not None else self.value_text or "n/a"
+        return f"{value} {self.units}"
+
+
+
+class FileAuthor(models.Model):
+    """
+    Author of a ChemKED file (person who digitized/created the data file).
+    Distinct from paper/reference authors.
+    """
+    name = models.CharField(max_length=255)
+    orcid = models.CharField(
+        max_length=50, 
+        blank=True, 
+        db_index=True,
+        help_text="ORCID identifier (e.g., 0000-0003-4425-7097)"
+    )
+    
+    class Meta:
+        db_table = 'chemked_file_authors'
+        unique_together = ['name', 'orcid']
+    
+    def __str__(self):
+        if self.orcid:
+            return f"{self.name} ({self.orcid})"
+        return self.name
+
+
+class ReferenceAuthor(models.Model):
+    """
+    Author of the literature reference (paper authors).
+    """
+    name = models.CharField(max_length=255)
+    orcid = models.CharField(
+        max_length=50,
+        blank=True,
+        db_index=True,
+        help_text="ORCID identifier (if available)"
+    )
+
+    class Meta:
+        db_table = 'chemked_reference_authors'
+        unique_together = ['name', 'orcid']
+
+    def __str__(self):
+        if self.orcid:
+            return f"{self.name} ({self.orcid})"
+        return self.name
+
+
+class Apparatus(models.Model):
+    """
+    Experimental apparatus used for experiments.
+    Examples: Stanford shock tube, UM RCF (rapid compression facility)
+    """
+    kind = models.CharField(
+        max_length=50,
+        choices=ApparatusKind.choices,
+        help_text="Type of apparatus"
+    )
+    institution = models.CharField(max_length=255, blank=True)
+    facility = models.CharField(
+        max_length=255, 
+        blank=True,
+        help_text="Specific facility name (e.g., 'low pressure shock tube')"
+    )
+    
+    class Meta:
+        db_table = 'chemked_apparatus'
+        verbose_name_plural = 'Apparatus'
+        unique_together = ['kind', 'institution', 'facility']
+    
+    def __str__(self):
+        parts = [self.get_kind_display()]
+        if self.institution:
+            parts.append(f"@ {self.institution}")
+        if self.facility:
+            parts.append(f"({self.facility})")
+        return ' '.join(parts)
+
+
+class ExperimentDataset(models.Model):
+    """
+    A ChemKED dataset - corresponds to one YAML file.
+    Contains metadata and links to individual datapoints.
+    """
+    # File identification
+    chemked_file_path = models.CharField(
+        max_length=500, 
+        unique=True,
+        help_text="Original file path in ChemKED-database"
+    )
+    file_version = models.IntegerField(default=0)
+    chemked_version = models.CharField(max_length=20, default='0.4.1')
+    
+    # Experiment metadata
+    experiment_type = models.CharField(
+        max_length=50,
+        choices=ExperimentType.choices,
+        default=ExperimentType.IGNITION_DELAY
+    )
+    apparatus = models.ForeignKey(
+        Apparatus, 
+        on_delete=models.SET_NULL, 
+        null=True,
+        related_name='datasets'
+    )
+    
+    # File authors (who created the ChemKED file)
+    file_authors = models.ManyToManyField(
+        FileAuthor, 
+        related_name='datasets',
+        blank=True
+    )
+    
+    # Reference (link to existing Source model in database app)
+    reference = models.ForeignKey(
+        'database.Source', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='chemked_datasets'
+    )
+    # Store reference details if Source not linked
+    reference_doi = models.CharField(max_length=255, blank=True, db_index=True)
+    reference_journal = models.CharField(max_length=255, blank=True)
+    reference_year = models.IntegerField(null=True, blank=True)
+    reference_volume = models.IntegerField(null=True, blank=True)
+    reference_pages = models.CharField(max_length=100, blank=True)
+    reference_detail = models.TextField(blank=True)
+    reference_authors = models.ManyToManyField(
+        ReferenceAuthor,
+        related_name='datasets',
+        blank=True
+    )
+    # Additional reference info from ReSpecTh
+    reference_title = models.TextField(
+        blank=True,
+        help_text="Full title of the reference paper"
+    )
+    reference_figure = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Figure reference (e.g., 'Fig. 2')"
+    )
+    reference_table = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Table reference (e.g., 'Table I')"
+    )
+    reference_location = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Location in reference (e.g., 'Main article')"
+    )
+    
+    # ReSpecTh file metadata
+    file_doi = models.CharField(
+        max_length=255,
+        blank=True,
+        db_index=True,
+        help_text="File DOI (e.g., 10.24388/x00002001)"
+    )
+    respecth_version = models.CharField(
+        max_length=20,
+        blank=True,
+        help_text="ReSpecTh schema version (e.g., 2.3)"
+    )
+    first_publication_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="First publication date of the data file"
+    )
+    last_modification_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Last modification date of the data file"
+    )
+    
+    # Experimental method and comments
+    method = models.TextField(
+        blank=True,
+        help_text="Experimental or computational method description"
+    )
+    comments = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of comments from the data file"
+    )
+    
+    # Validation
+    is_valid = models.BooleanField(default=True)
+    validation_errors = models.JSONField(default=list, blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'chemked_datasets'
+        ordering = ['reference_year', 'chemked_file_path']
+    
+    def __str__(self):
+        return f"{self.chemked_file_path} ({self.datapoints.count()} points)"
+    
+    @property
+    def fuel_species(self):
+        """Extract primary fuel species from composition"""
+        # Get composition from first datapoint or common properties
+        composition = None
+        if hasattr(self, 'common_properties') and self.common_properties:
+            composition = self.common_properties.composition
+        if not composition and self.datapoints.exists():
+            composition = self.datapoints.first().composition
+        
+        if not composition:
+            return []
+
+        species = composition.species.all()
+        # Exclude common oxidizers and diluents
+        excluded = {'O2', 'N2', 'Ar', 'He', 'CO2', 'H2O'}
+        return [s.species_name for s in species if s.species_name not in excluded]
+
+
+class ExperimentDatapoint(models.Model):
+    """
+    Individual experimental datapoint from a ChemKED file.
+    Stores conditions and measured values.
+    """
+    dataset = models.ForeignKey(
+        ExperimentDataset, 
+        on_delete=models.CASCADE,
+        related_name='datapoints'
+    )
+    
+    # Primary conditions (stored in SI units internally)
+    temperature = models.FloatField(
+        validators=[MinValueValidator(0)],
+        help_text="Temperature in Kelvin"
+    )
+    temperature_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='temperature_datapoints'
+    )
+    temperature_uncertainty = models.FloatField(null=True, blank=True)
+    temperature_uncertainty_type = models.CharField(
+        max_length=20,
+        choices=UncertaintyType.choices,
+        blank=True
+    )
+    
+    pressure = models.FloatField(
+        validators=[MinValueValidator(0)],
+        help_text="Pressure in Pascals"
+    )
+    pressure_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pressure_datapoints'
+    )
+    pressure_uncertainty = models.FloatField(null=True, blank=True)
+    pressure_uncertainty_type = models.CharField(
+        max_length=20,
+        choices=UncertaintyType.choices,
+        blank=True
+    )
+    
+    # Equivalence ratio
+    equivalence_ratio = models.FloatField(
+        null=True, 
+        blank=True,
+        validators=[MinValueValidator(0)],
+        help_text="Fuel-air equivalence ratio (phi)"
+    )
+    
+    # Spatial position (for flame/flow reactor profiles)
+    position = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Spatial position (distance from burner, position along reactor) in meters"
+    )
+    position_units = models.CharField(
+        max_length=20,
+        blank=True,
+        default='m',
+        help_text="Original units for position (mm, cm, m)"
+    )
+    
+    # Residence time (for JSR/flow reactor time-series data)
+    residence_time = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Residence time in seconds (for time-series experiments)"
+    )
+    residence_time_units = models.CharField(
+        max_length=20,
+        blank=True,
+        default='s',
+        help_text="Original units for residence time"
+    )
+    
+    composition = models.ForeignKey(
+        'Composition',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='datapoints'
+    )
+    
+    class Meta:
+        db_table = 'chemked_datapoints'
+        ordering = ['dataset', 'temperature']
+    
+    def __str__(self):
+        return f"T={self.temperature}K, P={self.pressure/1e5:.2f}bar"
+    
+    def get_composition(self):
+        """Get composition, falling back to dataset common composition"""
+        if self.composition:
+            return self.composition
+        if hasattr(self.dataset, 'common_properties') and self.dataset.common_properties:
+            return self.dataset.common_properties.composition
+        return None
+
+    def get_composition_kind(self):
+        """Get composition kind, falling back to dataset common properties"""
+        composition = self.get_composition()
+        return composition.kind if composition else None
+    
+    def get_ignition_target(self):
+        """Get ignition target from ignition-delay extension (if present)."""
+        if hasattr(self, 'ignition_delay'):
+            return self.ignition_delay.get_ignition_target()
+        return None
+
+    def get_ignition_type(self):
+        """Get ignition type from ignition-delay extension (if present)."""
+        if hasattr(self, 'ignition_delay'):
+            return self.ignition_delay.get_ignition_type()
+        return None
+
+
+class IgnitionDelayDatapoint(models.Model):
+    """
+    Ignition-delay-specific fields for a datapoint.
+    Keeps ExperimentDatapoint generic for other experiment types.
+    """
+    datapoint = models.OneToOneField(
+        ExperimentDatapoint,
+        on_delete=models.CASCADE,
+        related_name='ignition_delay'
+    )
+
+    ignition_delay = models.FloatField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0)],
+        help_text="Ignition delay in seconds"
+    )
+    ignition_delay_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='ignition_delays'
+    )
+    ignition_delay_uncertainty = models.FloatField(null=True, blank=True)
+    ignition_delay_uncertainty_type = models.CharField(
+        max_length=20,
+        choices=UncertaintyType.choices,
+        blank=True
+    )
+
+    first_stage_ignition_delay = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="First stage ignition delay in seconds"
+    )
+    first_stage_ignition_delay_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='first_stage_ignition_delays'
+    )
+
+    ignition_target = models.CharField(
+        max_length=20,
+        choices=IgnitionTarget.choices,
+        blank=True,
+        help_text="Overrides dataset common ignition target if set"
+    )
+    ignition_type = models.CharField(
+        max_length=30,
+        choices=IgnitionType.choices,
+        blank=True,
+        help_text="Overrides dataset common ignition type if set"
+    )
+
+    # Pressure rise (for shock tube experiments)
+    pressure_rise = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Pressure rise rate in 1/s"
+    )
+    pressure_rise_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='ignition_pressure_rises'
+    )
+
+    class Meta:
+        db_table = 'chemked_ignition_delay'
+        verbose_name = 'Ignition Delay Datapoint'
+        verbose_name_plural = 'Ignition Delay Datapoints'
+
+    def __str__(self):
+        tau_ms = self.ignition_delay * 1000 if self.ignition_delay is not None else None
+        tau_str = f"{tau_ms:.2f}ms" if tau_ms is not None else "n/a"
+        return f"Ignition delay τ={tau_str}"
+
+    def get_ignition_target(self):
+        if self.ignition_target:
+            return self.ignition_target
+        if hasattr(self.datapoint.dataset, 'common_properties') and self.datapoint.dataset.common_properties:
+            return self.datapoint.dataset.common_properties.ignition_target
+        return None
+
+    def get_ignition_type(self):
+        if self.ignition_type:
+            return self.ignition_type
+        if hasattr(self.datapoint.dataset, 'common_properties') and self.datapoint.dataset.common_properties:
+            return self.datapoint.dataset.common_properties.ignition_type
+        return None
+
+
+class FlameSpeedDatapoint(models.Model):
+    """
+    Placeholder for laminar flame speed experiments (future ChemKED schema extensions).
+    """
+    datapoint = models.OneToOneField(
+        ExperimentDatapoint,
+        on_delete=models.CASCADE,
+        related_name='flame_speed'
+    )
+
+    laminar_flame_speed = models.FloatField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0)],
+        help_text="Laminar flame speed in m/s"
+    )
+    laminar_flame_speed_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='flame_speeds'
+    )
+    laminar_flame_speed_uncertainty = models.FloatField(null=True, blank=True)
+    laminar_flame_speed_uncertainty_type = models.CharField(
+        max_length=20,
+        choices=UncertaintyType.choices,
+        blank=True
+    )
+
+    stretch = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Flame stretch rate in 1/s"
+    )
+    stretch_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='flame_stretch_rates'
+    )
+
+    class Meta:
+        db_table = 'chemked_flame_speed'
+        verbose_name = 'Flame Speed Datapoint'
+        verbose_name_plural = 'Flame Speed Datapoints'
+
+    def __str__(self):
+        if self.laminar_flame_speed is None:
+            return "Laminar flame speed (n/a)"
+        return f"Laminar flame speed {self.laminar_flame_speed:.3f} m/s"
+
+
+class RateCoefficientDatapoint(models.Model):
+    """
+    Rate coefficient (k) data for kdetermination files.
+    Stores rate coefficient values at different temperatures.
+    """
+    datapoint = models.OneToOneField(
+        ExperimentDatapoint,
+        on_delete=models.CASCADE,
+        related_name='rate_coefficient'
+    )
+    
+    # Rate coefficient value
+    rate_coefficient = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Rate coefficient value"
+    )
+    rate_coefficient_units = models.CharField(
+        max_length=50,
+        blank=True,
+        default='cm3 mol-1 s-1',
+        help_text="Units for rate coefficient (e.g., cm3 mol-1 s-1)"
+    )
+    rate_coefficient_uncertainty = models.FloatField(null=True, blank=True)
+    rate_coefficient_uncertainty_type = models.CharField(
+        max_length=20,
+        choices=UncertaintyType.choices,
+        blank=True
+    )
+    
+    # Reaction information
+    reaction = models.CharField(
+        max_length=500,
+        blank=True,
+        help_text="Reaction equation (e.g., NO2 + HO2 = HNO2 + O2)"
+    )
+    reaction_order = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Overall reaction order"
+    )
+    bulk_gas = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text="Bulk gas (e.g., N2, Ar)"
+    )
+    
+    # Method used
+    method = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Experimental or computational method (e.g., ab initio CBS-QB3)"
+    )
+    
+    class Meta:
+        db_table = 'chemked_rate_coefficient'
+        verbose_name = 'Rate Coefficient Datapoint'
+        verbose_name_plural = 'Rate Coefficient Datapoints'
+    
+    def __str__(self):
+        if self.rate_coefficient is None:
+            return "Rate coefficient (n/a)"
+        return f"k = {self.rate_coefficient:.2e} {self.rate_coefficient_units}"
+
+
+class SpeciesProfileDatapoint(models.Model):
+    """
+    Placeholder for species profile experiments (concentration vs time).
+    """
+    datapoint = models.OneToOneField(
+        ExperimentDatapoint,
+        on_delete=models.CASCADE,
+        related_name='species_profile'
+    )
+
+    species_name = models.CharField(max_length=255)
+    inchi = models.CharField(max_length=500, blank=True)
+    smiles = models.CharField(max_length=500, blank=True)
+
+    time_units = models.CharField(max_length=20, default='s')
+    quantity_units = models.CharField(max_length=50, help_text="Species concentration units")
+
+    values = models.JSONField(
+        help_text="Array of [time, value] or [time, value, uncertainty] pairs"
+    )
+
+    uncertainty_type = models.CharField(
+        max_length=20,
+        choices=UncertaintyType.choices,
+        blank=True
+    )
+    uncertainty_value = models.FloatField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'chemked_species_profile'
+        verbose_name = 'Species Profile Datapoint'
+        verbose_name_plural = 'Species Profile Datapoints'
+
+    def __str__(self):
+        return f"Species profile: {self.species_name} ({len(self.values)} points)"
+
+
+class CommonProperties(models.Model):
+    """
+    Properties shared across all datapoints in a dataset (ChemKED common-properties).
+    """
+    dataset = models.OneToOneField(
+        ExperimentDataset,
+        on_delete=models.CASCADE,
+        related_name='common_properties'
+    )
+
+    # Composition
+    composition = models.OneToOneField(
+        'Composition',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='common_properties'
+    )
+
+    # Ignition detection
+    ignition_target = models.CharField(
+        max_length=20,
+        choices=IgnitionTarget.choices,
+        blank=True
+    )
+    ignition_type = models.CharField(
+        max_length=30,
+        choices=IgnitionType.choices,
+        blank=True
+    )
+
+    # Pressure + pressure rise
+    pressure = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Common pressure in Pa if same for all datapoints"
+    )
+    pressure_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='common_pressure_sets'
+    )
+    pressure_uncertainty = models.FloatField(null=True, blank=True)
+    pressure_uncertainty_type = models.CharField(
+        max_length=20,
+        choices=UncertaintyType.choices,
+        blank=True
+    )
+    pressure_rise = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Pressure rise rate in 1/s"
+    )
+    pressure_rise_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='common_pressure_rise_sets'
+    )
+    pressure_rise_uncertainty = models.FloatField(null=True, blank=True)
+    pressure_rise_uncertainty_type = models.CharField(
+        max_length=20,
+        choices=UncertaintyType.choices,
+        blank=True
+    )
+    
+    # JSR/Flow Reactor common properties
+    reactor_volume = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Reactor volume in m³"
+    )
+    reactor_volume_units = models.CharField(
+        max_length=20,
+        default='m3',
+        blank=True
+    )
+    residence_time = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Residence time in seconds"
+    )
+    residence_time_units = models.CharField(
+        max_length=20,
+        default='s',
+        blank=True
+    )
+    
+    # Equivalence ratio (common for all datapoints)
+    equivalence_ratio = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Fuel-air equivalence ratio (phi)"
+    )
+
+    class Meta:
+        db_table = 'chemked_common_properties'
+        verbose_name_plural = 'Common Properties'
+
+    def __str__(self):
+        return f"Common properties for {self.dataset.chemked_file_path}"
+
+
+class RCMData(models.Model):
+    """
+    Rapid Compression Machine specific data for a datapoint.
+    Stores compressed conditions and machine parameters.
+    """
+    datapoint = models.OneToOneField(
+        ExperimentDatapoint,
+        on_delete=models.CASCADE,
+        related_name='rcm_data'
+    )
+    
+    # Compressed conditions
+    compressed_temperature = models.FloatField(
+        null=True, 
+        blank=True,
+        help_text="Temperature at end of compression (K)"
+    )
+    compressed_temperature_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='rcm_compressed_temperature'
+    )
+    compressed_temperature_uncertainty = models.FloatField(null=True, blank=True)
+    compressed_temperature_uncertainty_type = models.CharField(
+        max_length=20, choices=UncertaintyType.choices, blank=True
+    )
+    
+    compressed_pressure = models.FloatField(
+        null=True, 
+        blank=True,
+        help_text="Pressure at end of compression (Pa)"
+    )
+    compressed_pressure_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='rcm_compressed_pressure'
+    )
+    compressed_pressure_uncertainty = models.FloatField(null=True, blank=True)
+    compressed_pressure_uncertainty_type = models.CharField(
+        max_length=20, choices=UncertaintyType.choices, blank=True
+    )
+    
+    # Machine parameters
+    compression_time = models.FloatField(
+        null=True, 
+        blank=True,
+        help_text="Duration of compression stroke (s)"
+    )
+    compression_time_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='rcm_compression_time'
+    )
+    stroke = models.FloatField(
+        null=True, 
+        blank=True,
+        help_text="Piston stroke length (m)"
+    )
+    stroke_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='rcm_stroke'
+    )
+    clearance = models.FloatField(
+        null=True, 
+        blank=True,
+        help_text="Clearance at end of compression (m)"
+    )
+    clearance_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='rcm_clearance'
+    )
+    compression_ratio = models.FloatField(
+        null=True, 
+        blank=True,
+        help_text="Volumetric compression ratio"
+    )
+    compression_ratio_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='rcm_compression_ratio'
+    )
+    
+    class Meta:
+        db_table = 'chemked_rcm_data'
+        verbose_name = 'RCM Data'
+        verbose_name_plural = 'RCM Data'
+    
+    def __str__(self):
+        return f"RCM: Tc={self.compressed_temperature}K, Pc={self.compressed_pressure/1e5:.1f}bar"
+
+
+class TimeHistory(models.Model):
+    """
+    Time-dependent data for a datapoint (e.g., volume history for RCM).
+    Stores the time series as JSON for efficiency.
+    """
+    datapoint = models.ForeignKey(
+        ExperimentDatapoint,
+        on_delete=models.CASCADE,
+        related_name='time_histories'
+    )
+    
+    history_type = models.CharField(
+        max_length=30,
+        choices=TimeHistoryType.choices,
+        help_text="Type of time history data"
+    )
+    
+    # Units for the data
+    time_units = models.CharField(max_length=20, default='s')
+    quantity_units = models.CharField(max_length=20)
+    
+    # Time series data as JSON array of [time, value] pairs
+    # Or [time, value, uncertainty] if uncertainty per point
+    values = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Array of [time, value] or [time, value, uncertainty] pairs"
+    )
+
+    # Optional source filename (when data stored in external file)
+    source_filename = models.CharField(max_length=500, blank=True)
+    
+    # Optional overall uncertainty
+    uncertainty_type = models.CharField(
+        max_length=20, 
+        choices=UncertaintyType.choices,
+        blank=True
+    )
+    uncertainty_value = models.FloatField(null=True, blank=True)
+    
+    class Meta:
+        db_table = 'chemked_time_histories'
+        verbose_name = 'Time History'
+        verbose_name_plural = 'Time Histories'
+    
+    def __str__(self):
+        count = len(self.values) if self.values else 0
+        return f"{self.get_history_type_display()} ({count} points)"
+    
+    @property
+    def num_points(self):
+        return len(self.values) if self.values else 0
+
+
+class VolumeHistory(models.Model):
+    """
+    Volume history data for RCM experiments (separate schema in ChemKED).
+    """
+    datapoint = models.OneToOneField(
+        ExperimentDatapoint,
+        on_delete=models.CASCADE,
+        related_name='volume_history'
+    )
+
+    time_units = models.CharField(max_length=20, default='s')
+    volume_units = models.CharField(max_length=20)
+
+    values = models.JSONField(
+        help_text="Array of [time, volume] pairs"
+    )
+
+    class Meta:
+        db_table = 'chemked_volume_histories'
+
+    def __str__(self):
+        return f"Volume history ({len(self.values)} points)"
+
+
+class Composition(models.Model):
+    """
+    Composition block for a datapoint or common-properties.
+    """
+    kind = models.CharField(
+        max_length=20,
+        choices=CompositionKind.choices
+    )
+
+    class Meta:
+        db_table = 'chemked_compositions'
+
+    def __str__(self):
+        return f"Composition ({self.kind or 'unspecified'})"
+
+
+class CompositionSpecies(models.Model):
+    """
+    Individual species in a composition.
+    Normalized table for querying by species across datasets.
+    Links to database.Species if identified.
+    """
+    composition = models.ForeignKey(
+        Composition,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='species'
+    )
+    
+    # Species identification
+    species_name = models.CharField(max_length=255, db_index=True)
+    chem_name = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Human-readable chemical name (e.g., 'methanol')"
+    )
+    cas = models.CharField(
+        max_length=50,
+        blank=True,
+        db_index=True,
+        help_text="CAS Registry Number"
+    )
+    inchi = models.CharField(
+        max_length=500, 
+        blank=True, 
+        db_index=True,
+        help_text="InChI identifier"
+    )
+    smiles = models.CharField(max_length=500, blank=True)
+
+    # Optional atomic composition + thermo data
+    atomic_composition = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Atomic composition list of {element, amount}"
+    )
+    
+    # Link to database Species if matched
+    database_species = models.ForeignKey(
+        'database.Species',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='chemked_occurrences'
+    )
+    
+    # Amount
+    amount = models.FloatField(
+        validators=[MinValueValidator(0)],
+        help_text="Amount (units depend on composition kind)"
+    )
+    amount_uncertainty = models.FloatField(null=True, blank=True)
+    amount_uncertainty_type = models.CharField(
+        max_length=20, 
+        choices=UncertaintyType.choices,
+        blank=True
+    )
+    amount_upper_uncertainty = models.FloatField(null=True, blank=True)
+    amount_lower_uncertainty = models.FloatField(null=True, blank=True)
+    
+    class Meta:
+        db_table = 'chemked_composition_species'
+        ordering = ['-amount']  # Order by amount descending
+        constraints = [
+            models.UniqueConstraint(
+                fields=['composition', 'species_name', 'inchi', 'smiles'],
+                name='chemked_unique_species_per_datapoint'
+            )
+        ]
+    
+    def __str__(self):
+        return f"{self.species_name}: {self.amount}"
+
+    def populate_identifiers(self):
+        if not self.inchi:
+            return False
+
+        if self.smiles and self.atomic_composition:
+            return False
+
+        try:
+            from chemked_database.utils.chemistry import (
+                infer_smiles_and_atomic_composition,
+                rdkit_available,
+            )
+        except Exception:
+            return False
+
+        if not rdkit_available():
+            return False
+
+        smiles, atomic = infer_smiles_and_atomic_composition(self.inchi)
+        updated = False
+
+        if not self.smiles and smiles:
+            self.smiles = smiles
+            updated = True
+        if not self.atomic_composition and atomic:
+            self.atomic_composition = atomic
+            updated = True
+
+        return updated
+
+    def save(self, *args, **kwargs):
+        self.populate_identifiers()
+        super().save(*args, **kwargs)
+
+
+class SpeciesThermo(models.Model):
+    """
+    Thermo data for a composition species (separate model from JSON).
+    Mirrors the ChemKED/PyKED thermo schema: T_ranges (3 values), data (14 coeffs), note.
+    """
+    species = models.OneToOneField(
+        CompositionSpecies,
+        on_delete=models.CASCADE,
+        related_name='thermo_data'
+    )
+
+    t_range_1 = models.CharField(max_length=50)
+    t_range_2 = models.CharField(max_length=50)
+    t_range_3 = models.CharField(max_length=50)
+
+    coeff_1 = models.FloatField(null=True, blank=True)
+    coeff_2 = models.FloatField(null=True, blank=True)
+    coeff_3 = models.FloatField(null=True, blank=True)
+    coeff_4 = models.FloatField(null=True, blank=True)
+    coeff_5 = models.FloatField(null=True, blank=True)
+    coeff_6 = models.FloatField(null=True, blank=True)
+    coeff_7 = models.FloatField(null=True, blank=True)
+    coeff_8 = models.FloatField(null=True, blank=True)
+    coeff_9 = models.FloatField(null=True, blank=True)
+    coeff_10 = models.FloatField(null=True, blank=True)
+    coeff_11 = models.FloatField(null=True, blank=True)
+    coeff_12 = models.FloatField(null=True, blank=True)
+    coeff_13 = models.FloatField(null=True, blank=True)
+    coeff_14 = models.FloatField(null=True, blank=True)
+
+    note = models.TextField(blank=True)
+
+    class Meta:
+        db_table = 'chemked_species_thermo'
+        verbose_name = 'Species Thermo'
+        verbose_name_plural = 'Species Thermo'
+
+    def __str__(self):
+        return f"Thermo for {self.species.species_name}"

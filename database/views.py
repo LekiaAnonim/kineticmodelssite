@@ -13,7 +13,8 @@ from django.views import View
 from django.views.generic import TemplateView, DetailView, ListView
 from django.views.generic.edit import FormView, CreateView, UpdateView, DeleteView
 from django_filters.views import FilterView
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseBadRequest
+from django.shortcuts import get_object_or_404
 from django.utils.html import format_html
 from rmgpy.molecule.draw import MoleculeDrawer
 
@@ -33,6 +34,7 @@ from .models import (
 from .filters import SpeciesFilter, ReactionFilter, SourceFilter
 from .forms import RegistrationForm, SourceForm, AuthorshipFormSet, KineticModelForm, AuthorForm
 from database.templatetags import renders
+from database.services import exports
 
 
 class SidebarLookup:
@@ -304,6 +306,27 @@ class KineticModelDetail(DetailView):
         return context
 
 
+class KineticModelDownloadView(View):
+    def get(self, request, pk, format):
+        kinetic_model = get_object_or_404(KineticModel, pk=pk)
+        strict_value = request.GET.get("strict", "").strip().lower()
+        strict = strict_value in {"1", "true", "yes", "on"}
+
+        try:
+            if format == "chemkin":
+                result = exports.build_chemkin_bundle(kinetic_model, strict=strict)
+            elif format in {"cantera", "cantera-yaml", "yaml"}:
+                result = exports.build_cantera_yaml(kinetic_model, strict=strict)
+            else:
+                return HttpResponseBadRequest("Unknown download format.")
+        except exports.ExportError as exc:
+            return HttpResponseBadRequest(str(exc))
+
+        response = HttpResponse(result.content, content_type=result.content_type)
+        response["Content-Disposition"] = f'attachment; filename="{result.filename}"'
+        return response
+
+
 @SidebarLookup
 class KineticsDetail(DetailView):
     model = Kinetics
@@ -313,7 +336,7 @@ class KineticsDetail(DetailView):
         context = super().get_context_data(**kwargs)
         kinetics = self.get_object()
         context["table_data"] = kinetics.data.table_data()
-        context["efficiencies"] = kinetics.data.efficiency_set.all()
+        # context["efficiencies"] = kinetics.data.efficiency_set.all()
         context["kinetics_comments"] = kinetics.kineticscomment_set.order_by("kinetic_model__id")
 
         return context
@@ -589,11 +612,31 @@ class KineticModelDeleteView(LoginRequiredMixin, DeleteView):
 # =============================================================================
 
 class AuthorListView(ListView):
-    """List all Authors."""
+    """List all Authors with unique names and aggregated publication counts."""
     model = Author
     template_name = 'database/author_list.html'
     paginate_by = 50
-    ordering = ['lastname', 'firstname']
+    context_object_name = 'author_list'
+    
+    def get_queryset(self):
+        from django.db.models import Count, Min
+        # Get unique authors by firstname+lastname, with publication count and primary ID
+        # Uses Min('id') to get a representative ID for each unique author name
+        return (
+            Author.objects
+            .values('firstname', 'lastname')
+            .annotate(
+                author_id=Min('id'),
+                publication_count=Count('authorship', distinct=True)
+            )
+            .order_by('lastname', 'firstname')
+        )
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        # Add total unique authors count
+        context['total_authors'] = self.get_queryset().count()
+        return context
 
 
 class AuthorCreateView(LoginRequiredMixin, CreateView):

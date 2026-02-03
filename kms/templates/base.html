@@ -81,6 +81,11 @@
                             <i class="bi bi-journal-text me-1"></i>Sources
                         </a>
                     </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.resolver_match.namespace == 'chemked_database' %}active{% endif %}" href="{% url 'chemked_database:home' %}">
+                            <i class="bi bi-fire me-1"></i>ChemKED
+                        </a>
+                    </li>
                     
                     <!-- Quick Lookup Dropdown -->
                     <li class="nav-item dropdown">

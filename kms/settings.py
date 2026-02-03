@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/2.2/ref/settings/
 """
 
 import os
+import sys
 
 from pathlib import Path
 from dotenv import load_dotenv
@@ -42,6 +43,7 @@ ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split(" ")
 # Application definition
 
 INSTALLED_APPS = [
+    "chemked_database.apps.ChemkedDatabaseConfig",
     "importer_dashboard.apps.ImporterDashboardConfig",
     # "import_voting.apps.ImportVotingConfig",  # REMOVED: Duplicate of importer_dashboard functionality
     "database.apps.DatabaseConfig",
@@ -60,6 +62,7 @@ INSTALLED_APPS = [
     "crispy_bootstrap4",
     "rest_framework",
     "rest_framework.authtoken",
+    'mathfilters',
 ]
 
 MIDDLEWARE = [
@@ -169,9 +172,48 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {"anon": "100/day", "user": "1000/day"},
 }
 
+TESTING = len(sys.argv) > 1 and sys.argv[1] == "test"
+SILENCE_RMG_IMPORT_LOGS = True
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'loggers': {
+        # Silence RMG import noise during tests/development
+        'database.scripts.import_rmg_models': {
+            'handlers': ['console'],
+            'level': 'CRITICAL',
+            'propagate': False,
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'CRITICAL' if TESTING else 'WARNING',
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+}
+
+# Allow large batch uploads of ReSpecTh/ChemKED files
+DATA_UPLOAD_MAX_NUMBER_FILES = 5000
+# Increase memory limits for large batch uploads (100 MB)
+DATA_UPLOAD_MAX_MEMORY_SIZE = 100 * 1024 * 1024  # 100 MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 100 * 1024 * 1024  # 100 MB
+
 # Authentication URLs
 LOGIN_URL = '/login/'
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/login/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Silence noisy RDKit warnings during imports/tests (e.g., unusual valence warnings)
+try:
+    from rdkit import RDLogger
+
+    RDLogger.DisableLog('rdApp.warning')
+except Exception:
+    pass

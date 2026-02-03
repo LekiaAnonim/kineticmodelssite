@@ -4,13 +4,13 @@
 
 {% block content %}
 <h1>
-    <a href="{% url 'reaction-detail' kinetics.reaction.pk %}">{{ kinetics.reaction.equation }} </a> |
+    <a href="{% url 'reaction-detail' kinetics.reaction.pk %}">{{ kinetics.reaction.equation }}</a>
     {% if kinetics.source %}
-    | <a href="{% url 'source-detail' kinetics.source.pk %}">{{ kinetics.source.name }}</a>
+    | <a href="{% url 'source-detail' kinetics.source.pk %}">{{ kinetics.source.source_title|titlecase|truncatewords:8 }}</a>
     {% endif %}
 </h1>
 <br>
-{% if kinetics.prime_id%}
+{% if kinetics.prime_id %}
 <h2>PrIMe ID: {{ kinetics.prime_id }}</h2>
 <br>
 {% endif %}
@@ -27,16 +27,18 @@
 <br>
 {% endif %}
 {% endif %}
-{% for header, heads, bodies in kinetics.data.table_data %}
-<h2>{{ header }}</h2>
+{% for header, heads, bodies in table_data %}
+{% if header %}<h2>{{ header }}</h2>{% endif %}
 <table class="table table-bordered">
     <thead>
+        <tr>
         {% for head in heads %}
         <th scope="col">{{ head }}</th>
         {% endfor %}
+        </tr>
     </thead>
-    {% for row_header, cells in bodies %}
     <tbody>
+    {% for row_header, cells in bodies %}
         <tr>
             {% if row_header %}
             <th scope="row">{{ row_header }}</th>
@@ -45,8 +47,8 @@
             <td>{{ cell|format_g_or_str }}</td>
             {% endfor %}
         </tr>
-    </tbody>
     {% endfor %}
+    </tbody>
 </table>
 {% endfor %}
 <br>

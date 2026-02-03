@@ -29,4 +29,7 @@ urlpatterns = [
     path('logs/stream/', views.stream_logs, name='stream_logs'),
     path('logs/get/', views.get_logs, name='get_logs'),
     path('clear-logs/', views.clear_logs, name='clear_logs'),
+    
+    # API endpoints
+    path('api/jobs-stats/', views.jobs_stats_api, name='jobs_stats_api'),
 ]

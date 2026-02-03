@@ -79,45 +79,120 @@ class IncrementalSync:
             logger.error(f"Error finding vote database: {e}")
             return None
     
-    def query_remote_db(self, db_path, query):
+    def query_remote_db(self, db_path, query, max_retries=5):
         """
-        Execute a SQL query on the remote SQLite database
+        Execute a SQL query on the remote SQLite database with retry logic
         
         Args:
             db_path: Path to SQLite database on cluster
             query: SQL query to execute
+            max_retries: Maximum number of retry attempts for locking errors
             
         Returns:
             list: Query results as list of dicts, or empty list on error
         """
-        try:
-            # Use sqlite3 command on cluster to execute query
-            escaped_query = query.replace('"', '\\"')
-            cmd = f'sqlite3 -json "{db_path}" "{escaped_query}"'
-            stdout, stderr = self.ssh.exec_command(cmd)
-            
-            # Check for errors in stderr (e.g., "no such column")
-            if stderr and stderr.strip():
-                logger.error(f"SQLite query error: {stderr.strip()}")
-                logger.error(f"Failed query: {query}")
+        import time
+        
+        for attempt in range(max_retries):
+            try:
+                # Use sqlite3 command on cluster to execute query
+                # Use PRAGMA busy_timeout to wait up to 30 seconds for locks to clear
+                escaped_query = query.replace('"', '\\"').replace("'", "\\'")
+                # Build multi-command string with busy_timeout pragma first
+                sql_commands = f"PRAGMA busy_timeout=30000; {escaped_query}"
+                cmd = f"sqlite3 -json \"{db_path}\" \"{sql_commands}\""
+                stdout, stderr = self.ssh.exec_command(cmd)
+                
+                # Check for errors in stderr (e.g., "no such column")
+                if stderr and stderr.strip():
+                    error_msg = stderr.strip()
+                    
+                    # Check for locking errors that are retryable
+                    if 'locking protocol' in error_msg.lower() or 'database is locked' in error_msg.lower():
+                        if attempt < max_retries - 1:
+                            wait_time = (attempt + 1) * 3  # 3, 6, 9, 12, 15 seconds
+                            logger.warning(f"Database locked, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            # Last resort: try with immutable mode (read-only, no locking)
+                            logger.warning(f"Trying immutable mode as fallback...")
+                            immutable_cmd = f"sqlite3 -json \"file:{db_path}?immutable=1\" \"{escaped_query}\""
+                            stdout2, stderr2 = self.ssh.exec_command(immutable_cmd)
+                            if stderr2 and stderr2.strip():
+                                logger.error(f"SQLite locking error after {max_retries} attempts: {error_msg}")
+                                logger.error(f"Failed query: {query}")
+                                return []
+                            if stdout2 and stdout2.strip():
+                                try:
+                                    return json.loads(stdout2)
+                                except json.JSONDecodeError:
+                                    return []
+                            return []
+                    else:
+                        logger.error(f"SQLite query error: {error_msg}")
+                        logger.error(f"Failed query: {query}")
+                        return []
+                
+                if stdout and stdout.strip():
+                    try:
+                        # The output may include pragma results on separate lines
+                        # e.g., [{"timeout":30000}]\n[{"id":1,...}, {"id":2,...}]
+                        # The pragma result is a complete JSON on its own line
+                        # The query result may span multiple lines for large result sets
+                        output = stdout.strip()
+                        
+                        # Strategy: Find where the pragma output ends and query result begins
+                        # The pragma result is always: [{"timeout":30000}] (small, single line)
+                        # Look for the second '[' which starts the actual query result
+                        
+                        first_bracket = output.find('[')
+                        if first_bracket == -1:
+                            return []
+                        
+                        # Find the end of the first JSON array (the pragma result)
+                        # by finding the matching ']'
+                        bracket_count = 0
+                        first_array_end = -1
+                        for i in range(first_bracket, len(output)):
+                            if output[i] == '[':
+                                bracket_count += 1
+                            elif output[i] == ']':
+                                bracket_count -= 1
+                                if bracket_count == 0:
+                                    first_array_end = i
+                                    break
+                        
+                        if first_array_end == -1:
+                            # Couldn't find matching bracket, try parsing whole thing
+                            return json.loads(output)
+                        
+                        # Look for the next '[' after the first array
+                        second_bracket = output.find('[', first_array_end + 1)
+                        if second_bracket != -1:
+                            # There's a second array - that's our query result
+                            query_result = output[second_bracket:]
+                            return json.loads(query_result)
+                        else:
+                            # Only one array - it might be the query result itself
+                            # (if no pragma was included)
+                            return json.loads(output[first_bracket:])
+                            
+                    except json.JSONDecodeError:
+                        # Log the actual output for debugging
+                        logger.warning(f"JSON parse failed for query: {query}")
+                        logger.warning(f"Raw output: {stdout[:500]}")
+                        return []
+                
+                # Empty result - could be valid or could indicate an issue
+                logger.debug(f"Empty result for query: {query}")
                 return []
-            
-            if stdout and stdout.strip():
-                try:
-                    return json.loads(stdout)
-                except json.JSONDecodeError:
-                    # Log the actual output for debugging
-                    logger.warning(f"JSON parse failed for query: {query}")
-                    logger.warning(f"Raw output: {stdout[:500]}")
-                    return []
-            
-            # Empty result - could be valid or could indicate an issue
-            logger.debug(f"Empty result for query: {query}")
-            return []
-        except Exception as e:
-            logger.error(f"Error querying remote database: {e}")
-            logger.error(f"Query was: {query}")
-            return []
+            except Exception as e:
+                logger.error(f"Error querying remote database: {e}")
+                logger.error(f"Query was: {query}")
+                return []
+        
+        return []
     
     def get_total_counts(self, db_path):
         """
@@ -457,10 +532,17 @@ class IncrementalSync:
             synced = 0
             with transaction.atomic():
                 for row in results:
+                    # Skip rows with empty chemkin_label or smiles
+                    chemkin_label = row.get('chemkin_label', '').strip()
+                    smiles = row.get('rmg_species_smiles', '').strip()
+                    if not chemkin_label and not smiles:
+                        logger.debug(f"Skipping blocked match with empty chemkin_label and smiles")
+                        continue
+                    
                     BlockedMatch.objects.get_or_create(
                         job=self.job,
-                        chemkin_label=row.get('chemkin_label', ''),
-                        smiles=row.get('rmg_species_smiles', ''),
+                        chemkin_label=chemkin_label,
+                        smiles=smiles,
                         defaults={
                             'rmg_label': row.get('rmg_species_label', ''),
                             'reason': row.get('reason', ''),

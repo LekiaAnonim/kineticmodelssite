@@ -42,6 +42,11 @@ urlpatterns = [
     
     # KineticModel URLs
     path(r"kineticmodel/<int:pk>", views.KineticModelDetail.as_view(), name="kinetic-model-detail"),
+    path(
+        r"kineticmodel/<int:pk>/download/<str:format>",
+        views.KineticModelDownloadView.as_view(),
+        name="kinetic-model-download",
+    ),
     path(r"kineticmodel_search/", views.KineticModelFilterView.as_view(), name="kinetic-model-list"),
     path(r"kineticmodel/create/", views.KineticModelCreateView.as_view(), name="kinetic-model-create"),
     path(r"kineticmodel/<int:pk>/edit/", views.KineticModelUpdateView.as_view(), name="kinetic-model-update"),

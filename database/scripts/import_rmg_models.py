@@ -14,6 +14,7 @@ from rmgpy.data.kinetics.library import KineticsLibrary
 from rmgpy.data.thermo import ThermoLibrary
 from rmgpy.thermo import NASA, ThermoData, Wilhoit, NASAPolynomial
 
+from django.conf import settings
 from database.models import kinetic_data as kd
 
 
@@ -48,12 +49,18 @@ Import Flow:
 """  # noqa: E501
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-handler = logging.FileHandler(filename="importer.log", mode="w")
-handler.setFormatter(
-    logging.Formatter("[%(levelname)s] %(message)s")
-)
-logger.addHandler(handler)
+
+if getattr(settings, "SILENCE_RMG_IMPORT_LOGS", False):
+    logger.setLevel(logging.CRITICAL)
+    logger.propagate = False
+else:
+    logger.setLevel(logging.DEBUG)
+    handler = logging.FileHandler(filename="importer.log", mode="w")
+    handler.setFormatter(
+        logging.Formatter("[%(levelname)s] %(message)s")
+    )
+    logger.addHandler(handler)
+    logger.propagate = False
 
 
 def safe_import(func, *args, error_message=None, **kwargs):

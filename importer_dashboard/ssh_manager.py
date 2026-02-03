@@ -509,7 +509,79 @@ done
                     f"Could not fetch progress for job {job.name} at {url}: {type(e).__name__}: {e}"
                 )
 
-        logger.info(f"All progress endpoints failed for job {job.name}. Last error: {last_error}")
+        # Fallback 1: Try to read progress.json directly via SSH from the job directory
+        try:
+            progress_path = f"{self.config.root_path}/{job.name}/progress.json"
+            logger.warning(f"HTTP failed, trying SSH fallback for progress.json: {progress_path}")
+            stdout, stderr = self.exec_command(f"cat {progress_path}")
+            if stdout and stdout.strip():
+                data = json.loads(stdout)
+                logger.warning(f"Successfully fetched progress via SSH for job {job.name}")
+                return data
+            elif stderr:
+                logger.warning(f"SSH cat failed for {job.name}: {stderr.strip()}")
+        except json.JSONDecodeError as e:
+            logger.warning(f"Invalid JSON in progress file for job {job.name}: {e}")
+        except Exception as e:
+            logger.warning(f"SSH fallback failed for job {job.name}: {e}")
+
+        # Fallback 2: Try to read progress from the vote database import_jobs table
+        try:
+            # Find the vote database
+            db_pattern = f"{self.config.root_path}/{job.name}/votes_*.db"
+            stdout, stderr = self.exec_command(f"ls -t {db_pattern} 2>/dev/null | head -1")
+            if stdout and stdout.strip():
+                db_path = stdout.strip()
+                logger.warning(f"Trying vote database fallback: {db_path}")
+                # Query import_jobs table for progress data
+                query = "SELECT total_species, identified_species, confirmed_species, processed_species, unprocessed_species, tentative_species, unidentified_species, total_reactions, matched_reactions, unmatched_reactions, thermo_matches_count FROM import_jobs ORDER BY updated_at DESC LIMIT 1"
+                stdout2, stderr2 = self.exec_command(f'sqlite3 -json "{db_path}" "PRAGMA busy_timeout=5000; {query}"')
+                if stdout2 and stdout2.strip():
+                    # Parse the JSON, handling pragma output
+                    output = stdout2.strip()
+                    # Find the last JSON array (after pragma result)
+                    first_bracket = output.find('[')
+                    if first_bracket != -1:
+                        # Find end of first array
+                        bracket_count = 0
+                        first_array_end = -1
+                        for i in range(first_bracket, len(output)):
+                            if output[i] == '[':
+                                bracket_count += 1
+                            elif output[i] == ']':
+                                bracket_count -= 1
+                                if bracket_count == 0:
+                                    first_array_end = i
+                                    break
+                        # Look for second array
+                        second_bracket = output.find('[', first_array_end + 1) if first_array_end != -1 else -1
+                        if second_bracket != -1:
+                            result = json.loads(output[second_bracket:])
+                        else:
+                            result = json.loads(output[first_bracket:])
+                        
+                        if result and len(result) > 0:
+                            row = result[0]
+                            # Map database fields to progress.json format
+                            data = {
+                                'total': row.get('total_species', 0),
+                                'confirmed': row.get('confirmed_species', 0) or row.get('identified_species', 0),
+                                'processed': row.get('processed_species', 0),
+                                'unprocessed': row.get('unprocessed_species', 0),
+                                'tentative': row.get('tentative_species', 0),
+                                'unidentified': row.get('unidentified_species', 0),
+                                'totalreactions': row.get('total_reactions', 0),
+                                'unmatchedreactions': row.get('unmatched_reactions', 0),
+                                'thermomatches': row.get('thermo_matches_count', 0),
+                            }
+                            logger.warning(f"Successfully fetched progress from vote DB for job {job.name}")
+                            return data
+        except json.JSONDecodeError as e:
+            logger.warning(f"Invalid JSON from vote database for job {job.name}: {e}")
+        except Exception as e:
+            logger.warning(f"Vote database fallback failed for job {job.name}: {e}")
+
+        logger.info(f"All progress methods failed for job {job.name}. Last HTTP error: {last_error}")
         return None
     
     def refresh_all_progress(self):

@@ -15,6 +15,7 @@
         <h4 class="mb-0">
             <i class="bi bi-people me-2"></i>
             Authors
+            <span class="badge bg-secondary ms-2">{{ total_authors }}</span>
         </h4>
         <a href="{% url 'author-create' %}" class="btn btn-primary btn-sm">
             <i class="bi bi-plus-lg me-1"></i>
@@ -36,20 +37,20 @@
                         </tr>
                     </thead>
                     <tbody>
-                        {% for author in object_list %}
+                        {% for author in author_list %}
                         <tr>
-                            <td class="text-muted">{{ author.id }}</td>
+                            <td class="text-muted">{{ author.author_id }}</td>
                             <td><strong>{{ author.lastname }}</strong></td>
                             <td>{{ author.firstname }}</td>
                             <td>
-                                <span class="badge bg-secondary">{{ author.authorship_set.count }}</span>
+                                <span class="badge bg-secondary">{{ author.publication_count }}</span>
                             </td>
                             <td>
-                                <a href="{% url 'author-update' author.pk %}" 
+                                <a href="{% url 'author-update' author.author_id %}" 
                                    class="btn btn-outline-primary btn-sm" title="Edit">
                                     <i class="bi bi-pencil"></i>
                                 </a>
-                                <a href="{% url 'author-delete' author.pk %}" 
+                                <a href="{% url 'author-delete' author.author_id %}" 
                                    class="btn btn-outline-danger btn-sm" title="Delete">
                                     <i class="bi bi-trash"></i>
                                 </a>

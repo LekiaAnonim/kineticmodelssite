@@ -10,7 +10,7 @@ from django.contrib import messages
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.http import require_http_methods
 from django.utils import timezone
-from django.db.models import Case, When, Value, IntegerField
+from django.db.models import Case, When, Value, IntegerField, Q
 import json
 import logging
 import os
@@ -58,14 +58,23 @@ def dashboard_index(request):
         )
     ).order_by('status_priority', 'name')
 
+    # Handle search query
+    search_query = request.GET.get('q', '').strip()
+    if search_query:
+        jobs = jobs.filter(
+            Q(name__icontains=search_query) |
+            Q(host__icontains=search_query) |
+            Q(slurm_job_id__icontains=search_query)
+        )
+
     # Calculate stats
     stats = {
-        'total_jobs': jobs.count(),
-        'running_jobs': jobs.filter(status='running').count(),
-        'pending_jobs': jobs.filter(status='pending').count(),
-        'idle_jobs': jobs.filter(status='idle').count(),
-        'completed_jobs': jobs.filter(status='completed').count(),
-        'failed_jobs': jobs.filter(status='failed').count(),
+        'total_jobs': ClusterJob.objects.count(),  # Total unfiltered count
+        'running_jobs': ClusterJob.objects.filter(status='running').count(),
+        'pending_jobs': ClusterJob.objects.filter(status='pending').count(),
+        'idle_jobs': ClusterJob.objects.filter(status='idle').count(),
+        'completed_jobs': ClusterJob.objects.filter(status='completed').count(),
+        'failed_jobs': ClusterJob.objects.filter(status='failed').count(),
     }
 
     # Get list of running job IDs for AJAX updates
@@ -77,6 +86,7 @@ def dashboard_index(request):
         'stats': stats,
         'running_job_ids': running_job_ids,
         'page_title': 'RMG Importer Dashboard',
+        'search_query': search_query,
     }
 
     return render(request, 'importer_dashboard/index.html', context)
@@ -1069,8 +1079,8 @@ def refresh_progress(request):
                 
                 dashboard_logger.info(f"Syncing votes for {job.name}...", "dashboard")
                 
-                # Run incremental sync
-                result = sync_job_votes_incremental(job)
+                # Run incremental sync - reuse existing SSH connection!
+                result = sync_job_votes_incremental(job, ssh_manager=ssh_manager)
                 
                 if result.get('success'):
                     synced_jobs += 1
@@ -1327,3 +1337,43 @@ def clear_logs(request):
     )
     messages.success(request, "All logs cleared")
     return redirect('importer_dashboard:index')
+
+
+@login_required
+def jobs_stats_api(request):
+    """
+    API endpoint to get current stats for running jobs.
+    Used for auto-refresh on the index page.
+    
+    Returns JSON with stats for all running jobs.
+    """
+    # Get running jobs
+    running_jobs = ClusterJob.objects.filter(status='running')
+    
+    # Optionally filter by specific job IDs
+    job_ids = request.GET.get('job_ids', '')
+    if job_ids:
+        try:
+            job_id_list = [int(x) for x in job_ids.split(',') if x.strip()]
+            running_jobs = running_jobs.filter(id__in=job_id_list)
+        except ValueError:
+            pass
+    
+    # Build response data
+    jobs_data = {}
+    for job in running_jobs:
+        jobs_data[job.id] = {
+            'processed': job.processed_species,
+            'identified': job.identified_species,
+            'total': job.total_species,
+            'confirmed': job.confirmed_species,
+            'tentative': job.tentative_species,
+            'unidentified': job.unidentified_species,
+            'status': job.status,
+            'host': job.host,
+        }
+    
+    return JsonResponse({
+        'jobs': jobs_data,
+        'count': len(jobs_data)
+    })

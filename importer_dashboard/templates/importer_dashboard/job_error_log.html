@@ -5,6 +5,26 @@
 
 {% block extra_css %}
 <link rel="stylesheet" href="{% static 'importer_dashboard/css/dashboard.css' %}">
+<style>
+    .log-viewer::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+    }
+    
+    .log-viewer::-webkit-scrollbar-track {
+        background: #111827;
+        border-radius: 6px;
+    }
+    
+    .log-viewer::-webkit-scrollbar-thumb {
+        background: #4b5563;
+        border-radius: 6px;
+    }
+    
+    .log-viewer::-webkit-scrollbar-thumb:hover {
+        background: #6b7280;
+    }
+</style>
 {% endblock %}
 
 {% block header_subtitle %}Live Error and Debug Information{% endblock %}
@@ -94,27 +114,4 @@
     
     <div class="log-viewer" style="background: #1f2937; color: #f9fafb; padding: 20px; border-radius: 6px; font-family: 'Monaco', 'Menlo', 'Courier New', monospace; font-size: 13px; line-height: 1.6; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; max-height: 80vh; overflow-y: auto;">{{ error_content|default:"No error information available. Click 'Refresh' to fetch live data from cluster." }}</div>
 </div>
-
-{% block extra_css %}
-<style>
-    .log-viewer::-webkit-scrollbar {
-        width: 10px;
-        height: 10px;
-    }
-    
-    .log-viewer::-webkit-scrollbar-track {
-        background: #111827;
-        border-radius: 6px;
-    }
-    
-    .log-viewer::-webkit-scrollbar-thumb {
-        background: #4b5563;
-        border-radius: 6px;
-    }
-    
-    .log-viewer::-webkit-scrollbar-thumb:hover {
-        background: #6b7280;
-    }
-</style>
-{% endblock %}
 {% endblock %}

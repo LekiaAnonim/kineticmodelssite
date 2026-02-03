@@ -10,6 +10,10 @@ class Author(models.Model):
     firstname = models.CharField(max_length=80)
     lastname = models.CharField(max_length=80)
 
+    class Meta:
+        unique_together = ['firstname', 'lastname']
+        ordering = ['lastname', 'firstname']
+
     @property
     def name(self):
         return f"{self.lastname}, {self.firstname}"

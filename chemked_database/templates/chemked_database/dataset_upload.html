@@ -1,0 +1,793 @@
+{% extends "base.html" %}
+{% load static %}
+{% load crispy_forms_tags %}
+
+{% block extra_css %}
+<style>
+    .alert-danger.border-danger {
+        border-width: 2px !important;
+        border-left-width: 5px !important;
+    }
+    .alert-success.border-success {
+        border-width: 2px !important;
+        border-left-width: 5px !important;
+    }
+    
+    /* Upload progress bar styles */
+    .upload-progress-container {
+        display: none;
+        margin-top: 1rem;
+        margin-bottom: 1rem;
+    }
+    .upload-progress-container.active {
+        display: block;
+    }
+    .upload-progress {
+        height: 24px;
+        border-radius: 4px;
+        background-color: #e9ecef;
+        overflow: hidden;
+    }
+    .upload-progress-bar {
+        height: 100%;
+        background: linear-gradient(90deg, #0d6efd 0%, #0dcaf0 100%);
+        transition: width 0.15s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: 0.85rem;
+        font-weight: 500;
+    }
+    .upload-progress-bar.processing {
+        background: linear-gradient(90deg, #198754 0%, #20c997 100%);
+        animation: pulse 1.5s infinite;
+    }
+    .upload-progress-bar.error {
+        background: linear-gradient(90deg, #dc3545 0%, #fd7e14 100%);
+    }
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.7; }
+    }
+    .upload-status {
+        margin-top: 0.5rem;
+        font-size: 0.875rem;
+    }
+    .upload-status .file-info {
+        color: #6c757d;
+    }
+    .upload-status .speed-info {
+        color: #0d6efd;
+        font-weight: 500;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="detail-header mb-4">
+    <nav aria-label="breadcrumb" class="small mb-1">
+        <ol class="breadcrumb mb-0">
+            <li class="breadcrumb-item"><a href="{% url 'home' %}">Home</a></li>
+            <li class="breadcrumb-item"><a href="{% url 'chemked_database:home' %}">ChemKED</a></li>
+            <li class="breadcrumb-item active">Upload Dataset</li>
+        </ol>
+    </nav>
+    <div class="d-flex align-items-center justify-content-between">
+        <div>
+            <h1 class="h4 mb-0">
+                <i class="bi bi-upload me-2 text-primary"></i>Upload Data File
+            </h1>
+            <p class="text-muted mb-0 mt-1">Import ChemKED YAML or ReSpecTh XML files into the database</p>
+        </div>
+        <div>
+            <a href="{% url 'chemked_database:dataset-create' %}" class="btn btn-outline-success">
+                <i class="bi bi-plus-circle me-1"></i>Create Manually Instead
+            </a>
+        </div>
+    </div>
+</div>
+
+
+
+{% if preview_mode %}
+<!-- Preview Mode: Show parsed data and editable name -->
+<div class="row">
+    <div class="col-lg-8">
+        <div class="data-section border-primary">
+            <div class="section-header bg-primary text-white">
+                <h6 class="mb-0"><i class="bi bi-eye me-2"></i>Preview Import</h6>
+            </div>
+            <div class="section-body">
+                <div class="alert alert-info py-2 mb-4">
+                    <i class="bi bi-info-circle me-2"></i>
+                    Review the parsed data below and customize the dataset name before importing.
+                </div>
+                {% if preview_data.validation_error %}
+                <div class="alert alert-warning d-flex align-items-start py-2 mb-4" role="alert">
+                    <i class="bi bi-exclamation-triangle me-2 mt-1"></i>
+                    <div>
+                        <strong>Unsupported experiment type</strong>
+                        <div class="small">{{ preview_data.validation_error }}</div>
+                        <div class="small mt-2">
+                            <span class="text-muted">Supported types:</span>
+                            {{ preview_data.supported_experiment_types|join:", " }}
+                        </div>
+                        <div class="small mt-2">
+                            <a href="mailto:chemked-support@example.com" class="link-warning">Request support</a>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+                
+                <form method="post">
+                    {% csrf_token %}
+                    {{ preview_form.original_filename }}
+                    {{ preview_form.temp_file_path }}
+                    {{ preview_form.file_type }}
+                    {{ preview_form.file_author }}
+                    {{ preview_form.file_author_orcid }}
+                    
+                    <div class="mb-4">
+                        <label for="id_dataset_name" class="form-label fw-bold">Dataset Name</label>
+                        {{ preview_form.dataset_name }}
+                        <div class="form-text">
+                            <i class="bi bi-lightbulb me-1"></i>
+                            Auto-generated from reaction/species, author, year, and method. You can edit this to your preference.
+                        </div>
+                    </div>
+                    
+                    <div class="row mb-4">
+                        <div class="col-md-6">
+                            <div class="card bg-light">
+                                <div class="card-body py-2">
+                                    <h6 class="card-subtitle mb-2 text-muted small">Original File</h6>
+                                    <p class="card-text mb-0">
+                                        <i class="bi bi-file-earmark-code me-1"></i>
+                                        <code>{{ preview_data.original_filename }}</code>
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card bg-light">
+                                <div class="card-body py-2">
+                                    <h6 class="card-subtitle mb-2 text-muted small">File Type</h6>
+                                    <p class="card-text mb-0">
+                                        <span class="badge bg-secondary">{{ preview_data.file_type }}</span>
+                                        <span class="text-muted small ms-2">{{ preview_data.datapoints_count }} datapoints</span>
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    {% if preview_data.reaction %}
+                    <div class="mb-3">
+                        <label class="form-label text-muted small">Reaction</label>
+                        <div class="bg-light p-2 rounded">
+                            <code class="text-dark">{{ preview_data.reaction }}</code>
+                        </div>
+                    </div>
+                    {% endif %}
+                    
+                    <div class="row mb-4">
+                        {% if preview_data.reference_authors %}
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label text-muted small">Authors</label>
+                            <div class="bg-light p-2 rounded small">{{ preview_data.reference_authors }}</div>
+                        </div>
+                        {% endif %}
+                        {% if preview_data.reference_year %}
+                        <div class="col-md-3 mb-3">
+                            <label class="form-label text-muted small">Year</label>
+                            <div class="bg-light p-2 rounded">{{ preview_data.reference_year }}</div>
+                        </div>
+                        {% endif %}
+                        {% if preview_data.reference_journal %}
+                        <div class="col-md-3 mb-3">
+                            <label class="form-label text-muted small">Journal</label>
+                            <div class="bg-light p-2 rounded small text-truncate">{{ preview_data.reference_journal }}</div>
+                        </div>
+                        {% endif %}
+                    </div>
+                    
+                    {% if preview_data.reference_doi %}
+                    <div class="mb-4">
+                        <label class="form-label text-muted small">DOI</label>
+                        <div class="bg-light p-2 rounded">
+                            <a href="https://doi.org/{{ preview_data.reference_doi }}" target="_blank">
+                                {{ preview_data.reference_doi }} <i class="bi bi-box-arrow-up-right small"></i>
+                            </a>
+                        </div>
+                    </div>
+                    {% endif %}
+                    
+                    <div class="d-flex gap-2">
+                        <button type="submit" name="confirm_import" class="btn btn-success" {% if preview_data.validation_error %}disabled{% endif %}>
+                            <i class="bi bi-check-circle me-1"></i>Confirm Import
+                        </button>
+                        <a href="{% url 'chemked_database:dataset-upload' %}?cancel=1" class="btn btn-outline-secondary">
+                            <i class="bi bi-x-circle me-1"></i>Cancel
+                        </a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-4">
+        <div class="data-section">
+            <div class="section-header">
+                <h6 class="mb-0"><i class="bi bi-info-circle me-2"></i>Naming Convention</h6>
+            </div>
+            <div class="section-body">
+                <p class="small text-muted">
+                    The suggested name follows the ChemKED database naming convention:
+                </p>
+                <pre class="bg-light p-2 rounded small" style="font-size: 0.75rem;">{Species}_{Author}_{Year}_{Method}_{ID}</pre>
+                <p class="small text-muted">
+                    Examples:
+                </p>
+                <ul class="small text-muted">
+                    <li><code>H+O2_Masten_1990_ST_0001</code></li>
+                    <li><code>n-pentane_Fuller_2021_RCM_1004</code></li>
+                    <li><code>CH4_Wang_2018_calc_0123</code></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% else %}
+<!-- Normal Upload Form -->
+<div class="row">
+    <div class="col-lg-8">
+        <div class="data-section">
+            <div class="section-header">
+                <h6 class="mb-0"><i class="bi bi-file-earmark-arrow-up me-2"></i>Upload Data File</h6>
+            </div>
+            <div class="section-body">
+                <form method="post" enctype="multipart/form-data" id="upload-form">
+                    {% csrf_token %}
+                    
+                    <div class="mb-4">
+                        <label for="id_data_file" class="form-label">Data File(s)</label>
+                        <div class="input-group">
+                            {{ form.data_file }}
+                        </div>
+                        <div class="form-text">
+                            <i class="bi bi-info-circle me-1"></i>
+                            Upload ChemKED YAML or ReSpecTh XML files. <strong>You can select multiple files</strong> 
+                            (hold Ctrl/Cmd while clicking).
+                            Files from the <a href="https://github.com/pr-omethe-us/ChemKED-database" target="_blank">ChemKED-database</a> 
+                            are fully compatible.
+                        </div>
+                        <div id="file-count" class="small text-muted mt-1" style="display: none;">
+                            <i class="bi bi-files me-1"></i><span id="file-count-text">0 files selected</span>
+                        </div>
+                        
+                        <!-- Upload Progress Bar -->
+                        <div id="upload-progress-container" class="upload-progress-container">
+                            <div class="upload-progress">
+                                <div id="upload-progress-bar" class="upload-progress-bar" style="width: 0%;">
+                                    <span id="upload-progress-text">0%</span>
+                                </div>
+                            </div>
+                            <div class="upload-status">
+                                <span id="upload-status-text" class="file-info">Preparing upload...</span>
+                                <span id="upload-speed" class="speed-info float-end"></span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row mb-4">
+                        <div class="col-md-6">
+                            <label for="id_file_format" class="form-label">File Format</label>
+                            {{ form.file_format }}
+                            <div class="form-text">Auto-detects based on file extension.</div>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <div class="form-check">
+                            {{ form.validate_on_upload }}
+                            <label class="form-check-label" for="id_validate_on_upload">
+                                Validate file before importing
+                            </label>
+                        </div>
+                        <div class="form-text">
+                            Recommended: Validates the file against the PyKED/ChemKED schema before importing.
+                        </div>
+                    </div>
+                    
+                    <!-- ReSpecTh-specific options -->
+                    <div class="respecth-options p-3 bg-light rounded mb-4" id="respecth-options">
+                        <h6 class="text-muted mb-3"><i class="bi bi-file-code me-1"></i> ReSpecTh XML Options</h6>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label for="id_file_author" class="form-label">File Author</label>
+                                {{ form.file_author }}
+                                <div class="form-text">Your name (added to file authors list)</div>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label for="id_file_author_orcid" class="form-label">ORCID (optional)</label>
+                                {{ form.file_author_orcid }}
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="d-flex gap-2">
+                        <button type="submit" id="upload-submit-btn" class="btn btn-primary">
+                            <i class="bi bi-upload me-1"></i>Upload & Import
+                        </button>
+                        <button type="button" id="upload-cancel-btn" class="btn btn-outline-danger" style="display: none;">
+                            <i class="bi bi-x-circle me-1"></i>Cancel Upload
+                        </button>
+                        <a href="{% url 'chemked_database:dataset-list' %}" id="cancel-link" class="btn btn-outline-secondary">
+                            Cancel
+                        </a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-4">
+        <div class="data-section">
+            <div class="section-header">
+                <h6 class="mb-0"><i class="bi bi-info-circle me-2"></i>Supported Formats</h6>
+            </div>
+            <div class="section-body">
+                <h6 class="small fw-bold text-primary">ChemKED YAML</h6>
+                <p class="small">
+                    <strong>ChemKED</strong> (Chemical Kinetics Experimental Data) is a standardized YAML format 
+                    for storing experimental combustion data, particularly ignition delay measurements.
+                </p>
+                
+                <h6 class="small fw-bold text-success mt-3">ReSpecTh XML</h6>
+                <p class="small">
+                    <strong>ReSpecTh</strong> (Repository of Spectral and Thermochemical Data) XML files 
+                    are automatically converted to ChemKED format using PyKED's built-in converter.
+                </p>
+                
+                <h6 class="small fw-bold mt-3">Supported Features:</h6>
+                <ul class="small mb-3">
+                    <li>Ignition delay experiments</li>
+                    <li>Shock tube and RCM data</li>
+                    <li>Species composition with InChI/SMILES</li>
+                    <li>Uncertainty specifications</li>
+                    <li>Time history data (volume, pressure)</li>
+                </ul>
+                
+                <h6 class="small fw-bold">Example Structure:</h6>
+                <pre class="bg-light p-2 rounded small" style="font-size: 0.75rem; overflow-x: auto;"><code>file-version: 0
+chemked-version: 0.4.1
+file-authors:
+  - name: John Doe
+reference:
+  doi: 10.1016/...
+  journal: Combustion and Flame
+  year: 2020
+experiment-type: ignition delay
+apparatus:
+  kind: shock tube
+datapoints:
+  - temperature: [1200, kelvin]
+    pressure: [2, bar]
+    ignition-delay: [500, us]
+    composition:
+      kind: mole fraction
+      species:
+        - species-name: H2
+          amount: [0.05]</code></pre>
+                
+                <div class="mt-3">
+                    <a href="https://github.com/pr-omethe-us/PyKED" target="_blank" class="small">
+                        <i class="bi bi-box-arrow-up-right me-1"></i>PyKED Documentation
+                    </a>
+                </div>
+            </div>
+        </div>
+        
+        <div class="data-section mt-3">
+            <div class="section-header">
+                <h6 class="mb-0"><i class="bi bi-folder me-2"></i>ChemKED Database</h6>
+            </div>
+            <div class="section-body">
+                <p class="small">
+                    The <a href="https://github.com/pr-omethe-us/ChemKED-database" target="_blank">ChemKED-database</a> 
+                    repository contains curated experimental data files that can be directly uploaded here.
+                </p>
+                <p class="small mb-0">
+                    Available fuels include n-heptane, n-butanol, toluene, and more.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const fileFormatSelect = document.getElementById('id_file_format');
+    const dataFileInput = document.getElementById('id_data_file');
+    const respecthOptions = document.getElementById('respecth-options');
+    const fileCountDiv = document.getElementById('file-count');
+    const fileCountText = document.getElementById('file-count-text');
+    
+    // Progress bar elements
+    const uploadForm = document.getElementById('upload-form');
+    const uploadSubmitBtn = document.getElementById('upload-submit-btn');
+    const uploadCancelBtn = document.getElementById('upload-cancel-btn');
+    const cancelLink = document.getElementById('cancel-link');
+    const progressContainer = document.getElementById('upload-progress-container');
+    const progressBar = document.getElementById('upload-progress-bar');
+    const progressText = document.getElementById('upload-progress-text');
+    const statusText = document.getElementById('upload-status-text');
+    const speedInfo = document.getElementById('upload-speed');
+    
+    let xhr = null;
+    let uploadStartTime = null;
+    
+    // Only run if the required elements exist
+    if (!fileFormatSelect || !dataFileInput || !respecthOptions) {
+        return;
+    }
+    
+    function updateRespecthVisibility() {
+        const format = fileFormatSelect.value;
+        let showRespecth = false;
+        
+        if (format === 'xml') {
+            showRespecth = true;
+        } else if (format === 'auto') {
+            // Check if any XML files are selected
+            const files = dataFileInput.files;
+            for (let i = 0; i < files.length; i++) {
+                if (files[i].name.toLowerCase().endsWith('.xml')) {
+                    showRespecth = true;
+                    break;
+                }
+            }
+        }
+        
+        respecthOptions.style.display = showRespecth ? 'block' : 'none';
+    }
+    
+    function updateFileCount() {
+        const files = dataFileInput.files;
+        if (files.length > 1) {
+            fileCountDiv.style.display = 'block';
+            fileCountText.textContent = files.length + ' files selected';
+        } else if (files.length === 1) {
+            fileCountDiv.style.display = 'block';
+            fileCountText.textContent = '1 file selected: ' + files[0].name;
+        } else {
+            fileCountDiv.style.display = 'none';
+        }
+    }
+    
+    function formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    }
+    
+    function formatSpeed(bytesPerSecond) {
+        return formatBytes(bytesPerSecond) + '/s';
+    }
+    
+    function getTotalFileSize() {
+        let total = 0;
+        const files = dataFileInput.files;
+        for (let i = 0; i < files.length; i++) {
+            total += files[i].size;
+        }
+        return total;
+    }
+    
+    function setProgress(percent, status, isProcessing) {
+        progressBar.style.width = percent + '%';
+        progressText.textContent = Math.round(percent) + '%';
+        
+        if (status) {
+            statusText.textContent = status;
+        }
+        
+        if (isProcessing) {
+            progressBar.classList.add('processing');
+        } else {
+            progressBar.classList.remove('processing');
+        }
+    }
+    
+    function showError(message) {
+        progressBar.classList.add('error');
+        progressBar.classList.remove('processing');
+        statusText.innerHTML = '<i class="bi bi-exclamation-triangle me-1"></i>' + message;
+        speedInfo.textContent = '';
+    }
+    
+    function resetUI() {
+        progressContainer.classList.remove('active');
+        progressBar.style.width = '0%';
+        progressBar.classList.remove('processing', 'error');
+        progressText.textContent = '0%';
+        statusText.textContent = 'Preparing upload...';
+        speedInfo.textContent = '';
+        uploadSubmitBtn.disabled = false;
+        uploadSubmitBtn.innerHTML = '<i class="bi bi-upload me-1"></i>Upload & Import';
+        uploadCancelBtn.style.display = 'none';
+        cancelLink.style.display = '';
+        dataFileInput.disabled = false;
+    }
+    
+    function cancelUpload() {
+        if (xhr) {
+            xhr.abort();
+            xhr = null;
+        }
+        if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+        }
+        resetUI();
+        statusText.textContent = 'Upload cancelled';
+    }
+    
+    // SSE event source for processing progress
+    let eventSource = null;
+    
+    function connectSSE(sseUrl, totalFiles) {
+        eventSource = new EventSource(sseUrl);
+        
+        let processedFiles = 0;
+        let successfulFiles = [];
+        let skippedFiles = [];
+        let failedFiles = [];
+        
+        eventSource.addEventListener('start', function(e) {
+            const data = JSON.parse(e.data);
+            setProgress(50, data.message, true);
+        });
+        
+        eventSource.addEventListener('progress', function(e) {
+            const data = JSON.parse(e.data);
+            // Processing progress: 50% + (file progress * 50%)
+            const processingPercent = 50 + (data.percent / 2);
+            setProgress(processingPercent, data.message, true);
+            speedInfo.textContent = `${data.current} of ${data.total} files`;
+        });
+        
+        eventSource.addEventListener('file_complete', function(e) {
+            const data = JSON.parse(e.data);
+            processedFiles++;
+            
+            if (data.status === 'success') {
+                successfulFiles.push(data);
+            } else if (data.status === 'skipped') {
+                skippedFiles.push(data);
+            } else {
+                failedFiles.push(data);
+            }
+        });
+        
+        eventSource.addEventListener('complete', function(e) {
+            const data = JSON.parse(e.data);
+            eventSource.close();
+            eventSource = null;
+            
+            // Show 100% complete
+            setProgress(100, 'Processing complete!', false);
+            progressBar.classList.remove('processing');
+            speedInfo.textContent = '';
+            
+            // Build result messages
+            let messagesHtml = '';
+            
+            if (data.successful > 0) {
+                messagesHtml += `<div class="alert alert-success py-2 mb-2">
+                    <i class="bi bi-check-circle me-2"></i>Successfully imported ${data.successful} dataset(s) with ${data.total_datapoints} total datapoints.
+                </div>`;
+            }
+            
+            if (failedFiles.length > 0) {
+                const items = failedFiles
+                    .map(f => `<li><code>${f.filename}</code>: ${f.error}</li>`)
+                    .join('');
+                messagesHtml += `<div class="alert alert-danger py-2 mb-2">
+                    <strong><i class="bi bi-x-circle me-2"></i>Failed to import ${failedFiles.length} file(s):</strong>
+                    <ul class="mb-0 mt-1 small">${items}</ul>
+                </div>`;
+            }
+            
+            if (skippedFiles.length > 0) {
+                const items = skippedFiles
+                    .map(f => `<li><code>${f.filename}</code>: ${f.error}</li>`)
+                    .join('');
+                messagesHtml += `<div class="alert alert-warning py-2 mb-2">
+                    <strong><i class="bi bi-exclamation-triangle me-2"></i>Skipped ${skippedFiles.length} file(s):</strong>
+                    <ul class="mb-0 mt-1 small">${items}</ul>
+                </div>`;
+            }
+            
+            // Update UI based on result
+            if (data.successful > 0) {
+                progressBar.style.background = 'linear-gradient(90deg, #198754 0%, #20c997 100%)';
+                statusText.innerHTML = messagesHtml;
+                
+                if (data.redirect_url) {
+                    statusText.innerHTML += '<div class="small text-muted mt-2"><i class="bi bi-arrow-right me-1"></i>Redirecting to dataset list...</div>';
+                    setTimeout(function() {
+                        window.location.href = data.redirect_url;
+                    }, 2500);
+                }
+            } else {
+                progressBar.style.background = 'linear-gradient(90deg, #dc3545 0%, #fd7e14 100%)';
+                statusText.innerHTML = messagesHtml || '<div class="alert alert-danger py-2"><i class="bi bi-x-circle me-2"></i>No files were imported</div>';
+                statusText.innerHTML += '<div class="mt-3"><button class="btn btn-outline-primary btn-sm" onclick="location.reload()"><i class="bi bi-arrow-clockwise me-1"></i>Try Again</button></div>';
+            }
+            
+            uploadCancelBtn.style.display = 'none';
+            cancelLink.style.display = '';
+        });
+        
+        eventSource.addEventListener('error', function(e) {
+            console.error('SSE error:', e);
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+            showError('Connection to server lost. Processing may still be in progress.');
+            setTimeout(function() {
+                statusText.innerHTML += '<div class="mt-3"><button class="btn btn-outline-primary btn-sm" onclick="location.reload()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh Page</button></div>';
+            }, 500);
+        });
+    }
+    
+    // Handle form submission with progress tracking
+    if (uploadForm) {
+        uploadForm.addEventListener('submit', function(e) {
+            const files = dataFileInput.files;
+            if (files.length === 0) {
+                return; // Let the normal form validation handle this
+            }
+            
+            e.preventDefault();
+            
+            // Create FormData BEFORE disabling inputs (disabled inputs are excluded from FormData)
+            const formData = new FormData(uploadForm);
+            
+            // Show progress UI
+            progressContainer.classList.add('active');
+            uploadSubmitBtn.disabled = true;
+            uploadSubmitBtn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Uploading...';
+            uploadCancelBtn.style.display = '';
+            cancelLink.style.display = 'none';
+            dataFileInput.disabled = true;
+            
+            // Reset progress
+            setProgress(0, 'Preparing upload...', false);
+            uploadStartTime = Date.now();
+            
+            // Create XHR request
+            xhr = new XMLHttpRequest();
+            
+            // Track upload progress (0-50% of total progress)
+            xhr.upload.addEventListener('progress', function(e) {
+                if (e.lengthComputable) {
+                    // Upload progress is 0-50% of total
+                    const uploadPercent = (e.loaded / e.total) * 50;
+                    const elapsedSeconds = (Date.now() - uploadStartTime) / 1000;
+                    const speed = e.loaded / elapsedSeconds;
+                    
+                    const totalSize = formatBytes(e.total);
+                    const uploadedSize = formatBytes(e.loaded);
+                    
+                    setProgress(uploadPercent, 
+                        `Uploading ${files.length} file${files.length > 1 ? 's' : ''}: ${uploadedSize} / ${totalSize}`,
+                        false
+                    );
+                    speedInfo.textContent = formatSpeed(speed);
+                }
+            });
+            
+            // Upload complete - prepare for SSE processing
+            xhr.upload.addEventListener('load', function() {
+                setProgress(50, 'Files uploaded. Connecting to server for processing...', true);
+                speedInfo.textContent = '';
+            });
+            
+            // Handle response - should contain batch_id and SSE URL
+            xhr.addEventListener('load', function() {
+                let response;
+                try {
+                    response = JSON.parse(xhr.responseText);
+                } catch (e) {
+                    // Not JSON - it's a regular HTML response (redirect followed)
+                    // This happens for single-file preview flow
+                    if (xhr.status >= 200 && xhr.status < 400) {
+                        if (xhr.responseURL) {
+                            window.location.href = xhr.responseURL;
+                        } else {
+                            window.location.reload();
+                        }
+                        return;
+                    }
+                    showError('Server error: ' + xhr.status);
+                    setTimeout(function() {
+                        resetUI();
+                    }, 3000);
+                    return;
+                }
+
+                // Check if we got a batch_id for SSE processing
+                if (response.batch_id && response.sse_url) {
+                    // Connect to SSE for real-time processing progress
+                    setProgress(50, `Processing ${response.total_files} file(s)...`, true);
+                    connectSSE(response.sse_url, response.total_files);
+                } else if (response.success === false && response.messages) {
+                    // Error during upload preparation
+                    progressBar.classList.remove('processing');
+                    progressBar.style.background = 'linear-gradient(90deg, #dc3545 0%, #fd7e14 100%)';
+                    
+                    let messagesHtml = '';
+                    response.messages.forEach(function(msg) {
+                        messagesHtml += `<div class="alert alert-danger py-2 mb-2">
+                            <i class="bi bi-x-circle me-2"></i>${msg.text}
+                        </div>`;
+                    });
+                    statusText.innerHTML = messagesHtml;
+                    statusText.innerHTML += '<div class="mt-3"><button class="btn btn-outline-primary btn-sm" onclick="location.reload()"><i class="bi bi-arrow-clockwise me-1"></i>Try Again</button></div>';
+                    
+                    uploadCancelBtn.style.display = 'none';
+                    cancelLink.style.display = '';
+                } else {
+                    // Unexpected response format
+                    showError('Unexpected server response');
+                    console.error('Unexpected response:', response);
+                    setTimeout(resetUI, 3000);
+                }
+            });
+            
+            // Handle errors
+            xhr.addEventListener('error', function() {
+                showError('Network error - please check your connection');
+                setTimeout(resetUI, 3000);
+            });
+            
+            xhr.addEventListener('abort', function() {
+                // Already handled by cancelUpload
+            });
+            
+            // Send the request
+            xhr.open('POST', uploadForm.action || window.location.href);
+            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+            xhr.send(formData);
+        });
+        
+        // Cancel button handler
+        if (uploadCancelBtn) {
+            uploadCancelBtn.addEventListener('click', cancelUpload);
+        }
+    }
+    
+    // Initial state
+    updateRespecthVisibility();
+    updateFileCount();
+    
+    // Listen for changes
+    fileFormatSelect.addEventListener('change', updateRespecthVisibility);
+    dataFileInput.addEventListener('change', function() {
+        updateRespecthVisibility();
+        updateFileCount();
+    });
+});
+</script>
+{% endblock %}
