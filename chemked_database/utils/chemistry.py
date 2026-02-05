@@ -13,7 +13,7 @@ def rdkit_available() -> bool:
     return Chem is not None
 
 
-def infer_smiles_and_atomic_composition(inchi: str) -> Tuple[str, Optional[list]]:
+def infer_smiles_and_atomic_composition(inchi: str):
     if not inchi or Chem is None:
         return "", None
 

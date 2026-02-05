@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Coverage Matrix{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="detail-header mb-4">
+    <nav aria-label="breadcrumb" class="small mb-1">
+        <ol class="breadcrumb mb-0">
+            <li class="breadcrumb-item"><a href="{% url 'home' %}">Home</a></li>
+            <li class="breadcrumb-item"><a href="{% url 'analysis:dashboard' %}">Analysis</a></li>
+            <li class="breadcrumb-item active">Coverage Matrix</li>
+        </ol>
+    </nav>
+    <div class="d-flex align-items-center justify-content-between">
+        <div>
+            <h1 class="h4 mb-0"><i class="bi bi-grid-3x3 me-2 text-primary"></i>Model-Dataset Coverage Matrix</h1>
+            <p class="text-muted mb-0 mt-1">Heatmap of model performance across experimental datasets</p>
+        </div>
+        <a href="{% url 'analysis:run-create' %}" class="btn btn-primary btn-sm">
+            <i class="bi bi-play-circle me-1"></i>New Simulation
+        </a>
+    </div>
+</div>
+
+<!-- Summary Stats -->
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="data-section h-100">
+            <div class="section-body text-center py-3">
+                <div class="h3 mb-0 text-primary">{{ total_models }}</div>
+                <small class="text-muted">Models</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="data-section h-100">
+            <div class="section-body text-center py-3">
+                <div class="h3 mb-0 text-danger">{{ total_datasets }}</div>
+                <small class="text-muted">Datasets</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="data-section h-100">
+            <div class="section-body text-center py-3">
+                <div class="h3 mb-0 text-success">{{ evaluated_pairs }}</div>
+                <small class="text-muted">Evaluated Pairs</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="data-section h-100">
+            <div class="section-body text-center py-3">
+                <div class="h3 mb-0 text-warning">{{ coverage_percent|floatformat:1 }}%</div>
+                <small class="text-muted">Coverage</small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Heatmap -->
+<div class="data-section mb-4">
+    <div class="section-header">
+        <h6 class="mb-0"><i class="bi bi-grid me-2"></i>Coverage Heatmap</h6>
+    </div>
+    <div class="section-body">
+        {% if evaluated_pairs > 0 %}
+        <div id="coverage-heatmap" style="height: 600px;"></div>
+        {% else %}
+        <div class="text-center text-muted py-5">
+            <i class="bi bi-inbox d-block mb-2" style="font-size: 2rem;"></i>
+            <p class="mb-2">No coverage data available yet.</p>
+            <p class="small text-muted mb-3">Run simulations to populate the coverage matrix.</p>
+            <a href="{% url 'analysis:run-create' %}" class="btn btn-primary btn-sm">
+                <i class="bi bi-play-circle me-1"></i>Run Your First Simulation
+            </a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Coverage Legend -->
+<div class="row g-3">
+    <div class="col-md-6">
+        <div class="data-section">
+            <div class="section-header">
+                <h6 class="mb-0"><i class="bi bi-palette me-2"></i>Legend</h6>
+            </div>
+            <div class="section-body">
+                <div class="d-flex align-items-center gap-4">
+                    <div class="d-flex align-items-center gap-2">
+                        <div style="width: 20px; height: 20px; background-color: #198754; border-radius: 3px;"></div>
+                        <small>Excellent (&lt; 0.5)</small>
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <div style="width: 20px; height: 20px; background-color: #ffc107; border-radius: 3px;"></div>
+                        <small>Good (0.5 - 1.0)</small>
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <div style="width: 20px; height: 20px; background-color: #fd7e14; border-radius: 3px;"></div>
+                        <small>Fair (1.0 - 2.0)</small>
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <div style="width: 20px; height: 20px; background-color: #dc3545; border-radius: 3px;"></div>
+                        <small>Poor (&gt; 2.0)</small>
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <div style="width: 20px; height: 20px; background-color: #e9ecef; border-radius: 3px; border: 1px solid #dee2e6;"></div>
+                        <small>Not Tested</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="data-section">
+            <div class="section-header">
+                <h6 class="mb-0"><i class="bi bi-info-circle me-2"></i>About Error Function</h6>
+            </div>
+            <div class="section-body">
+                <p class="small text-muted mb-0">
+                    The error function quantifies the agreement between simulated and experimental values.
+                    Lower values indicate better model performance. Values below 1.0 generally indicate
+                    good agreement within experimental uncertainty.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Coverage Table -->
+{% if coverage_data %}
+<div class="data-section mt-4">
+    <div class="section-header">
+        <h6 class="mb-0"><i class="bi bi-table me-2"></i>Coverage Details</h6>
+    </div>
+    <div class="section-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>Dataset</th>
+                        <th class="text-end">Error Function</th>
+                        <th>Status</th>
+                        <th>Last Run</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for cov in coverage_data|slice:":50" %}
+                    <tr>
+                        <td>
+                            <a href="{% url 'kinetic-model-detail' cov.kinetic_model.id %}">
+                                {{ cov.kinetic_model.model_name }}
+                            </a>
+                        </td>
+                        <td>
+                            <small class="text-muted">{{ cov.dataset.short_name }}</small>
+                        </td>
+                        <td class="text-end">
+                            {% if cov.latest_error_function %}
+                                <span class="{% if cov.latest_error_function < 1 %}text-success{% elif cov.latest_error_function < 2 %}text-warning{% else %}text-danger{% endif %}">
+                                    {{ cov.latest_error_function|floatformat:3 }}
+                                </span>
+                            {% else %}
+                                <span class="text-muted">—</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if cov.is_outdated %}
+                                <span class="badge bg-warning-subtle text-warning">Outdated</span>
+                            {% else %}
+                                <span class="badge bg-success-subtle text-success">Current</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <small class="text-muted">{{ cov.last_evaluated_at|date:"M d, Y"|default:"—" }}</small>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+{% if evaluated_pairs > 0 and heatmap_json %}
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const plotData = {{ heatmap_json|safe }};
+    Plotly.newPlot('coverage-heatmap', plotData.data, plotData.layout, {responsive: true});
+});
+</script>
+{% endif %}
+{% endblock %}

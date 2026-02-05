@@ -20,3 +20,5 @@ importer.log
 .env
 /static/
 media/
+*run_logs
+*run_results

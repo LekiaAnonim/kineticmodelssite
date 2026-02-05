@@ -43,6 +43,7 @@ ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split(" ")
 # Application definition
 
 INSTALLED_APPS = [
+    "analysis.apps.AnalysisConfig",
     "chemked_database.apps.ChemkedDatabaseConfig",
     "importer_dashboard.apps.ImporterDashboardConfig",
     # "import_voting.apps.ImportVotingConfig",  # REMOVED: Duplicate of importer_dashboard functionality

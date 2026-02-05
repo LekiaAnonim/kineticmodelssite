@@ -7,14 +7,6 @@ We intentionally keep this module as a stub (instead of deleting it) to avoid
 accidental import errors from stale references during cleanup.
 """
 
-# Intentionally empty.
-
-        'unidentified_species': progress_data.get('unidentified', 0),
-        'total_reactions': progress_data.get('totalreactions', 0),
-        'unmatched_reactions': progress_data.get('unmatchedreactions', 0),
-        'thermo_matches': progress_data.get('thermomatches', 0),
-    }
-
 
 def parse_species_from_smiles_file(smiles_file_content: str):
     """

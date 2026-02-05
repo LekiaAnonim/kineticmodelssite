@@ -29,6 +29,7 @@ urlpatterns = [
         include(("importer_dashboard.urls", "importer_dashboard"), namespace="importer_dashboard"),
     ),
     path("chemked/", include("chemked_database.urls")),
+    path("analysis/", include(("analysis.urls", "analysis"), namespace="analysis")),
     path("admin/", admin.site.urls),
     path("login/", LoginView.as_view(template_name="database/login.html"), name="login"),
     path("logout/", LogoutView.as_view(), name="logout"),

@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -41,9 +42,7 @@ def _build_zip(files):
 
 
 def _get_filename_with_fallback(file_field, fallback_name):
-    """Get the original filename from a file field, or use fallback with .txt extension."""
-    if file_field and hasattr(file_field, 'name') and file_field.name:
-        # Extract just the filename from the path
+    if file_field and hasattr(file_field, "name") and file_field.name:
         return os.path.basename(file_field.name)
     return f"{fallback_name}.txt"
 
@@ -85,10 +84,8 @@ def build_cantera_yaml(kinetic_model, strict=False):
 
     if not reactions:
         generated = _generate_chemkin_files(kinetic_model, strict=strict)
-        # Find the generated files (they have model name prefix)
         reactions = next((v for k, v in generated.items() if k.endswith("_chem.inp")), None)
         transport = next((v for k, v in generated.items() if k.endswith("_tran.dat")), None)
-        # Thermo is embedded in chem.inp for generated files
         thermo = None
 
     if not reactions:
@@ -107,7 +104,7 @@ def build_cantera_yaml(kinetic_model, strict=False):
 
         transport_path = ""
         if transport:
-            transport_path = os.path.join(tempdir, "transport.dat")
+            transport_path = os.path.join(tempdir, "tran.dat")
             with open(transport_path, "wb") as handle:
                 handle.write(transport)
 
@@ -119,8 +116,34 @@ def build_cantera_yaml(kinetic_model, strict=False):
         with open(output_path, "rb") as handle:
             content = handle.read()
 
+    content = _patch_temperature_ranges(content)
+
     filename = os.path.basename(output_path)
     return ExportResult(content=content, filename=filename, content_type="application/x-yaml")
+
+
+def _patch_temperature_ranges(content):
+    try:
+        text = content.decode("utf-8")
+    except Exception:
+        return content
+
+    pattern = re.compile(r"(temperature-ranges:\s*\[)([^\]]+)(\])")
+
+    def repl(match):
+        items = [item.strip() for item in match.group(2).split(",") if item.strip()]
+        patched_items = []
+        for item in items:
+            if "K" in item or "kelvin" in item.lower():
+                patched_items.append(item)
+            else:
+                patched_items.append(f"{item} K")
+        return f"{match.group(1)}{', '.join(patched_items)}{match.group(3)}"
+
+    patched = pattern.sub(repl, text)
+    if patched == text:
+        return content
+    return patched.encode("utf-8")
 
 
 def _generate_chemkin_files(kinetic_model, strict=False):
@@ -139,9 +162,9 @@ def _generate_chemkin_files(kinetic_model, strict=False):
             from rmgpy.reaction import Reaction as RmgReaction
             from rmgpy.species import Species as RmgSpecies
         except Exception as inner_exc:
-            raise ExportError(
-                "Chemkin generation requires RMG-Py to be installed."
-            ) from inner_exc
+            raise ExportError("Chemkin generation requires RMG-Py to be installed.") from inner_exc
+
+    use_camelcase = getattr(save_chemkin_file, "__name__", "") == "saveChemkinFile"
 
     species_map, missing_species = _build_rmg_species_map(
         kinetic_model, NASAPolynomial, NASA, TransportData, RmgSpecies
@@ -166,12 +189,26 @@ def _generate_chemkin_files(kinetic_model, strict=False):
             )
         raise ExportError("Chemkin generation failed: no species or reactions available.")
 
-    # Create filename prefix from model name
     model_slug = slugify(kinetic_model.model_name or "") or str(kinetic_model.pk)
 
     with tempfile.TemporaryDirectory() as tempdir:
         reactions_path = os.path.join(tempdir, "chem.inp")
-        save_chemkin_file(reactions_path, list(species_map.values()), reactions, verbose=False)
+        if use_camelcase:
+            save_chemkin_file(
+                reactions_path,
+                list(species_map.values()),
+                reactions,
+                verbose=False,
+                checkForDuplicates=False,
+            )
+        else:
+            save_chemkin_file(
+                reactions_path,
+                list(species_map.values()),
+                reactions,
+                verbose=False,
+                check_for_duplicates=False,
+            )
 
         transport_path = None
         if any(getattr(spec, "transport_data", None) for spec in species_map.values()):
@@ -181,7 +218,6 @@ def _generate_chemkin_files(kinetic_model, strict=False):
         with open(reactions_path, "rb") as handle:
             reactions_content = handle.read()
 
-        # Use model name prefix with standard Chemkin extensions for generated files
         files = {f"{model_slug}_chem.inp": reactions_content}
         if transport_path:
             with open(transport_path, "rb") as handle:
@@ -282,6 +318,7 @@ def _build_rmg_species_map(kinetic_model, nasa_poly_cls, nasa_cls, transport_cls
 def _build_rmg_reactions(kinetic_model, species_map, rmg_reaction_cls, strict=False):
     reactions = []
     missing_species = set()
+    unbalanced_reactions = []
     for kinetics_comment in kinetic_model.kineticscomment_set.select_related(
         "kinetics__reaction"
     ):
@@ -310,6 +347,14 @@ def _build_rmg_reactions(kinetic_model, species_map, rmg_reaction_cls, strict=Fa
             kinetics.max_pressure,
             efficiencies,
         )
+        if hasattr(rmg_reaction, "is_balanced") and not rmg_reaction.is_balanced():
+            unbalanced_reactions.append(kinetics.id)
+            if strict:
+                raise ExportError(
+                    "Strict Chemkin generation failed because a reaction is unbalanced: "
+                    f"{kinetics.id}."
+                )
+            continue
         if not strict:
             _normalize_kinetics_units(rmg_reaction.kinetics, len(reactants))
         reactions.append(rmg_reaction)
@@ -318,6 +363,13 @@ def _build_rmg_reactions(kinetic_model, species_map, rmg_reaction_cls, strict=Fa
         suffix = "" if len(missing_species) <= 5 else "..."
         raise ExportError(
             "Strict Chemkin generation failed because reactions reference species without thermo data: "
+            f"{sample}{suffix}."
+        )
+    if strict and unbalanced_reactions:
+        sample = ", ".join(str(reaction_id) for reaction_id in sorted(unbalanced_reactions)[:5])
+        suffix = "" if len(unbalanced_reactions) <= 5 else "..."
+        raise ExportError(
+            "Strict Chemkin generation failed because reactions are unbalanced: "
             f"{sample}{suffix}."
         )
     return reactions
@@ -378,6 +430,9 @@ def _normalize_kinetics_units(rmg_kinetics, reaction_order):
 
 
 def _run_ck2yaml(input_path, thermo_path, transport_path, output_path):
+    if not thermo_path and _run_ck2yaml_via_rmg(input_path, transport_path, output_path):
+        return
+
     args = ["--input", input_path, "--output", output_path, "--no-validate", "--quiet"]
     if thermo_path:
         args.extend(["--thermo", thermo_path])
@@ -406,3 +461,26 @@ def _run_ck2yaml(input_path, thermo_path, transport_path, output_path):
     raise ExportError(
         "Cantera conversion is unavailable. Install Cantera or provide the ck2yaml CLI."
     )
+
+
+def _run_ck2yaml_via_rmg(chemkin_path, transport_path, output_path):
+    try:
+        from rmgpy.rmg.main import RMG
+
+        output_dir = tempfile.mkdtemp()
+        rmg_job = RMG(output_directory=output_dir)
+        if transport_path and os.path.isfile(transport_path):
+            transport_dir = os.path.dirname(chemkin_path)
+            default_transport = os.path.join(transport_dir, "tran.dat")
+            if transport_path != default_transport:
+                shutil.copy(transport_path, default_transport)
+
+        rmg_job.generate_cantera_files(chemkin_path)
+        file_name = os.path.splitext(os.path.basename(chemkin_path))[0] + ".yaml"
+        generated_path = os.path.join(output_dir, "cantera", file_name)
+        if not os.path.isfile(generated_path):
+            return False
+        shutil.move(generated_path, output_path)
+        return True
+    except Exception:
+        return False

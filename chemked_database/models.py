@@ -204,7 +204,7 @@ class ExperimentDataset(models.Model):
     
     # Experiment metadata
     experiment_type = models.CharField(
-        max_length=50,
+        max_length=100,
         choices=ExperimentType.choices,
         default=ExperimentType.IGNITION_DELAY
     )
@@ -312,6 +312,17 @@ class ExperimentDataset(models.Model):
     def __str__(self):
         return f"{self.chemked_file_path} ({self.datapoints.count()} points)"
     
+    @property
+    def short_name(self):
+        """Return a shortened display name for the dataset."""
+        if self.chemked_file_path:
+            # e.g., "n-heptane/Vermeer 1972/st_vermeer_1972.yaml" -> "Vermeer 1972"
+            parts = self.chemked_file_path.split('/')
+            if len(parts) >= 2:
+                return parts[-2]  # Author Year folder
+            return parts[-1].replace('.yaml', '')
+        return f"Dataset {self.pk}"
+
     @property
     def fuel_species(self):
         """Extract primary fuel species from composition"""
@@ -426,7 +437,7 @@ class ExperimentDatapoint(models.Model):
         ordering = ['dataset', 'temperature']
     
     def __str__(self):
-        return f"T={self.temperature}K, P={self.pressure/1e5:.2f}bar"
+        return f"T={self.temperature}K, P={self.pressure/1e5:.5f}bar"
     
     def get_composition(self):
         """Get composition, falling back to dataset common composition"""
@@ -534,6 +545,9 @@ class IgnitionDelayDatapoint(models.Model):
         tau_ms = self.ignition_delay * 1000 if self.ignition_delay is not None else None
         tau_str = f"{tau_ms:.2f}ms" if tau_ms is not None else "n/a"
         return f"Ignition delay τ={tau_str}"
+
+    def __float__(self):
+        return float(self.ignition_delay) if self.ignition_delay is not None else 0.0
 
     def get_ignition_target(self):
         if self.ignition_target:

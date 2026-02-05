@@ -1,0 +1,994 @@
+"""
+Analysis Views
+"""
+
+import json
+import tempfile
+import logging
+import os
+from django.conf import settings
+from typing import Optional
+
+from django.contrib import messages
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.db.models import Count, Avg, Min, Max, Q, F
+from django.http import JsonResponse, HttpResponseRedirect, HttpResponse
+from django.utils import timezone
+from django.shortcuts import get_object_or_404, redirect
+from django.urls import reverse, reverse_lazy
+from django.views import View
+from django.views.generic import TemplateView, DetailView, ListView, FormView
+
+from database.models import KineticModel
+from chemked_database.models import ExperimentDataset, CompositionSpecies
+
+from .models import (
+    SimulationRun,
+    SimulationResult,
+    DatapointResult,
+    SpeciesMapping,
+    ModelDatasetCoverage,
+    SimulationStatus,
+    TriggerType,
+)
+from .forms import SimulationCreateForm, DatasetFilterForm
+from .services import run_pyteck_simulation, parse_pyteck_results
+
+logger = logging.getLogger(__name__)
+
+
+def _get_simulation_log_dir() -> str:
+    """Return the persistent log directory for simulation runs."""
+    base_dir = getattr(settings, "BASE_DIR", os.getcwd())
+    log_dir = os.path.join(base_dir, "analysis", "run_logs")
+    os.makedirs(log_dir, exist_ok=True)
+    return log_dir
+
+
+def _get_simulation_results_dir(run_id: int) -> str:
+    """Return a per-run results directory inside the app folder."""
+    base_dir = getattr(settings, "BASE_DIR", os.getcwd())
+    results_dir = os.path.join(base_dir, "analysis", "run_results", f"run_{run_id}")
+    os.makedirs(results_dir, exist_ok=True)
+    return results_dir
+
+
+def _append_simulation_log(run: SimulationRun, message: str) -> None:
+    """Append a message to the shared simulation log file."""
+    log_dir = _get_simulation_log_dir()
+    log_path = os.path.join(log_dir, "simulation_runs.log")
+    timestamp = timezone.now().isoformat()
+    with open(log_path, "a", encoding="utf-8") as handle:
+        handle.write(f"[{timestamp}] Run #{run.pk} - {message}\n")
+
+
+class AnalysisDashboardView(TemplateView):
+    """
+    Main analysis dashboard with overview statistics and recent runs.
+    """
+    template_name = "analysis/dashboard.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+
+        # Overall statistics
+        context["total_models"] = KineticModel.objects.count()
+        context["total_datasets"] = ExperimentDataset.objects.filter(
+            experiment_type='ignition delay'
+        ).count()
+        context["total_runs"] = SimulationRun.objects.count()
+        context["successful_runs"] = SimulationRun.objects.filter(
+            status=SimulationStatus.COMPLETED
+        ).count()
+
+        # Coverage statistics
+        coverage_stats = ModelDatasetCoverage.objects.aggregate(
+            total_pairs=Count('id'),
+            evaluated_pairs=Count('id', filter=Q(has_successful_run=True)),
+            outdated_pairs=Count('id', filter=Q(is_outdated=True)),
+        )
+        context["coverage_stats"] = coverage_stats
+        
+        # Calculate coverage percentage
+        total_possible = context["total_models"] * context["total_datasets"]
+        if total_possible > 0:
+            context["coverage_percent"] = round(
+                coverage_stats['evaluated_pairs'] / total_possible * 100, 1
+            )
+        else:
+            context["coverage_percent"] = 0
+
+        # Recent simulation runs
+        context["recent_runs"] = (
+            SimulationRun.objects
+            .select_related('kinetic_model', 'dataset', 'result')
+            .order_by('-created_at')[:10]
+        )
+
+        # Models with most coverage
+        context["top_models"] = (
+            KineticModel.objects
+            .annotate(
+                coverage_count=Count('dataset_coverage', filter=Q(dataset_coverage__has_successful_run=True))
+            )
+            .order_by('-coverage_count')[:5]
+        )
+
+        # Best performing model-dataset pairs
+        context["best_performers"] = (
+            ModelDatasetCoverage.objects
+            .filter(has_successful_run=True, latest_error_function__isnull=False)
+            .select_related('kinetic_model', 'dataset')
+            .order_by('latest_error_function')[:10]
+        )
+
+        # Runs needing attention (outdated or failed)
+        context["needs_attention"] = (
+            ModelDatasetCoverage.objects
+            .filter(Q(is_outdated=True) | Q(needs_rerun=True))
+            .select_related('kinetic_model', 'dataset')[:10]
+        )
+
+        return context
+
+
+class SimulationCreateView(FormView):
+    """
+    Create new simulation runs.
+    """
+    template_name = "analysis/simulation_form.html"
+    form_class = SimulationCreateForm
+    success_url = reverse_lazy('analysis:dashboard')
+
+    def _dataset_ids_for_fuel_keyword(self, keyword: str):
+        if not keyword:
+            return []
+        keyword = keyword.strip()
+        if not keyword:
+            return []
+
+        query = (
+            Q(species_name__icontains=keyword)
+            | Q(chem_name__icontains=keyword)
+            | Q(cas__icontains=keyword)
+            | Q(inchi__icontains=keyword)
+            | Q(smiles__icontains=keyword)
+        )
+
+        return (
+            CompositionSpecies.objects
+            .filter(query)
+            .values_list('composition__datapoints__dataset_id', flat=True)
+            .distinct()
+        )
+
+    def _get_filter_form(self):
+        return DatasetFilterForm(self.request.GET or None)
+
+    def _get_filtered_datasets(self):
+        qs = ExperimentDataset.objects.all()
+        filter_form = self._get_filter_form()
+
+        if filter_form.is_valid():
+            data = filter_form.cleaned_data
+            if data.get('experiment_type'):
+                qs = qs.filter(experiment_type=data['experiment_type'])
+            if data.get('apparatus_kind'):
+                qs = qs.filter(apparatus__kind=data['apparatus_kind'])
+            if data.get('min_temperature') is not None:
+                qs = qs.filter(datapoints__temperature__gte=data['min_temperature'])
+            if data.get('max_temperature') is not None:
+                qs = qs.filter(datapoints__temperature__lte=data['max_temperature'])
+
+            fuel_keyword = data.get('fuel_species')
+            if fuel_keyword:
+                dataset_ids = self._dataset_ids_for_fuel_keyword(fuel_keyword)
+                qs = qs.filter(id__in=dataset_ids)
+
+        return qs.distinct()
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs['dataset_queryset'] = self._get_filtered_datasets()
+        return kwargs
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["models"] = KineticModel.objects.all()
+        context["datasets"] = (
+            ExperimentDataset.objects
+            .select_related('common_properties')
+            .prefetch_related('datapoints')
+            .order_by('chemked_file_path')
+        )
+        return context
+
+    def form_valid(self, form):
+        model = form.cleaned_data['kinetic_model']
+        datasets = form.cleaned_data['datasets']
+        skip_validation = form.cleaned_data['skip_validation']
+        auto_execute = form.cleaned_data.get('auto_execute', True)  # Default to auto-execute
+
+        created_runs = []
+        for dataset in datasets:
+            run = SimulationRun.objects.create(
+                kinetic_model=model,
+                dataset=dataset,
+                status=SimulationStatus.PENDING,
+                triggered_by=TriggerType.MANUAL,
+                triggered_by_user=self.request.user if self.request.user.is_authenticated else None,
+                skip_validation=skip_validation,
+                model_version_hash=SimulationRun.compute_model_hash(model),
+            )
+            # Persist per-run results directory inside app folder
+            run.results_dir = _get_simulation_results_dir(run.pk)
+            run.save(update_fields=['results_dir'])
+            created_runs.append(run)
+            
+            # Auto-execute the simulation in background
+            if auto_execute:
+                execute_simulation_async(run.pk)
+
+        if auto_execute:
+            messages.success(
+                self.request,
+                f"Created {len(created_runs)} simulation run(s). Execution started automatically."
+            )
+        else:
+            messages.success(
+                self.request,
+                f"Created {len(created_runs)} simulation run(s). Click 'Execute Now' to start."
+            )
+
+        # If only one run, redirect to its detail page
+        if len(created_runs) == 1:
+            return redirect('analysis:run-detail', pk=created_runs[0].pk)
+        
+        # Multiple runs - redirect to runs list
+        return redirect('analysis:run-list')
+
+
+def execute_simulation_async(run_id):
+    """
+    Execute a simulation in a background thread.
+    This allows the request to return immediately while simulation runs.
+    """
+    import threading
+    
+    def _run():
+        import django
+        django.setup()
+        
+        from analysis.models import SimulationRun, SimulationResult, DatapointResult, SimulationStatus, ModelDatasetCoverage
+        from analysis.services import run_pyteck_simulation, parse_pyteck_results
+        import tempfile
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        
+        try:
+            run = SimulationRun.objects.get(pk=run_id)
+            
+            if run.status not in [SimulationStatus.PENDING, SimulationStatus.FAILED]:
+                return
+            
+            _append_simulation_log(run, "Starting simulation")
+            run.mark_running()
+            
+            # Ensure results directory exists and is persisted
+            results_dir = run.results_dir
+            if not results_dir or not os.path.isdir(results_dir):
+                results_dir = _get_simulation_results_dir(run.pk)
+                run.results_dir = results_dir
+                run.save(update_fields=['results_dir'])
+            
+            success, message, results = run_pyteck_simulation(
+                model=run.kinetic_model,
+                dataset=run.dataset,
+                results_dir=results_dir,
+                skip_validation=run.skip_validation,
+            )
+            
+            if success and results:
+                run.mark_completed()
+                _append_simulation_log(run, "Simulation completed successfully")
+                
+                parsed = parse_pyteck_results(results)
+                
+                result = SimulationResult.objects.create(
+                    simulation_run=run,
+                    average_error_function=parsed['average_error_function'],
+                    average_deviation_function=parsed['average_deviation_function'],
+                    results_json=results,
+                    num_datapoints=sum(len(ds['datapoints']) for ds in parsed['datasets']),
+                    num_successful=sum(len(ds['datapoints']) for ds in parsed['datasets']),
+                )
+                
+                for ds in parsed['datasets']:
+                    for dp in ds['datapoints']:
+                        temp = _parse_value_with_unit(dp.get('temperature'))
+                        pressure = _parse_value_with_unit(dp.get('pressure'))
+                        exp_delay = _parse_value_with_unit(dp.get('experimental_ignition_delay'))
+                        sim_delay = _parse_value_with_unit(dp.get('simulated_ignition_delay'))
+                        
+                        if temp and pressure and exp_delay:
+                            DatapointResult.objects.create(
+                                simulation_result=result,
+                                temperature=temp,
+                                pressure=pressure,
+                                composition=dp.get('composition', []),
+                                experimental_ignition_delay=exp_delay,
+                                simulated_ignition_delay=sim_delay,
+                            )
+                
+                # Update coverage matrix
+                coverage, _ = ModelDatasetCoverage.objects.get_or_create(
+                    kinetic_model=run.kinetic_model,
+                    dataset=run.dataset,
+                )
+                coverage.update_from_run(run)
+            else:
+                run.mark_failed(message)
+                _append_simulation_log(run, f"Simulation failed: {message}")
+                
+        except Exception as e:
+            import traceback
+            logger.exception(f"Background simulation {run_id} failed")
+            try:
+                run = SimulationRun.objects.get(pk=run_id)
+                run.mark_failed(str(e), traceback.format_exc())
+                _append_simulation_log(run, f"Simulation crashed: {e}")
+            except:
+                pass
+    
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+
+class SimulationRunView(View):
+    """
+    Execute a simulation run (handles both AJAX and form POST).
+    """
+    def post(self, request, pk):
+        run = get_object_or_404(SimulationRun, pk=pk)
+        
+        if run.status not in [SimulationStatus.PENDING, SimulationStatus.FAILED]:
+            if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return JsonResponse({
+                    'success': False,
+                    'error': f'Cannot run simulation with status: {run.status}'
+                })
+            messages.error(request, f'Cannot run simulation with status: {run.status}')
+            return redirect('analysis:run-detail', pk=pk)
+
+        # Start simulation in background thread
+        execute_simulation_async(run.pk)
+        
+        # Check if AJAX request
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return JsonResponse({
+                'success': True,
+                'message': 'Simulation started',
+                'run_id': run.pk,
+            })
+        
+        # Regular form POST - redirect back to detail page
+        messages.success(request, 'Simulation started! The page will auto-refresh when complete.')
+        return redirect('analysis:run-detail', pk=pk)
+
+
+class SimulationRerunView(View):
+    """
+    Create a new run from an existing run's model/dataset and start it.
+    """
+    def post(self, request, pk):
+        run = get_object_or_404(SimulationRun, pk=pk)
+
+        new_run = SimulationRun.objects.create(
+            kinetic_model=run.kinetic_model,
+            dataset=run.dataset,
+            status=SimulationStatus.PENDING,
+            triggered_by=TriggerType.MANUAL,
+            triggered_by_user=request.user if request.user.is_authenticated else None,
+            skip_validation=run.skip_validation,
+            model_version_hash=SimulationRun.compute_model_hash(run.kinetic_model),
+        )
+
+        execute_simulation_async(new_run.pk)
+
+        messages.success(request, 'Re-run started. The page will auto-refresh when complete.')
+        return redirect('analysis:run-detail', pk=new_run.pk)
+
+
+def _parse_value_with_unit(value_str):
+    """
+    Parse a value string into just the number.
+    
+    Handles formats like:
+    - '1500.0 kelvin'
+    - '5390000.0 pascal'
+    - '0.000254 second'
+    - '(909 +/- 16) kelvin'  (with uncertainty)
+    """
+    if value_str is None:
+        return None
+    if isinstance(value_str, (int, float)):
+        return float(value_str)
+    
+    value_str = str(value_str).strip()
+    
+    # Handle uncertainty format: "(909 +/- 16) kelvin" -> extract 909
+    if value_str.startswith('('):
+        import re
+        # Match "(number +/- uncertainty) unit" or "(number) unit"
+        match = re.match(r'\(([0-9.eE+-]+)', value_str)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                pass
+    
+    # Standard format: "1500.0 kelvin" -> extract 1500.0
+    try:
+        parts = value_str.split()
+        return float(parts[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _build_simulation_log(run: SimulationRun) -> str:
+    """Build a plain-text debug log for a simulation run."""
+    model = run.kinetic_model
+    dataset = run.dataset
+
+    def _file_name(field):
+        if not field:
+            return "—"
+        try:
+            return field.name or "—"
+        except Exception:
+            return str(field)
+
+    lines = [
+        f"Simulation Run #{run.pk}",
+        f"Status: {run.status}",
+        f"Created: {run.created_at}",
+        f"Started: {run.started_at}",
+        f"Completed: {run.completed_at}",
+        "",
+        "Model",
+        f"  ID: {model.pk}",
+        f"  Name: {model.model_name}",
+        f"  Reactions file: {_file_name(getattr(model, 'chemkin_reactions_file', None))}",
+        f"  Thermo file: {_file_name(getattr(model, 'chemkin_thermo_file', None))}",
+        f"  Transport file: {_file_name(getattr(model, 'chemkin_transport_file', None))}",
+        "",
+        "Dataset",
+        f"  ID: {dataset.pk}",
+        f"  Short name: {dataset.short_name}",
+        f"  ChemKED path: {getattr(dataset, 'chemked_file_path', '—')}",
+        f"  Experiment type: {getattr(dataset, 'experiment_type', '—')}",
+        "",
+    f"Skip validation: {run.skip_validation}",
+    f"Results dir: {run.results_dir or '—'}",
+    f"Shared log file: {os.path.join(_get_simulation_log_dir(), 'simulation_runs.log')}",
+        "",
+        "Error message:",
+        run.error_message or "—",
+        "",
+        "Traceback:",
+        run.traceback or "—",
+    ]
+
+    return "\n".join(lines)
+
+
+class SimulationLogView(View):
+    """
+    Download the simulation debug log as plain text.
+    """
+    def get(self, request, pk):
+        run = get_object_or_404(SimulationRun, pk=pk)
+        log_text = _build_simulation_log(run)
+        response = HttpResponse(log_text, content_type="text/plain; charset=utf-8")
+        response["Content-Disposition"] = f"attachment; filename=simulation_run_{run.pk}_log.txt"
+        return response
+
+
+class SimulationDetailView(DetailView):
+    """
+    View details of a simulation run and its results.
+    """
+    model = SimulationRun
+    template_name = "analysis/simulation_detail.html"
+    context_object_name = "run"
+
+    def get_queryset(self):
+        return SimulationRun.objects.select_related(
+            'kinetic_model',
+            'dataset',
+            'dataset__apparatus',
+            'result',
+            'triggered_by_user',
+        )
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        run = self.object
+        context["BASE_DIR"] = getattr(settings, "BASE_DIR", "")
+
+        if hasattr(run, 'result') and run.result:
+            # Get datapoint results for plotting
+            datapoints = run.result.datapoint_results.all().order_by('temperature')
+            context['datapoints'] = datapoints
+
+            # Prepare chart data
+            chart_data = {
+                'experimental': [],
+                'simulated': [],
+                'temperatures': [],
+                'pressures': [],
+            }
+            for dp in datapoints:
+                if dp.experimental_ignition_delay and dp.simulated_ignition_delay:
+                    chart_data['experimental'].append(dp.experimental_ignition_delay)
+                    chart_data['simulated'].append(dp.simulated_ignition_delay)
+                    chart_data['temperatures'].append(dp.temperature)
+                    chart_data['pressures'].append(dp.pressure)
+            
+            context['chart_data'] = json.dumps(chart_data)
+
+        # Get other runs for same model-dataset pair
+        context['related_runs'] = (
+            SimulationRun.objects
+            .filter(kinetic_model=run.kinetic_model, dataset=run.dataset)
+            .exclude(pk=run.pk)
+            .order_by('-created_at')[:5]
+        )
+
+        context['species_mappings'] = SpeciesMapping.objects.filter(
+            kinetic_model=run.kinetic_model,
+            dataset=run.dataset,
+        )
+
+        return context
+
+
+class SimulationListView(ListView):
+    """
+    List all simulation runs with filtering.
+    """
+    model = SimulationRun
+    template_name = "analysis/simulation_list.html"
+    context_object_name = "runs"
+    paginate_by = 25
+
+    def get_queryset(self):
+        qs = SimulationRun.objects.select_related(
+            'kinetic_model', 'dataset', 'result'
+        ).order_by('-created_at')
+
+        # Apply filters
+        status = self.request.GET.get('status')
+        if status:
+            qs = qs.filter(status=status)
+
+        model_id = self.request.GET.get('model')
+        if model_id:
+            qs = qs.filter(kinetic_model_id=model_id)
+
+        return qs
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['status_choices'] = SimulationStatus.choices
+        context['models'] = KineticModel.objects.all()
+        return context
+
+
+class CoverageMatrixView(TemplateView):
+    """
+    Display model-dataset coverage as an interactive matrix/heatmap.
+    """
+    template_name = "analysis/coverage_matrix.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+
+        # Get all models and datasets for stats
+        all_models = KineticModel.objects.all()
+        all_datasets = ExperimentDataset.objects.filter(experiment_type='ignition delay')
+        
+        context['total_models'] = all_models.count()
+        context['total_datasets'] = all_datasets.count()
+
+        # Get coverage records
+        coverage_qs = ModelDatasetCoverage.objects.select_related('kinetic_model', 'dataset')
+        
+        # Get models and datasets that have coverage data (for the heatmap)
+        models_with_coverage = list(
+            KineticModel.objects
+            .filter(dataset_coverage__isnull=False)
+            .distinct()
+            .order_by('model_name')
+        )
+        datasets_with_coverage = list(
+            ExperimentDataset.objects
+            .filter(model_coverage__isnull=False, experiment_type='ignition delay')
+            .distinct()
+            .order_by('chemked_file_path')
+        )
+        
+        # If no coverage yet, show top models and datasets as placeholders
+        if not models_with_coverage:
+            models_with_coverage = list(all_models.order_by('model_name')[:20])
+        if not datasets_with_coverage:
+            datasets_with_coverage = list(all_datasets.order_by('chemked_file_path')[:20])
+        
+        context['models'] = models_with_coverage
+        context['datasets'] = datasets_with_coverage
+
+        # Build coverage matrix data
+        coverage_data = {}
+        for cov in coverage_qs:
+            key = (cov.kinetic_model_id, cov.dataset_id)
+            coverage_data[key] = {
+                'has_run': cov.has_successful_run,
+                'error_function': cov.latest_error_function,
+                'is_outdated': cov.is_outdated,
+            }
+
+        # Build matrix for template
+        matrix = []
+        for model in models_with_coverage:
+            row = {'model': model, 'cells': []}
+            for dataset in datasets_with_coverage:
+                key = (model.id, dataset.id)
+                cell = coverage_data.get(key, {
+                    'has_run': False,
+                    'error_function': None,
+                    'is_outdated': False,
+                })
+                cell['model_id'] = model.id
+                cell['dataset_id'] = dataset.id
+                row['cells'].append(cell)
+            matrix.append(row)
+
+        context['matrix'] = matrix
+
+        evaluated_pairs = ModelDatasetCoverage.objects.filter(
+            has_successful_run=True
+        ).count()
+        context['evaluated_pairs'] = evaluated_pairs
+        total_pairs = context['total_models'] * context['total_datasets']
+        context['coverage_percent'] = round((evaluated_pairs / total_pairs) * 100, 1) if total_pairs else 0
+
+        context['coverage_data'] = (
+            coverage_qs
+            .filter(has_successful_run=True)
+            .order_by('-last_evaluated_at')
+        )
+
+        # Prepare heatmap data for Plotly (only for models/datasets with coverage)
+        heatmap_data = {
+            'z': [],  # Error function values
+            'x': [ds.short_name for ds in datasets_with_coverage],
+            'y': [m.model_name for m in models_with_coverage],
+            'text': [],  # Hover text
+        }
+
+        for model in models_with_coverage:
+            row_z = []
+            row_text = []
+            for dataset in datasets_with_coverage:
+                key = (model.id, dataset.id)
+                cov = coverage_data.get(key)
+                if cov and cov['has_run'] and cov['error_function'] is not None:
+                    row_z.append(cov['error_function'])
+                    row_text.append(f"{model.model_name}<br>{dataset.short_name}<br>Error: {cov['error_function']:.2f}")
+                else:
+                    row_z.append(None)
+                    row_text.append(f"{model.model_name}<br>{dataset.short_name}<br>Not evaluated")
+            heatmap_data['z'].append(row_z)
+            heatmap_data['text'].append(row_text)
+
+        context['heatmap_json'] = json.dumps({
+            'data': [
+                {
+                    'type': 'heatmap',
+                    'z': heatmap_data['z'],
+                    'x': heatmap_data['x'],
+                    'y': heatmap_data['y'],
+                    'text': heatmap_data['text'],
+                    'hoverinfo': 'text',
+                    'colorscale': 'YlOrRd',
+                }
+            ],
+            'layout': {
+                'margin': {'l': 120, 'r': 20, 't': 20, 'b': 120},
+                'xaxis': {'tickangle': -45, 'automargin': True},
+                'yaxis': {'automargin': True},
+                'height': 600,
+            }
+        })
+
+        return context
+
+
+class CompareModelsView(TemplateView):
+    """
+    Compare multiple models against the same dataset(s).
+    """
+    template_name = "analysis/compare_models.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+
+        model_ids = self.request.GET.getlist('models')
+        dataset_id = self.request.GET.get('dataset')
+
+        context['all_models'] = KineticModel.objects.all()
+        context['all_datasets'] = ExperimentDataset.objects.filter(
+            experiment_type='ignition delay'
+        )
+        
+        # Pass selected IDs to template for form state
+        context['selected_model_ids'] = model_ids
+        context['selected_dataset_id'] = dataset_id
+
+        if model_ids and dataset_id:
+            models = KineticModel.objects.filter(id__in=model_ids)
+            dataset = get_object_or_404(ExperimentDataset, pk=dataset_id)
+
+            context['selected_models'] = models
+            context['selected_dataset'] = dataset
+
+            # Get results for comparison
+            comparison_data = []
+            for model in models:
+                run = (
+                    SimulationRun.objects
+                    .filter(
+                        kinetic_model=model,
+                        dataset=dataset,
+                        status=SimulationStatus.COMPLETED
+                    )
+                    .select_related('result')
+                    .order_by('-completed_at')
+                    .first()
+                )
+                if run and hasattr(run, 'result'):
+                    comparison_data.append({
+                        'model': model,
+                        'run': run,
+                        'result': run.result,
+                        'datapoints': list(run.result.datapoint_results.all()),
+                    })
+
+            context['comparison_data'] = comparison_data
+
+            # Prepare chart data for comparison plot
+            chart_data = {'models': []}
+            for item in comparison_data:
+                model_data = {
+                    'name': item['model'].model_name,
+                    'experimental': [],
+                    'simulated': [],
+                    'temperatures': [],
+                }
+                for dp in item['datapoints']:
+                    if dp.experimental_ignition_delay and dp.simulated_ignition_delay:
+                        model_data['experimental'].append(dp.experimental_ignition_delay)
+                        model_data['simulated'].append(dp.simulated_ignition_delay)
+                        model_data['temperatures'].append(dp.temperature)
+                chart_data['models'].append(model_data)
+
+            context['chart_data'] = json.dumps(chart_data)
+
+        return context
+
+
+
+# API Views for AJAX
+class DatasetsByFuelView(View):
+    """
+    API endpoint to get datasets filtered by fuel species.
+    Optimized for performance with annotated counts.
+    """
+    def get(self, request):
+        from django.db.models import Count
+        
+        keyword = (request.GET.get('q') or request.GET.get('keyword') or '').strip()
+        smiles = (request.GET.get('smiles') or '').strip()
+        inchi = (request.GET.get('inchi') or '').strip()
+        experiment_type = (request.GET.get('experiment_type') or '').strip()
+        apparatus_kind = (request.GET.get('apparatus_kind') or '').strip()
+        target = (request.GET.get('target') or '').strip()
+        limit = int(request.GET.get('limit') or 200)
+
+        # Start with annotated count to avoid N+1 queries
+        dataset_qs = (
+            ExperimentDataset.objects
+            .select_related('common_properties', 'apparatus')
+            .annotate(datapoints_count=Count('datapoints'))
+            .order_by('chemked_file_path')
+        )
+
+        if experiment_type:
+            dataset_qs = dataset_qs.filter(experiment_type__iexact=experiment_type)
+        if apparatus_kind:
+            dataset_qs = dataset_qs.filter(apparatus__kind__iexact=apparatus_kind)
+        if target:
+            dataset_qs = dataset_qs.filter(common_properties__ignition_target__iexact=target)
+
+        if keyword or smiles or inchi:
+            species_query = Q()
+            if keyword:
+                species_query |= Q(species_name__icontains=keyword)
+                species_query |= Q(chem_name__icontains=keyword)
+                species_query |= Q(cas__icontains=keyword)
+                species_query |= Q(inchi__icontains=keyword)
+                species_query |= Q(smiles__icontains=keyword)
+            if smiles:
+                species_query |= Q(smiles=smiles)
+            if inchi:
+                species_query |= Q(inchi__icontains=inchi)
+
+            dataset_ids = list(
+                CompositionSpecies.objects
+                .filter(species_query)
+                .values_list('composition__datapoints__dataset_id', flat=True)
+                .distinct()[:500]  # Limit subquery results
+            )
+
+            # Filter by species or file path
+            dataset_qs = dataset_qs.filter(
+                Q(id__in=dataset_ids)
+                | Q(chemked_file_path__icontains=keyword)
+            )
+
+        # Fetch limited results
+        datasets = []
+        for dataset in dataset_qs[:limit]:
+            # Get apparatus kind safely
+            apparatus_kind_val = ''
+            try:
+                if dataset.apparatus:
+                    apparatus_kind_val = dataset.apparatus.kind or ''
+            except Exception:
+                pass
+            
+            # Get fuel species safely
+            fuel_species = []
+            try:
+                if hasattr(dataset, 'fuel_species'):
+                    fuel_species = dataset.fuel_species or []
+            except Exception:
+                pass
+            
+            # Get short_name safely (it's a property)
+            short_name = ''
+            try:
+                if hasattr(dataset, 'short_name'):
+                    short_name = dataset.short_name or ''
+            except Exception:
+                pass
+            if not short_name and dataset.chemked_file_path:
+                import os
+                short_name = os.path.basename(dataset.chemked_file_path).replace('.yaml', '')
+            
+            # Get ignition_target safely
+            ignition_target = ''
+            try:
+                if dataset.common_properties:
+                    ignition_target = dataset.common_properties.ignition_target or ''
+            except Exception:
+                pass
+            
+            datasets.append({
+                'id': dataset.id,
+                'short_name': short_name,
+                'experiment_type': dataset.experiment_type or '',
+                'apparatus_kind': apparatus_kind_val,
+                'fuel_species': fuel_species,
+                'datapoints_count': dataset.datapoints_count,  # Use annotated value
+                'ignition_target': ignition_target,
+                'chemked_file_path': dataset.chemked_file_path or '',
+            })
+
+        return JsonResponse({'datasets': datasets})
+
+
+class ModelsByKeywordView(View):
+    """
+    API endpoint to get kinetic models filtered by keyword.
+    Fast query - no expensive counts.
+    """
+    def get(self, request):
+        keyword = (request.GET.get('q') or '').strip()
+        limit = int(request.GET.get('limit') or 200)
+
+        qs = KineticModel.objects.all().order_by('model_name')
+        if keyword:
+            qs = qs.filter(model_name__icontains=keyword)
+
+        # Fast query - just basic fields, no joins
+        models = list(
+            qs.values('id', 'model_name', 'prime_id')[:limit]
+        )
+
+        return JsonResponse({'models': models})
+
+
+class ModelCountsView(View):
+    """
+    API endpoint to get species/reaction counts for a set of model IDs.
+    Keeps the main models API fast by computing counts on demand.
+    """
+    def get(self, request):
+        from django.db.models import Count
+
+        ids_param = (request.GET.get('ids') or '').strip()
+        if not ids_param:
+            return JsonResponse({'counts': {}})
+
+        try:
+            raw_ids = [int(value) for value in ids_param.split(',') if value.strip().isdigit()]
+        except ValueError:
+            raw_ids = []
+
+        if not raw_ids:
+            return JsonResponse({'counts': {}})
+
+        # Limit to a reasonable batch size
+        model_ids = raw_ids[:200]
+
+        counts_qs = (
+            KineticModel.objects
+            .filter(id__in=model_ids)
+            .annotate(
+                species_count=Count('species', distinct=True),
+                reaction_count=Count('kinetics', distinct=True)
+            )
+            .values('id', 'species_count', 'reaction_count')
+        )
+
+        counts = {
+            str(row['id']): {
+                'species_count': row['species_count'],
+                'reaction_count': row['reaction_count'],
+            }
+            for row in counts_qs
+        }
+
+        return JsonResponse({'counts': counts})
+
+
+class SimulationStatusView(View):
+    """
+    API endpoint to get the current status of a simulation run.
+    Used for auto-refresh polling on the detail page.
+    """
+    def get(self, request, pk):
+        try:
+            run = SimulationRun.objects.get(pk=pk)
+        except SimulationRun.DoesNotExist:
+            return JsonResponse({'error': 'Run not found'}, status=404)
+
+        data = {
+            'id': run.id,
+            'status': run.status,
+            'created_at': run.created_at.isoformat() if run.created_at else None,
+            'completed_at': run.completed_at.isoformat() if run.completed_at else None,
+            'error_message': run.error_message or '',
+        }
+
+        # Include result summary if completed
+        if run.status == 'completed' and hasattr(run, 'result') and run.result:
+            data['result'] = {
+                'average_error_function': float(run.result.average_error_function) if run.result.average_error_function else None,
+                'std_error_function': float(run.result.std_error_function) if run.result.std_error_function else None,
+                'datapoints_count': run.result.datapoint_results.count() if hasattr(run.result, 'datapoint_results') else 0,
+            }
+
+        return JsonResponse(data)
