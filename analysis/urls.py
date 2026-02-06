@@ -16,7 +16,9 @@ urlpatterns = [
     path("run/<int:pk>/", views.SimulationDetailView.as_view(), name="run-detail"),
     path("run/<int:pk>/execute/", views.SimulationRunView.as_view(), name="run-execute"),
     path("run/<int:pk>/rerun/", views.SimulationRerunView.as_view(), name="run-rerun"),
+    path("run/<int:pk>/cancel/", views.SimulationCancelView.as_view(), name="run-cancel"),
     path("runs/", views.SimulationListView.as_view(), name="run-list"),
+    path("runs/cleanup-stale/", views.CleanupStaleRunsView.as_view(), name="cleanup-stale"),
 
     # Coverage & comparison
     path("coverage/", views.CoverageMatrixView.as_view(), name="coverage-matrix"),

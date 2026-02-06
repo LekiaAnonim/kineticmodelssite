@@ -89,22 +89,26 @@
                 <h6 class="mb-0"><i class="bi bi-palette me-2"></i>Legend</h6>
             </div>
             <div class="section-body">
-                <div class="d-flex align-items-center gap-4">
+                <div class="d-flex align-items-center gap-3 flex-wrap">
                     <div class="d-flex align-items-center gap-2">
                         <div style="width: 20px; height: 20px; background-color: #198754; border-radius: 3px;"></div>
-                        <small>Excellent (&lt; 0.5)</small>
+                        <small>Excellent (&lt; 1)</small>
                     </div>
                     <div class="d-flex align-items-center gap-2">
                         <div style="width: 20px; height: 20px; background-color: #ffc107; border-radius: 3px;"></div>
-                        <small>Good (0.5 - 1.0)</small>
+                        <small>Good (1 - 10)</small>
                     </div>
                     <div class="d-flex align-items-center gap-2">
                         <div style="width: 20px; height: 20px; background-color: #fd7e14; border-radius: 3px;"></div>
-                        <small>Fair (1.0 - 2.0)</small>
+                        <small>Fair (10 - 100)</small>
                     </div>
                     <div class="d-flex align-items-center gap-2">
                         <div style="width: 20px; height: 20px; background-color: #dc3545; border-radius: 3px;"></div>
-                        <small>Poor (&gt; 2.0)</small>
+                        <small>Poor (100 - 1k)</small>
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <div style="width: 20px; height: 20px; background-color: #721c24; border-radius: 3px;"></div>
+                        <small>Very Poor (&gt; 1k)</small>
                     </div>
                     <div class="d-flex align-items-center gap-2">
                         <div style="width: 20px; height: 20px; background-color: #e9ecef; border-radius: 3px; border: 1px solid #dee2e6;"></div>
@@ -122,9 +126,9 @@
             </div>
             <div class="section-body">
                 <p class="small text-muted mb-0">
-                    The error function quantifies the agreement between simulated and experimental values.
-                    Lower values indicate better model performance. Values below 1.0 generally indicate
-                    good agreement within experimental uncertainty.
+                    The error function quantifies the agreement between simulated and experimental ignition delays.
+                    Lower values indicate better model performance. The heatmap uses a <strong>logarithmic scale</strong>
+                    to visualize the wide range of error values. Hover over cells to see exact values.
                 </p>
             </div>
         </div>
@@ -162,8 +166,8 @@
                         </td>
                         <td class="text-end">
                             {% if cov.latest_error_function %}
-                                <span class="{% if cov.latest_error_function < 1 %}text-success{% elif cov.latest_error_function < 2 %}text-warning{% else %}text-danger{% endif %}">
-                                    {{ cov.latest_error_function|floatformat:3 }}
+                                <span class="{% if cov.latest_error_function < 1 %}text-success{% elif cov.latest_error_function < 10 %}text-warning{% elif cov.latest_error_function < 100 %}text-warning{% elif cov.latest_error_function < 1000 %}text-danger{% else %}text-danger fw-bold{% endif %}">
+                                    {{ cov.latest_error_function|floatformat:1 }}
                                 </span>
                             {% else %}
                                 <span class="text-muted">—</span>

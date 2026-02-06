@@ -167,6 +167,66 @@ class SimulationRun(models.Model):
         self.traceback = str(traceback)[:10000]
         self.save(update_fields=['status', 'completed_at', 'error_message', 'traceback'])
 
+    def mark_cancelled(self, reason='Cancelled by user'):
+        """Mark simulation as cancelled."""
+        self.status = SimulationStatus.CANCELLED
+        self.completed_at = timezone.now()
+        self.error_message = reason
+        self.save(update_fields=['status', 'completed_at', 'error_message'])
+
+    @property
+    def is_stale(self):
+        """
+        Check if a running simulation appears to be stale/stuck.
+        A simulation is considered stale if:
+        - Status is 'running' AND
+        - It started more than 30 minutes ago without completing
+        """
+        if self.status != SimulationStatus.RUNNING:
+            return False
+        if not self.started_at:
+            # Running but never started - definitely stale
+            return True
+        from datetime import timedelta
+        stale_threshold = timezone.now() - timedelta(minutes=30)
+        return self.started_at < stale_threshold
+
+    @classmethod
+    def cleanup_stale_runs(cls, dry_run=False):
+        """
+        Find and mark stale running simulations as failed.
+        
+        Args:
+            dry_run: If True, only return count without modifying
+            
+        Returns:
+            Number of stale runs found/cleaned
+        """
+        from datetime import timedelta
+        stale_threshold = timezone.now() - timedelta(minutes=30)
+        
+        stale_runs = cls.objects.filter(
+            status=SimulationStatus.RUNNING,
+            started_at__lt=stale_threshold
+        )
+        
+        # Also include runs that are "running" but never started
+        never_started = cls.objects.filter(
+            status=SimulationStatus.RUNNING,
+            started_at__isnull=True,
+            created_at__lt=stale_threshold
+        )
+        
+        stale_count = stale_runs.count() + never_started.count()
+        
+        if not dry_run:
+            for run in stale_runs:
+                run.mark_failed('Simulation timed out or was interrupted (stale)')
+            for run in never_started:
+                run.mark_failed('Simulation never started (stale)')
+        
+        return stale_count
+
 
 class SimulationResult(models.Model):
     """

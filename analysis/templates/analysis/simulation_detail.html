@@ -39,7 +39,16 @@
                 </button>
             </form>
             {% endif %}
-            {% if run.status == 'completed' or run.status == 'failed' %}
+            {% if run.status == 'pending' or run.status == 'running' %}
+            <form method="post" action="{% url 'analysis:run-cancel' run.id %}" class="d-inline" 
+                  onsubmit="return confirm('Are you sure you want to cancel this simulation?');">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-outline-danger btn-sm">
+                    <i class="bi bi-x-circle me-1"></i>Cancel
+                </button>
+            </form>
+            {% endif %}
+            {% if run.status == 'completed' or run.status == 'failed' or run.status == 'cancelled' %}
             <form method="post" action="{% url 'analysis:run-rerun' run.id %}" class="d-inline">
                 {% csrf_token %}
                 <button type="submit" class="btn btn-outline-primary btn-sm">
@@ -142,7 +151,7 @@
                     </div>
                     <div class="col-md-4">
                         <div class="text-muted small">Experiment Type</div>
-                        <span class="badge bg-secondary-subtle text-secondary">{{ run.experiment_type }}</span>
+                        <span class="badge bg-secondary-subtle text-secondary">{{ run.dataset.experiment_type }}</span>
                     </div>
                     <div class="col-md-4">
                         <div class="text-muted small">Status</div>
@@ -340,7 +349,7 @@
                         </tr>
                         <tr>
                             <td class="text-muted">Experiment Type</td>
-                            <td>{{ run.experiment_type }}</td>
+                            <td>{{ run.dataset.experiment_type }}</td>
                         </tr>
                         <tr>
                             <td class="text-muted">Status</td>

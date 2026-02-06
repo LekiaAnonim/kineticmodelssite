@@ -576,6 +576,13 @@ def get_models(path, ignore_list=[]):
     Walk the given `path` looking for libraries and source files.
     Skips any paths that end with something in the skip_list
     (eg. skip_list=['PCI2011/193-Mehl'])
+    
+    Handles both:
+    - Direct models: folder/RMG-Py-thermo-library/ThermoLibrary.py
+    - Nested models: folder/subfolder/RMG-Py-thermo-library/ThermoLibrary.py
+    
+    For nested models, the model_name is "parent/subfolder" (e.g., "CombFlame2013/17-Malewicki")
+    
     Returns tuples of the following form:
         model_name, thermo_library, kinetics_library, source_file
     """
@@ -591,22 +598,60 @@ def get_models(path, ignore_list=[]):
         logger.error(f"Path does not exist: {path}")
         return
     
+    def check_model_dir(model_dir, model_name):
+        """Check if a directory contains RMG libraries and return model info if valid."""
+        thermo_path = model_dir / "RMG-Py-thermo-library" / "ThermoLibrary.py"
+        kinetics_path = model_dir / "RMG-Py-kinetics-library" / "reactions.py"
+        source_path = model_dir / "source.txt"
+        
+        # Check if this directory has the libraries
+        if thermo_path.exists() or kinetics_path.exists():
+            return (
+                model_name,
+                str(thermo_path) if thermo_path.exists() else None,
+                str(kinetics_path) if kinetics_path.exists() else None,
+                str(source_path) if source_path.exists() else None,
+            )
+        return None
+    
     # Walk through directories
     try:
-        for item in base_path.iterdir():
+        for item in sorted(base_path.iterdir()):
             if not item.is_dir():
                 continue
                 
             if item.name in ignore_list:
                 continue
             
-            rmg_model_name = item.name
-            thermo_path = item / "RMG-Py-thermo-library" / "ThermoLibrary.py"
-            kinetics_path = item / "RMG-Py-kinetics-library" / "reactions.py"
-            source_path = item / "source.txt"
+            top_level_name = item.name
             
-            # Only yield if at least one of the library files exists
-            if thermo_path.exists() or kinetics_path.exists():
-                yield rmg_model_name, str(thermo_path), str(kinetics_path), str(source_path)
+            # Check if this is in the ignore list (with path prefix)
+            if any(skip in top_level_name for skip in ignore_list):
+                continue
+            
+            # First, check if this directory itself is a model (has libraries directly)
+            result = check_model_dir(item, top_level_name)
+            if result:
+                yield result
+            else:
+                # No direct libraries - check subdirectories for nested models
+                for sub_dir in sorted(item.iterdir()):
+                    if not sub_dir.is_dir():
+                        continue
+                    if sub_dir.name.startswith('.') or sub_dir.name in ignore_list:
+                        continue
+                    
+                    # Create nested model name
+                    nested_name = f"{top_level_name}/{sub_dir.name}"
+                    
+                    # Check if nested name is in ignore list
+                    if any(skip in nested_name for skip in ignore_list):
+                        logger.info(f"Skipping {nested_name} (in ignore list)")
+                        continue
+                    
+                    result = check_model_dir(sub_dir, nested_name)
+                    if result:
+                        yield result
+                        
     except Exception as e:
         logger.error(f"Error walking directory {path}: {e}")

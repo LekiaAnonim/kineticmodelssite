@@ -400,6 +400,38 @@ class SimulationRerunView(View):
         return redirect('analysis:run-detail', pk=new_run.pk)
 
 
+class SimulationCancelView(View):
+    """
+    Cancel a running or pending simulation.
+    """
+    def post(self, request, pk):
+        run = get_object_or_404(SimulationRun, pk=pk)
+        
+        if run.status not in [SimulationStatus.PENDING, SimulationStatus.RUNNING, SimulationStatus.QUEUED]:
+            messages.error(request, f'Cannot cancel simulation with status: {run.status}')
+            return redirect('analysis:run-detail', pk=pk)
+        
+        run.mark_cancelled('Cancelled by user')
+        messages.success(request, 'Simulation cancelled.')
+        
+        return redirect('analysis:run-detail', pk=pk)
+
+
+class CleanupStaleRunsView(View):
+    """
+    Clean up stale/stuck running simulations (admin action).
+    """
+    def post(self, request):
+        count = SimulationRun.cleanup_stale_runs(dry_run=False)
+        
+        if count > 0:
+            messages.success(request, f'Cleaned up {count} stale simulation(s).')
+        else:
+            messages.info(request, 'No stale simulations found.')
+        
+        return redirect('analysis:run-list')
+
+
 def _parse_value_with_unit(value_str):
     """
     Parse a value string into just the number.
@@ -583,6 +615,16 @@ class SimulationListView(ListView):
         context = super().get_context_data(**kwargs)
         context['status_choices'] = SimulationStatus.choices
         context['models'] = KineticModel.objects.all()
+        
+        # Count stale runs (running for more than 1 hour)
+        from datetime import timedelta
+        one_hour_ago = timezone.now() - timedelta(hours=1)
+        stale_count = SimulationRun.objects.filter(
+            status=SimulationStatus.RUNNING,
+            started_at__lt=one_hour_ago
+        ).count()
+        context['stale_count'] = stale_count
+        
         return context
 
 
@@ -670,8 +712,12 @@ class CoverageMatrixView(TemplateView):
         )
 
         # Prepare heatmap data for Plotly (only for models/datasets with coverage)
+        # Use log10 scale for better visualization of error function values
+        import math
+        
         heatmap_data = {
-            'z': [],  # Error function values
+            'z': [],  # Log-scaled error function values
+            'z_raw': [],  # Raw error function values for hover
             'x': [ds.short_name for ds in datasets_with_coverage],
             'y': [m.model_name for m in models_with_coverage],
             'text': [],  # Hover text
@@ -684,13 +730,27 @@ class CoverageMatrixView(TemplateView):
                 key = (model.id, dataset.id)
                 cov = coverage_data.get(key)
                 if cov and cov['has_run'] and cov['error_function'] is not None:
-                    row_z.append(cov['error_function'])
-                    row_text.append(f"{model.model_name}<br>{dataset.short_name}<br>Error: {cov['error_function']:.2f}")
+                    raw_val = cov['error_function']
+                    # Use log10 scale for color mapping, with floor of 0.01 to avoid log(0)
+                    log_val = math.log10(max(raw_val, 0.01))
+                    row_z.append(log_val)
+                    row_text.append(f"{model.model_name}<br>{dataset.short_name}<br>Error: {raw_val:.2f}<br>Log₁₀: {log_val:.2f}")
                 else:
                     row_z.append(None)
                     row_text.append(f"{model.model_name}<br>{dataset.short_name}<br>Not evaluated")
             heatmap_data['z'].append(row_z)
             heatmap_data['text'].append(row_text)
+
+        # Custom colorscale: green (excellent) -> yellow (good) -> orange (fair) -> red (poor)
+        # Mapped to log10 scale: < 0 (excellent), 0-1 (good), 1-2 (fair), > 2 (poor)
+        custom_colorscale = [
+            [0.0, '#198754'],   # Excellent: green (log10 < 0, i.e., error < 1)
+            [0.25, '#28a745'],  # Good-ish green
+            [0.4, '#ffc107'],   # Good: yellow (log10 ~ 1, i.e., error ~ 10)
+            [0.6, '#fd7e14'],   # Fair: orange (log10 ~ 2, i.e., error ~ 100)
+            [0.8, '#dc3545'],   # Poor: red (log10 ~ 3, i.e., error ~ 1000)
+            [1.0, '#721c24'],   # Very poor: dark red (log10 > 4, i.e., error > 10000)
+        ]
 
         context['heatmap_json'] = json.dumps({
             'data': [
@@ -701,11 +761,18 @@ class CoverageMatrixView(TemplateView):
                     'y': heatmap_data['y'],
                     'text': heatmap_data['text'],
                     'hoverinfo': 'text',
-                    'colorscale': 'YlOrRd',
+                    'colorscale': custom_colorscale,
+                    'zmin': -2,  # log10(0.01) = -2 (excellent)
+                    'zmax': 5,   # log10(100000) = 5 (very poor)
+                    'colorbar': {
+                        'title': 'Log₁₀(Error)',
+                        'tickvals': [-2, -1, 0, 1, 2, 3, 4, 5],
+                        'ticktext': ['0.01', '0.1', '1', '10', '100', '1k', '10k', '100k'],
+                    },
                 }
             ],
             'layout': {
-                'margin': {'l': 120, 'r': 20, 't': 20, 'b': 120},
+                'margin': {'l': 120, 'r': 80, 't': 20, 'b': 120},
                 'xaxis': {'tickangle': -45, 'automargin': True},
                 'yaxis': {'automargin': True},
                 'height': 600,
