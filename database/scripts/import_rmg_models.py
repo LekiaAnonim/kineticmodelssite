@@ -448,14 +448,29 @@ def import_thermo(thermo_path, kinetic_model, models):
             species = get_or_create_species(kinetic_model, species_name, [entry.item], models)
             thermo_data = entry.data
             poly1, poly2 = thermo_data.polynomials
+
+            # Sanitise temperature ranges: some RMG entries have 0 K break
+            # temperatures or poly2.Tmin < poly1.Tmax (overlapping ranges).
+            t_min_1 = poly1.Tmin.value_si
+            t_max_1 = poly1.Tmax.value_si
+            t_min_2 = poly2.Tmin.value_si
+            t_max_2 = poly2.Tmax.value_si
+
+            if t_max_1 == 0:
+                t_max_1 = 1000.0
+            if t_min_2 == 0:
+                t_min_2 = 1000.0
+            if t_min_2 < t_max_1:
+                t_min_2 = t_max_1
+
             thermo, _ = models.Thermo.objects.get_or_create(
                 species=species,
                 coeffs_poly1=poly1.coeffs.tolist(),
                 coeffs_poly2=poly2.coeffs.tolist(),
-                temp_min_1=poly1.Tmin.value_si,
-                temp_max_1=poly1.Tmax.value_si,
-                temp_min_2=poly2.Tmin.value_si,
-                temp_max_2=poly2.Tmax.value_si,
+                temp_min_1=t_min_1,
+                temp_max_1=t_max_1,
+                temp_min_2=t_min_2,
+                temp_max_2=t_max_2,
             )
             thermo_comment = models.ThermoComment.objects.create(
                 kinetic_model=kinetic_model, thermo=thermo

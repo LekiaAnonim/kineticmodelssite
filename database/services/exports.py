@@ -234,7 +234,17 @@ def _build_rmg_species_map(kinetic_model, nasa_poly_cls, nasa_cls, transport_cls
 
     def assign_label(db_species, index):
         name = None
-        if hasattr(db_species, "names"):
+        # Prefer the name linked to THIS specific model to avoid
+        # picking up labels from other models (e.g. N2C4H9OH vs sc4h9oh).
+        from database.models import SpeciesName
+        model_names = sorted(
+            sn.name for sn in SpeciesName.objects.filter(
+                species=db_species, kinetic_model=kinetic_model
+            ) if sn.name
+        )
+        if model_names:
+            name = model_names[0]
+        elif hasattr(db_species, "names"):
             names = sorted(n for n in db_species.names if n)
             if names:
                 name = names[0]
@@ -261,10 +271,30 @@ def _build_rmg_species_map(kinetic_model, nasa_poly_cls, nasa_cls, transport_cls
             species_list.append(sp)
 
     species_ids = [species.id for species in species_list]
-    thermo_map = {
-        thermo.species_id: thermo
-        for thermo in Thermo.objects.filter(species_id__in=species_ids).select_related("species")
-    }
+
+    # Use thermo entries linked to THIS model via ThermoComment so we get
+    # the correct polynomials rather than an arbitrary entry from another model.
+    from database.models import ThermoComment, TransportComment
+    model_thermo_ids = set(
+        ThermoComment.objects.filter(kinetic_model=kinetic_model)
+        .values_list("thermo_id", flat=True)
+    )
+    model_thermos = Thermo.objects.filter(
+        id__in=model_thermo_ids, species_id__in=species_ids
+    ).select_related("species")
+    thermo_map = {thermo.species_id: thermo for thermo in model_thermos}
+
+    # Fallback: for species in reactions but missing a model-specific thermo,
+    # use any available thermo entry.
+    missing_from_model = set(species_ids) - set(thermo_map.keys())
+    if missing_from_model:
+        fallback_thermos = Thermo.objects.filter(
+            species_id__in=missing_from_model
+        ).select_related("species")
+        for thermo in fallback_thermos:
+            if thermo.species_id not in thermo_map:
+                thermo_map[thermo.species_id] = thermo
+
     transport_map = {
         transport.species_id: transport
         for transport in Transport.objects.filter(species_id__in=species_ids).select_related("species")
@@ -358,6 +388,10 @@ def _build_rmg_reactions(kinetic_model, species_map, rmg_reaction_cls, strict=Fa
         if not strict:
             _normalize_kinetics_units(rmg_reaction.kinetics, len(reactants))
         reactions.append(rmg_reaction)
+
+    # Mark duplicate reactions so save_chemkin_file writes the DUPLICATE keyword
+    _mark_duplicate_reactions(reactions)
+
     if strict and missing_species:
         sample = ", ".join(str(species_id) for species_id in sorted(missing_species)[:5])
         suffix = "" if len(missing_species) <= 5 else "..."
@@ -373,6 +407,29 @@ def _build_rmg_reactions(kinetic_model, species_map, rmg_reaction_cls, strict=Fa
             f"{sample}{suffix}."
         )
     return reactions
+
+
+def _mark_duplicate_reactions(reactions):
+    """Detect duplicate reactions and set ``duplicate = True`` on each copy.
+
+    Two reactions are considered duplicates when they have the same set of
+    reactant and product species labels (order-independent).  This ensures
+    that ``save_chemkin_file`` writes the ``DUPLICATE`` keyword and that
+    the resulting YAML passes Cantera's duplicate-reaction validation.
+    """
+    from collections import Counter
+
+    def _signature(rxn):
+        r_labels = tuple(sorted(sp.label for sp in rxn.reactants))
+        p_labels = tuple(sorted(sp.label for sp in rxn.products))
+        return (r_labels, p_labels, rxn.reversible)
+
+    sig_counts = Counter(_signature(rxn) for rxn in reactions)
+    duplicate_sigs = {sig for sig, cnt in sig_counts.items() if cnt > 1}
+
+    for rxn in reactions:
+        if _signature(rxn) in duplicate_sigs:
+            rxn.duplicate = True
 
 
 def _normalize_kinetics_units(rmg_kinetics, reaction_order):
