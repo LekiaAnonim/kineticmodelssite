@@ -16,7 +16,7 @@
     <div class="d-flex align-items-center justify-content-between">
         <div>
             <h1 class="h4 mb-0"><i class="bi bi-grid-3x3 me-2 text-primary"></i>Model-Dataset Coverage Matrix</h1>
-            <p class="text-muted mb-0 mt-1">Heatmap of model performance across experimental datasets</p>
+            <p class="text-muted mb-0 mt-1">Model performance across experimental datasets, grouped by fuel</p>
         </div>
         <a href="{% url 'analysis:run-create' %}" class="btn btn-primary btn-sm">
             <i class="bi bi-play-circle me-1"></i>New Simulation
@@ -26,7 +26,7 @@
 
 <!-- Summary Stats -->
 <div class="row g-3 mb-4">
-    <div class="col-md-3">
+    <div class="col-6 col-md-3">
         <div class="data-section h-100">
             <div class="section-body text-center py-3">
                 <div class="h3 mb-0 text-primary">{{ total_models }}</div>
@@ -34,7 +34,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-6 col-md-3">
         <div class="data-section h-100">
             <div class="section-body text-center py-3">
                 <div class="h3 mb-0 text-danger">{{ total_datasets }}</div>
@@ -42,7 +42,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-6 col-md-3">
         <div class="data-section h-100">
             <div class="section-body text-center py-3">
                 <div class="h3 mb-0 text-success">{{ evaluated_pairs }}</div>
@@ -50,7 +50,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-6 col-md-3">
         <div class="data-section h-100">
             <div class="section-body text-center py-3">
                 <div class="h3 mb-0 text-warning">{{ coverage_percent|floatformat:1 }}%</div>
@@ -60,75 +60,184 @@
     </div>
 </div>
 
-<!-- Heatmap -->
+{% if evaluated_pairs > 0 %}
+
+<!-- SECTION 1: Model x Fuel Heatmap -->
 <div class="data-section mb-4">
     <div class="section-header">
-        <h6 class="mb-0"><i class="bi bi-grid me-2"></i>Coverage Heatmap</h6>
+        <h6 class="mb-0"><i class="bi bi-grid me-2"></i>Model x Fuel Overview</h6>
     </div>
     <div class="section-body">
-        {% if evaluated_pairs > 0 %}
-        <div id="coverage-heatmap" style="height: 600px;"></div>
-        {% else %}
-        <div class="text-center text-muted py-5">
-            <i class="bi bi-inbox d-block mb-2" style="font-size: 2rem;"></i>
-            <p class="mb-2">No coverage data available yet.</p>
-            <p class="small text-muted mb-3">Run simulations to populate the coverage matrix.</p>
-            <a href="{% url 'analysis:run-create' %}" class="btn btn-primary btn-sm">
-                <i class="bi bi-play-circle me-1"></i>Run Your First Simulation
-            </a>
-        </div>
-        {% endif %}
+        <p class="small text-muted mb-2">
+            Each cell shows the <strong>average error function</strong> across all datasets for that fuel.
+            Click a cell to jump to the per-dataset detail below. Grey = not yet tested.
+        </p>
+        <div id="overview-heatmap" style="min-height: 200px;"></div>
     </div>
 </div>
 
-<!-- Coverage Legend -->
-<div class="row g-3">
+<!-- SECTION 2: Model Ranking Table -->
+<div class="data-section mb-4">
+    <div class="section-header">
+        <h6 class="mb-0"><i class="bi bi-trophy me-2"></i>Model Rankings</h6>
+    </div>
+    <div class="section-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th style="width:40px">#</th>
+                        <th>Model</th>
+                        <th class="text-end">Avg Error</th>
+                        <th class="text-end">Best</th>
+                        <th class="text-center">Datasets</th>
+                        <th>Fuel Breakdown</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for ms in model_summaries %}
+                    <tr>
+                        <td class="text-muted fw-medium">{{ forloop.counter }}</td>
+                        <td>
+                            <span class="d-inline-block me-2" style="width:10px;height:10px;border-radius:2px;background:{{ ms.colour }};"></span>
+                            <span class="fw-medium">{{ ms.name }}</span>
+                        </td>
+                        <td class="text-end">
+                            {% if ms.avg_error != None %}
+                            <span class="fw-medium {% if ms.avg_error < 10 %}text-success{% elif ms.avg_error < 100 %}text-warning{% elif ms.avg_error < 1000 %}text-danger{% else %}text-danger{% endif %}">
+                                {{ ms.avg_error|floatformat:1 }}
+                            </span>
+                            {% else %}
+                            <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-end">
+                            {% if ms.best_error != None %}
+                            <span class="text-success">{{ ms.best_error|floatformat:2 }}</span>
+                            {% else %}-{% endif %}
+                        </td>
+                        <td class="text-center">
+                            <span class="badge bg-secondary-subtle text-secondary">{{ ms.total_datasets }}</span>
+                        </td>
+                        <td>
+                            <div class="d-flex gap-1 flex-wrap">
+                                {% for fb in ms.fuels %}
+                                <span class="badge {% if fb.avg < 10 %}bg-success-subtle text-success{% elif fb.avg < 100 %}bg-warning-subtle text-warning{% elif fb.avg < 1000 %}bg-danger-subtle text-danger{% else %}bg-danger text-white{% endif %}"
+                                      title="{{ fb.fuel }}: avg={{ fb.avg|floatformat:1 }}, best={{ fb.best|floatformat:2 }}, {{ fb.count }}/{{ fb.total }} datasets ({{ fb.pct }}%)">
+                                    {{ fb.fuel }} {{ fb.avg|floatformat:0 }}
+                                </span>
+                                {% endfor %}
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- SECTION 3: Per-Fuel Drill-Down (Tabbed) -->
+<div class="data-section mb-4" id="fuel-detail-section">
+    <div class="section-header">
+        <h6 class="mb-0"><i class="bi bi-bar-chart-steps me-2"></i>Per-Dataset Detail</h6>
+    </div>
+    <div class="section-body">
+        <p class="small text-muted mb-3">
+            Select a fuel to see error function values for every individual dataset.
+            Each bar is one model; hover for details.
+        </p>
+        <!-- Fuel tabs -->
+        <ul class="nav nav-pills nav-fill mb-3" id="fuelTabs" role="tablist">
+            {% for ft in fuel_tabs %}
+            <li class="nav-item" role="presentation">
+                <button class="nav-link {% if forloop.first %}active{% endif %} py-2 px-3"
+                        id="tab-{{ ft.key }}"
+                        data-bs-toggle="pill"
+                        data-bs-target="#panel-{{ ft.key }}"
+                        data-fuel="{{ ft.key }}"
+                        type="button" role="tab">
+                    {{ ft.label }}
+                    <span class="badge bg-secondary-subtle text-secondary ms-1">{{ ft.count }}</span>
+                </button>
+            </li>
+            {% endfor %}
+        </ul>
+        <!-- Tab content -->
+        <div class="tab-content" id="fuelTabContent">
+            {% for ft in fuel_tabs %}
+            <div class="tab-pane fade {% if forloop.first %}show active{% endif %}"
+                 id="panel-{{ ft.key }}" role="tabpanel">
+                <div style="overflow-x: auto;">
+                    <div id="chart-{{ ft.key }}" style="min-height: 360px;"></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+{% else %}
+<!-- No data state -->
+<div class="data-section mb-4">
+    <div class="section-body text-center py-5">
+        <i class="bi bi-inbox d-block mb-2" style="font-size: 2rem;"></i>
+        <p class="mb-2">No coverage data available yet.</p>
+        <p class="small text-muted mb-3">Run simulations to populate the coverage matrix.</p>
+        <a href="{% url 'analysis:run-create' %}" class="btn btn-primary btn-sm">
+            <i class="bi bi-play-circle me-1"></i>Run Your First Simulation
+        </a>
+    </div>
+</div>
+{% endif %}
+
+<!-- Legend & Info -->
+<div class="row g-3 mb-4">
     <div class="col-md-6">
-        <div class="data-section">
+        <div class="data-section h-100">
             <div class="section-header">
-                <h6 class="mb-0"><i class="bi bi-palette me-2"></i>Legend</h6>
+                <h6 class="mb-0"><i class="bi bi-palette me-2"></i>Error Scale</h6>
             </div>
             <div class="section-body">
                 <div class="d-flex align-items-center gap-3 flex-wrap">
                     <div class="d-flex align-items-center gap-2">
-                        <div style="width: 20px; height: 20px; background-color: #198754; border-radius: 3px;"></div>
-                        <small>Excellent (&lt; 1)</small>
+                        <div style="width:18px;height:18px;background:#198754;border-radius:3px;"></div>
+                        <small>Excellent (< 1)</small>
                     </div>
                     <div class="d-flex align-items-center gap-2">
-                        <div style="width: 20px; height: 20px; background-color: #ffc107; border-radius: 3px;"></div>
-                        <small>Good (1 - 10)</small>
+                        <div style="width:18px;height:18px;background:#ffc107;border-radius:3px;"></div>
+                        <small>Good (1-10)</small>
                     </div>
                     <div class="d-flex align-items-center gap-2">
-                        <div style="width: 20px; height: 20px; background-color: #fd7e14; border-radius: 3px;"></div>
-                        <small>Fair (10 - 100)</small>
+                        <div style="width:18px;height:18px;background:#fd7e14;border-radius:3px;"></div>
+                        <small>Fair (10-100)</small>
                     </div>
                     <div class="d-flex align-items-center gap-2">
-                        <div style="width: 20px; height: 20px; background-color: #dc3545; border-radius: 3px;"></div>
-                        <small>Poor (100 - 1k)</small>
+                        <div style="width:18px;height:18px;background:#dc3545;border-radius:3px;"></div>
+                        <small>Poor (100-1k)</small>
                     </div>
                     <div class="d-flex align-items-center gap-2">
-                        <div style="width: 20px; height: 20px; background-color: #721c24; border-radius: 3px;"></div>
-                        <small>Very Poor (&gt; 1k)</small>
+                        <div style="width:18px;height:18px;background:#721c24;border-radius:3px;"></div>
+                        <small>Very Poor (> 1k)</small>
                     </div>
                     <div class="d-flex align-items-center gap-2">
-                        <div style="width: 20px; height: 20px; background-color: #e9ecef; border-radius: 3px; border: 1px solid #dee2e6;"></div>
+                        <div style="width:18px;height:18px;background:#e9ecef;border:1px solid #dee2e6;border-radius:3px;"></div>
                         <small>Not Tested</small>
                     </div>
                 </div>
             </div>
         </div>
     </div>
-
     <div class="col-md-6">
-        <div class="data-section">
+        <div class="data-section h-100">
             <div class="section-header">
                 <h6 class="mb-0"><i class="bi bi-info-circle me-2"></i>About Error Function</h6>
             </div>
             <div class="section-body">
                 <p class="small text-muted mb-0">
-                    The error function quantifies the agreement between simulated and experimental ignition delays.
-                    Lower values indicate better model performance. The heatmap uses a <strong>logarithmic scale</strong>
-                    to visualize the wide range of error values. Hover over cells to see exact values.
+                    The error function quantifies the agreement between simulated and experimental
+                    ignition delays. Lower values indicate better model performance. Charts use a
+                    <strong>logarithmic scale</strong> to visualize the wide range of error values.
                 </p>
             </div>
         </div>
@@ -137,18 +246,19 @@
 
 <!-- Coverage Table -->
 {% if coverage_data %}
-<div class="data-section mt-4">
-    <div class="section-header">
-        <h6 class="mb-0"><i class="bi bi-table me-2"></i>Coverage Details</h6>
+<div class="data-section">
+    <div class="section-header d-flex align-items-center justify-content-between">
+        <h6 class="mb-0"><i class="bi bi-table me-2"></i>Recent Evaluations</h6>
+        <span class="badge bg-secondary-subtle text-secondary">Latest 50</span>
     </div>
     <div class="section-body p-0">
         <div class="table-responsive">
             <table class="table table-sm table-hover mb-0">
-                <thead>
+                <thead class="table-light">
                     <tr>
                         <th>Model</th>
                         <th>Dataset</th>
-                        <th class="text-end">Error Function</th>
+                        <th class="text-end">Error</th>
                         <th>Status</th>
                         <th>Last Run</th>
                     </tr>
@@ -161,28 +271,22 @@
                                 {{ cov.kinetic_model.model_name }}
                             </a>
                         </td>
-                        <td>
-                            <small class="text-muted">{{ cov.dataset.short_name }}</small>
-                        </td>
+                        <td><small class="text-muted">{{ cov.dataset.short_name }}</small></td>
                         <td class="text-end">
                             {% if cov.latest_error_function %}
-                                <span class="{% if cov.latest_error_function < 1 %}text-success{% elif cov.latest_error_function < 10 %}text-warning{% elif cov.latest_error_function < 100 %}text-warning{% elif cov.latest_error_function < 1000 %}text-danger{% else %}text-danger fw-bold{% endif %}">
-                                    {{ cov.latest_error_function|floatformat:1 }}
-                                </span>
-                            {% else %}
-                                <span class="text-muted">—</span>
-                            {% endif %}
+                            <span class="{% if cov.latest_error_function < 1 %}text-success{% elif cov.latest_error_function < 10 %}text-warning{% elif cov.latest_error_function < 100 %}text-warning{% elif cov.latest_error_function < 1000 %}text-danger{% else %}text-danger fw-bold{% endif %}">
+                                {{ cov.latest_error_function|floatformat:1 }}
+                            </span>
+                            {% else %}<span class="text-muted">-</span>{% endif %}
                         </td>
                         <td>
                             {% if cov.is_outdated %}
-                                <span class="badge bg-warning-subtle text-warning">Outdated</span>
+                            <span class="badge bg-warning-subtle text-warning">Outdated</span>
                             {% else %}
-                                <span class="badge bg-success-subtle text-success">Current</span>
+                            <span class="badge bg-success-subtle text-success">Current</span>
                             {% endif %}
                         </td>
-                        <td>
-                            <small class="text-muted">{{ cov.last_evaluated_at|date:"M d, Y"|default:"—" }}</small>
-                        </td>
+                        <td><small class="text-muted">{{ cov.last_evaluated_at|date:"M d, Y"|default:"-" }}</small></td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -194,12 +298,64 @@
 {% endblock %}
 
 {% block extra_js %}
-{% if evaluated_pairs > 0 and heatmap_json %}
+{% if evaluated_pairs > 0 %}
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    const plotData = {{ heatmap_json|safe }};
-    Plotly.newPlot('coverage-heatmap', plotData.data, plotData.layout, {responsive: true});
+    var plotCfg = {responsive: true, displayModeBar: false};
+
+    // 1. Overview Heatmap
+    {% if heatmap_json %}
+    var hmSpec = {{ heatmap_json|safe }};
+    Plotly.newPlot('overview-heatmap', hmSpec.data, hmSpec.layout, plotCfg);
+
+    // Click a heatmap cell -> activate the matching fuel tab & scroll
+    document.getElementById('overview-heatmap').on('plotly_click', function(evtData) {
+        if (!evtData.points || !evtData.points.length) return;
+        var fuelLabel = evtData.points[0].x;
+        document.querySelectorAll('#fuelTabs button').forEach(function(btn) {
+            if (btn.textContent.trim().indexOf(fuelLabel) === 0) {
+                btn.click();
+                setTimeout(function() {
+                    document.getElementById('fuel-detail-section').scrollIntoView({behavior: 'smooth', block: 'start'});
+                }, 100);
+            }
+        });
+    });
+    {% endif %}
+
+    // 2. Per-fuel drill-down charts (lazy-render on tab show)
+    {% if drill_down_json %}
+    var drillData = {{ drill_down_json|safe }};
+    var rendered = {};
+
+    function renderFuel(key) {
+        if (rendered[key]) return;
+        var spec = drillData[key];
+        if (!spec) return;
+        var el = document.getElementById('chart-' + key);
+        if (!el) return;
+        Plotly.newPlot(el, spec.data, spec.layout, plotCfg);
+        rendered[key] = true;
+    }
+
+    // Render the first tab immediately
+    {% for ft in fuel_tabs %}{% if forloop.first %}
+    renderFuel('{{ ft.key }}');
+    {% endif %}{% endfor %}
+
+    // Lazy-render + resize on tab switch
+    document.querySelectorAll('#fuelTabs button').forEach(function(btn) {
+        btn.addEventListener('shown.bs.tab', function() {
+            var key = this.getAttribute('data-fuel');
+            renderFuel(key);
+            setTimeout(function() {
+                var el = document.getElementById('chart-' + key);
+                if (el && el.data) Plotly.Plots.resize(el);
+            }, 60);
+        });
+    });
+    {% endif %}
 });
 </script>
 {% endif %}

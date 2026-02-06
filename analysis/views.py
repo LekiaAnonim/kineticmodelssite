@@ -190,6 +190,25 @@ class SimulationCreateView(FormView):
     def get_form_kwargs(self):
         kwargs = super().get_form_kwargs()
         kwargs['dataset_queryset'] = self._get_filtered_datasets()
+
+        # Pre-select model from ?model=<pk> query param (e.g. from fuel-map)
+        model_pk = self.request.GET.get('model')
+        if model_pk:
+            try:
+                kwargs['initial_model'] = KineticModel.objects.get(pk=model_pk)
+            except (KineticModel.DoesNotExist, ValueError):
+                pass
+
+        # Pre-select datasets from ?fuel=<pk> (fuel-map play button)
+        fuel_pk = self.request.GET.get('fuel')
+        if fuel_pk:
+            try:
+                from .models import FuelSpecies
+                fuel = FuelSpecies.objects.get(pk=fuel_pk)
+                kwargs['initial_fuel'] = fuel
+            except (FuelSpecies.DoesNotExist, ValueError):
+                pass
+
         return kwargs
 
     def get_context_data(self, **kwargs):
@@ -201,6 +220,23 @@ class SimulationCreateView(FormView):
             .prefetch_related('datapoints')
             .order_by('chemked_file_path')
         )
+
+        # Pass pre-selected dataset IDs to JS (from fuel-map play button)
+        form = context.get('form')
+        initial_ds = form.fields['datasets'].initial if form else None
+        if initial_ds:
+            context['preselected_dataset_ids'] = json.dumps(list(initial_ds))
+        else:
+            context['preselected_dataset_ids'] = '[]'
+
+        # Pass fuel info for banner
+        if form and hasattr(form, 'fuel_info'):
+            context['fuel_info'] = form.fuel_info
+
+        # Pass pre-selected model ID for JS
+        model_pk = self.request.GET.get('model', '')
+        context['preselected_model_id'] = model_pk
+
         return context
 
     def form_valid(self, form):
@@ -295,13 +331,21 @@ def execute_simulation_async(run_id):
                 
                 parsed = parse_pyteck_results(results)
                 
+                total_dp = sum(len(ds['datapoints']) for ds in parsed['datasets'])
+                failed_dp = sum(
+                    1 for ds in parsed['datasets']
+                    for dp in ds['datapoints']
+                    if not dp.get('ignition_detected', True)
+                )
+                
                 result = SimulationResult.objects.create(
                     simulation_run=run,
                     average_error_function=parsed['average_error_function'],
                     average_deviation_function=parsed['average_deviation_function'],
                     results_json=results,
-                    num_datapoints=sum(len(ds['datapoints']) for ds in parsed['datasets']),
-                    num_successful=sum(len(ds['datapoints']) for ds in parsed['datasets']),
+                    num_datapoints=total_dp,
+                    num_successful=total_dp - failed_dp,
+                    num_failed=failed_dp,
                 )
                 
                 for ds in parsed['datasets']:
@@ -311,6 +355,8 @@ def execute_simulation_async(run_id):
                         exp_delay = _parse_value_with_unit(dp.get('experimental_ignition_delay'))
                         sim_delay = _parse_value_with_unit(dp.get('simulated_ignition_delay'))
                         
+                        ignition_ok = dp.get('ignition_detected', True)
+                        
                         if temp and pressure and exp_delay:
                             DatapointResult.objects.create(
                                 simulation_result=result,
@@ -319,7 +365,17 @@ def execute_simulation_async(run_id):
                                 composition=dp.get('composition', []),
                                 experimental_ignition_delay=exp_delay,
                                 simulated_ignition_delay=sim_delay,
+                                success=ignition_ok,
+                                error_message=dp.get('note', '') if not ignition_ok else '',
                             )
+                
+                if failed_dp:
+                    _append_simulation_log(
+                        run,
+                        f"WARNING: Ignition was not detected for {failed_dp} of "
+                        f"{total_dp} datapoint(s). A sentinel value of 1e10 s was "
+                        f"used for the simulated ignition delay of those points."
+                    )
                 
                 # Update coverage matrix
                 coverage, _ = ModelDatasetCoverage.objects.get_or_create(
@@ -429,6 +485,68 @@ class CleanupStaleRunsView(View):
         else:
             messages.info(request, 'No stale simulations found.')
         
+        return redirect('analysis:run-list')
+
+
+class RetryFailedRunsView(View):
+    """
+    Re-run all failed simulations that have no completed sibling run
+    (same model + dataset pair).
+    """
+
+    @staticmethod
+    def get_retryable_failed_runs():
+        """Return a queryset of failed runs whose (model, dataset) pair
+        has no completed run anywhere."""
+        # Subquery: completed run IDs for each (model, dataset) pair
+        completed_pairs = (
+            SimulationRun.objects
+            .filter(status=SimulationStatus.COMPLETED)
+            .values_list('kinetic_model_id', 'dataset_id')
+        )
+        # Build set for fast membership checks
+        completed_set = set(completed_pairs)
+
+        failed_runs = SimulationRun.objects.filter(
+            status=SimulationStatus.FAILED,
+        ).select_related('kinetic_model', 'dataset').order_by('-created_at')
+
+        # Deduplicate: keep only the latest failed run per (model, dataset)
+        seen = set()
+        retryable = []
+        for run in failed_runs:
+            key = (run.kinetic_model_id, run.dataset_id)
+            if key not in completed_set and key not in seen:
+                seen.add(key)
+                retryable.append(run)
+
+        return retryable
+
+    def post(self, request):
+        retryable = self.get_retryable_failed_runs()
+
+        if not retryable:
+            messages.info(request, 'No retryable failed simulations found.')
+            return redirect('analysis:run-list')
+
+        count = 0
+        for old_run in retryable:
+            new_run = SimulationRun.objects.create(
+                kinetic_model=old_run.kinetic_model,
+                dataset=old_run.dataset,
+                status=SimulationStatus.PENDING,
+                triggered_by=TriggerType.MANUAL,
+                triggered_by_user=request.user if request.user.is_authenticated else None,
+                skip_validation=old_run.skip_validation,
+                model_version_hash=SimulationRun.compute_model_hash(old_run.kinetic_model),
+            )
+            execute_simulation_async(new_run.pk)
+            count += 1
+
+        messages.success(
+            request,
+            f'Queued {count} failed simulation{"s" if count != 1 else ""} for retry.'
+        )
         return redirect('analysis:run-list')
 
 
@@ -624,6 +742,11 @@ class SimulationListView(ListView):
             started_at__lt=one_hour_ago
         ).count()
         context['stale_count'] = stale_count
+
+        # Count retryable failed runs (failed with no completed sibling)
+        context['retryable_failed_count'] = len(
+            RetryFailedRunsView.get_retryable_failed_runs()
+        )
         
         return context
 
@@ -711,73 +834,272 @@ class CoverageMatrixView(TemplateView):
             .order_by('-last_evaluated_at')
         )
 
-        # Prepare heatmap data for Plotly (only for models/datasets with coverage)
-        # Use log10 scale for better visualization of error function values
+        # ── Prepare multi-panel visualization data ──
         import math
-        
-        heatmap_data = {
-            'z': [],  # Log-scaled error function values
-            'z_raw': [],  # Raw error function values for hover
-            'x': [ds.short_name for ds in datasets_with_coverage],
-            'y': [m.model_name for m in models_with_coverage],
-            'text': [],  # Hover text
-        }
+        import re as _re
+        from collections import Counter, defaultdict
 
-        for model in models_with_coverage:
-            row_z = []
-            row_text = []
-            for dataset in datasets_with_coverage:
-                key = (model.id, dataset.id)
-                cov = coverage_data.get(key)
-                if cov and cov['has_run'] and cov['error_function'] is not None:
-                    raw_val = cov['error_function']
-                    # Use log10 scale for color mapping, with floor of 0.01 to avoid log(0)
-                    log_val = math.log10(max(raw_val, 0.01))
-                    row_z.append(log_val)
-                    row_text.append(f"{model.model_name}<br>{dataset.short_name}<br>Error: {raw_val:.2f}<br>Log₁₀: {log_val:.2f}")
-                else:
-                    row_z.append(None)
-                    row_text.append(f"{model.model_name}<br>{dataset.short_name}<br>Not evaluated")
-            heatmap_data['z'].append(row_z)
-            heatmap_data['text'].append(row_text)
-
-        # Custom colorscale: green (excellent) -> yellow (good) -> orange (fair) -> red (poor)
-        # Mapped to log10 scale: < 0 (excellent), 0-1 (good), 1-2 (fair), > 2 (poor)
-        custom_colorscale = [
-            [0.0, '#198754'],   # Excellent: green (log10 < 0, i.e., error < 1)
-            [0.25, '#28a745'],  # Good-ish green
-            [0.4, '#ffc107'],   # Good: yellow (log10 ~ 1, i.e., error ~ 10)
-            [0.6, '#fd7e14'],   # Fair: orange (log10 ~ 2, i.e., error ~ 100)
-            [0.8, '#dc3545'],   # Poor: red (log10 ~ 3, i.e., error ~ 1000)
-            [1.0, '#721c24'],   # Very poor: dark red (log10 > 4, i.e., error > 10000)
+        # ---- Palette: one colour per model (extends with hash for >20) ----
+        BASE_COLOURS = [
+            '#4e79a7', '#f28e2b', '#e15759', '#76b7b2', '#59a14f',
+            '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac',
+            '#1b9e77', '#d95f02', '#7570b3', '#e7298a', '#66a61e',
+            '#e6ab02', '#a6761d', '#666666', '#8dd3c7', '#fb8072',
         ]
 
+        def _model_colour(idx):
+            if idx < len(BASE_COLOURS):
+                return BASE_COLOURS[idx]
+            # deterministic colour from model index
+            import hashlib as _hl
+            h = _hl.md5(str(idx).encode()).hexdigest()
+            return f'#{h[:6]}'
+
+        model_colour = {
+            m.model_name: _model_colour(i)
+            for i, m in enumerate(models_with_coverage)
+        }
+
+        # ---- Fuel-folder display names ----
+        fuel_display = {
+            'n-butanol': 'n-Butanol', 'i-butanol': 'i-Butanol',
+            't-butanol': 't-Butanol', '2-butanol': '2-Butanol',
+            'n-heptane': 'n-Heptane',
+        }
+
+        def _dataset_short_label(ds):
+            """Concise per-dataset label (author + condition)."""
+            if not ds.chemked_file_path:
+                return f"DS {ds.pk}"
+            parts = ds.chemked_file_path.split("/")
+            stem = parts[-1].replace(".yaml", "") if parts else ""
+            if len(parts) >= 3:
+                af = parts[-2]
+                m = _re.search(r'-(\d+)$', stem)
+                return f"{af} #{m.group(1)}" if m else af
+            m_crv = _re.match(r'CRV_([A-Za-z]+)_(\d{4})', stem)
+            if m_crv:
+                return f"{m_crv.group(1)} {m_crv.group(2)} CRV"
+            m = _re.match(r'([A-Za-z]+)_(\d{4})_(.+)', stem)
+            if m:
+                author, year, rest = m.group(1), m.group(2), m.group(3)
+                phi = _re.search(r'phi[_]?([\d.]+)', rest)
+                atm = _re.search(r'(\d+)atm', rest)
+                conc = _re.search(r'[_x](\d+\.\d+)$', rest)
+                if not conc:
+                    conc = _re.search(r'x[A-Za-z\-]+([\d.]+)$', rest)
+                conds = []
+                if phi:  conds.append(f"φ={phi.group(1)}")
+                if atm:  conds.append(f"{atm.group(1)}atm")
+                if conc: conds.append(f"x={conc.group(1)}")
+                tag = ", ".join(conds) if conds else rest[:15]
+                return f"{author} {year} ({tag})"
+            return stem[:30]
+
+        def _fuel_folder(ds):
+            if not ds.chemked_file_path:
+                return "Other"
+            return ds.chemked_file_path.split("/")[0]
+
+        # ---- Group datasets by fuel ----
+        fuel_datasets = defaultdict(list)
+        for ds in datasets_with_coverage:
+            fuel_datasets[_fuel_folder(ds)].append(
+                (ds, _dataset_short_label(ds))
+            )
+        # Disambiguate labels within each fuel group
+        for fuel, pairs in fuel_datasets.items():
+            labels = [lbl for _, lbl in pairs]
+            lc = Counter(labels)
+            seen: dict = {}
+            for i, (ds, lbl) in enumerate(pairs):
+                if lc[lbl] > 1:
+                    seen[lbl] = seen.get(lbl, 0) + 1
+                    pairs[i] = (ds, f"{lbl} [{seen[lbl]}]")
+
+        fuel_order = sorted(fuel_datasets.keys())
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 1. MODEL × FUEL HEATMAP  (compact — scales to 100+ models)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        fuel_labels = [fuel_display.get(f, f) for f in fuel_order]
+        model_labels = [m.model_name for m in models_with_coverage]
+
+        # Build aggregated stats: per (model, fuel) → avg error
+        model_fuel_stats = {}   # (model_name, fuel_folder) → {avg, best, count, errors}
+        for model in models_with_coverage:
+            for fuel in fuel_order:
+                errors = []
+                for ds, _ in fuel_datasets[fuel]:
+                    key = (model.id, ds.id)
+                    cov = coverage_data.get(key)
+                    if cov and cov['has_run'] and cov['error_function'] is not None:
+                        errors.append(cov['error_function'])
+                if errors:
+                    model_fuel_stats[(model.model_name, fuel)] = {
+                        'avg': sum(errors) / len(errors),
+                        'best': min(errors),
+                        'worst': max(errors),
+                        'count': len(errors),
+                        'total': len(fuel_datasets[fuel]),
+                    }
+
+        # Heatmap z-values (log10 of avg error) and hover text
+        hm_z = []
+        hm_text = []
+        for model in models_with_coverage:
+            row_z = []
+            row_t = []
+            for fuel in fuel_order:
+                stats = model_fuel_stats.get((model.model_name, fuel))
+                nice = fuel_display.get(fuel, fuel)
+                if stats:
+                    log_val = math.log10(max(stats['avg'], 0.01))
+                    row_z.append(log_val)
+                    row_t.append(
+                        f"<b>{model.model_name}</b><br>"
+                        f"{nice}<br>"
+                        f"Avg Error: {stats['avg']:.1f}<br>"
+                        f"Best: {stats['best']:.2f}<br>"
+                        f"Datasets: {stats['count']}/{stats['total']}"
+                    )
+                else:
+                    row_z.append(None)
+                    row_t.append("")
+            hm_z.append(row_z)
+            hm_text.append(row_t)
+
+        colorscale = [
+            [0.0, '#198754'],  [0.15, '#28a745'],
+            [0.35, '#ffc107'], [0.55, '#fd7e14'],
+            [0.75, '#dc3545'], [1.0, '#721c24'],
+        ]
+        n_models = len(models_with_coverage)
+        hm_height = max(300, n_models * 36 + 120)
+
         context['heatmap_json'] = json.dumps({
-            'data': [
-                {
-                    'type': 'heatmap',
-                    'z': heatmap_data['z'],
-                    'x': heatmap_data['x'],
-                    'y': heatmap_data['y'],
-                    'text': heatmap_data['text'],
-                    'hoverinfo': 'text',
-                    'colorscale': custom_colorscale,
-                    'zmin': -2,  # log10(0.01) = -2 (excellent)
-                    'zmax': 5,   # log10(100000) = 5 (very poor)
-                    'colorbar': {
-                        'title': 'Log₁₀(Error)',
-                        'tickvals': [-2, -1, 0, 1, 2, 3, 4, 5],
-                        'ticktext': ['0.01', '0.1', '1', '10', '100', '1k', '10k', '100k'],
-                    },
-                }
-            ],
+            'data': [{
+                'type': 'heatmap',
+                'z': hm_z,
+                'x': fuel_labels,
+                'y': model_labels,
+                'text': hm_text,
+                'hoverinfo': 'text',
+                'hoverongaps': False,
+                'colorscale': colorscale,
+                'zmin': -2, 'zmax': 5,
+                'xgap': 3, 'ygap': 3,
+                'colorbar': {
+                    'title': 'Log₁₀(Avg Error)',
+                    'tickvals': [-2, -1, 0, 1, 2, 3, 4, 5],
+                    'ticktext': ['0.01', '0.1', '1', '10', '100', '1k', '10k', '100k'],
+                    'len': 0.9,
+                },
+            }],
             'layout': {
-                'margin': {'l': 120, 'r': 80, 't': 20, 'b': 120},
-                'xaxis': {'tickangle': -45, 'automargin': True},
-                'yaxis': {'automargin': True},
-                'height': 600,
-            }
+                'margin': {'l': 200, 'r': 100, 't': 10, 'b': 80},
+                'xaxis': {'type': 'category', 'tickangle': -30, 'side': 'bottom'},
+                'yaxis': {'type': 'category', 'autorange': 'reversed', 'automargin': True},
+                'height': hm_height,
+                'plot_bgcolor': '#fff',
+            },
         })
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 2. MODEL RANKING TABLE (for template, no chart)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        model_summaries = []
+        for model in models_with_coverage:
+            all_errors = []
+            fuel_breakdown = []
+            for fuel in fuel_order:
+                stats = model_fuel_stats.get((model.model_name, fuel))
+                nice = fuel_display.get(fuel, fuel)
+                if stats:
+                    fuel_breakdown.append({
+                        'fuel': nice,
+                        'avg': stats['avg'],
+                        'best': stats['best'],
+                        'worst': stats['worst'],
+                        'count': stats['count'],
+                        'total': stats['total'],
+                        'pct': round(stats['count'] / stats['total'] * 100),
+                    })
+                    all_errors.extend([stats['avg']] * stats['count'])
+
+            model_summaries.append({
+                'name': model.model_name,
+                'colour': model_colour[model.model_name],
+                'total_datasets': len(all_errors),
+                'avg_error': sum(all_errors) / len(all_errors) if all_errors else None,
+                'best_error': min(all_errors) if all_errors else None,
+                'fuels': fuel_breakdown,
+            })
+        # Sort by avg error (best first)
+        model_summaries.sort(key=lambda s: s['avg_error'] if s['avg_error'] is not None else 1e9)
+        context['model_summaries'] = model_summaries
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 3. PER-FUEL DRILL-DOWN DATA  (JSON for JS-driven tabs)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        drill_down = {}   # fuel_folder → { traces, layout }
+        for fuel in fuel_order:
+            pairs = fuel_datasets[fuel]
+            ds_labels = [lbl for _, lbl in pairs]
+            nice = fuel_display.get(fuel, fuel)
+
+            traces = []
+            for model in models_with_coverage:
+                y_vals = []
+                hovers = []
+                for ds, lbl in pairs:
+                    key = (model.id, ds.id)
+                    cov = coverage_data.get(key)
+                    if cov and cov['has_run'] and cov['error_function'] is not None:
+                        val = cov['error_function']
+                        y_vals.append(val)
+                        hovers.append(
+                            f"<b>{model.model_name}</b><br>"
+                            f"{lbl}<br>"
+                            f"Error: {val:.2f}"
+                        )
+                    else:
+                        y_vals.append(None)
+                        hovers.append("")
+                traces.append({
+                    'type': 'bar',
+                    'name': model.model_name,
+                    'x': ds_labels,
+                    'y': y_vals,
+                    'text': hovers,
+                    'hoverinfo': 'text',
+                    'marker': {'color': model_colour[model.model_name]},
+                })
+
+            n_ds = len(pairs)
+            n_m = len(models_with_coverage)
+            chart_w = max(400, n_ds * n_m * 18 + 120)
+
+            drill_down[fuel] = {
+                'data': traces,
+                'layout': {
+                    'barmode': 'group',
+                    'yaxis': {'title': 'Error Function', 'type': 'log', 'gridcolor': '#eee'},
+                    'xaxis': {'tickangle': -40, 'tickfont': {'size': 9}, 'type': 'category'},
+                    'margin': {'l': 60, 'r': 20, 't': 10, 'b': 120},
+                    'height': 380,
+                    'width': chart_w,
+                    'legend': {'orientation': 'h', 'y': 1.08, 'x': 0.5, 'xanchor': 'center'},
+                    'plot_bgcolor': '#fff',
+                    'paper_bgcolor': '#fff',
+                },
+            }
+
+        context['fuel_tabs'] = [
+            {'key': f, 'label': fuel_display.get(f, f), 'count': len(fuel_datasets[f])}
+            for f in fuel_order
+        ]
+        context['drill_down_json'] = json.dumps(drill_down)
 
         return context
 
@@ -1059,3 +1381,227 @@ class SimulationStatusView(View):
             }
 
         return JsonResponse(data)
+
+
+# ===========================================================================
+# Fuel-Model Compatibility Map Views
+# ===========================================================================
+
+class FuelMapView(TemplateView):
+    """
+    Main Fuel-Model Compatibility Map page.
+    Lists fuel species with dataset/model counts and search.
+    """
+    template_name = "analysis/fuel_map.html"
+
+    def get_context_data(self, **kwargs):
+        from .models import FuelSpecies, FuelGroup, FuelModelCompatibility
+
+        context = super().get_context_data(**kwargs)
+
+        search = self.request.GET.get("q", "").strip()
+        group_id = self.request.GET.get("group", "").strip()
+        sort = self.request.GET.get("sort", "datasets")  # datasets | models | name
+
+        # Base queryset
+        fuels_qs = FuelSpecies.objects.select_related("group")
+
+        if search:
+            fuels_qs = fuels_qs.filter(
+                Q(common_name__icontains=search)
+                | Q(smiles__icontains=search)
+                | Q(formula__icontains=search)
+                | Q(inchi__icontains=search)
+                | Q(name_variants__contains=search)
+            )
+            context["search_query"] = search
+
+        if group_id:
+            fuels_qs = fuels_qs.filter(group_id=group_id)
+            context["active_group_id"] = int(group_id)
+
+        # Sorting
+        if sort == "models":
+            fuels_qs = fuels_qs.order_by("-compatible_model_count", "-dataset_count")
+        elif sort == "name":
+            fuels_qs = fuels_qs.order_by("common_name")
+        else:
+            fuels_qs = fuels_qs.order_by("-dataset_count", "-compatible_model_count")
+
+        context["fuels"] = fuels_qs
+        context["sort"] = sort
+
+        # Groups sidebar
+        context["fuel_groups"] = FuelGroup.objects.annotate(
+            fuel_count=Count("fuels")
+        ).filter(fuel_count__gt=0).order_by("display_order", "name")
+
+        # Summary stats
+        context["total_fuels"] = FuelSpecies.objects.count()
+        context["total_compatible_pairs"] = FuelModelCompatibility.objects.filter(
+            is_compatible=True
+        ).count()
+        context["total_models_in_map"] = (
+            FuelModelCompatibility.objects.filter(is_compatible=True)
+            .values("kinetic_model").distinct().count()
+        )
+
+        return context
+
+
+class FuelDetailView(TemplateView):
+    """
+    Intermediate compatibility detail page for a specific fuel.
+    Shows all compatible models, species mapping preview for each,
+    and links to run simulations.
+    """
+    template_name = "analysis/fuel_detail.html"
+
+    def get_context_data(self, **kwargs):
+        from .models import FuelSpecies, FuelModelCompatibility
+
+        context = super().get_context_data(**kwargs)
+        fuel_id = self.kwargs["pk"]
+        fuel = get_object_or_404(FuelSpecies, pk=fuel_id)
+        context["fuel"] = fuel
+
+        # Get all compatibility records for this fuel
+        compat_qs = (
+            FuelModelCompatibility.objects
+            .filter(fuel=fuel)
+            .select_related("kinetic_model", "latest_coverage")
+            .order_by("-is_compatible", "kinetic_model__model_name")
+        )
+
+        # Split into compatible and incompatible
+        compatible = []
+        incompatible = []
+        for c in compat_qs:
+            if c.is_compatible:
+                compatible.append(c)
+            else:
+                incompatible.append(c)
+
+        context["compatible_models"] = compatible
+        context["incompatible_models"] = incompatible
+        context["compatible_count"] = len(compatible)
+        context["incompatible_count"] = len(incompatible)
+
+        # Datasets that use this fuel
+        dataset_ids = set()
+        # Find datasets through CompositionSpecies
+        from chemked_database.models import CompositionSpecies as CS
+        cs_qs = CS.objects.filter(
+            Q(inchi=fuel.inchi) | Q(smiles=fuel.smiles)
+        ).exclude(
+            species_name__in=['O2', 'N2', 'Ar', 'He', 'CO2', 'H2O']
+        ).select_related("composition")
+
+        for cs in cs_qs:
+            if cs.composition_id:
+                # Through datapoints
+                dp_datasets = cs.composition.datapoints.values_list(
+                    "dataset_id", flat=True
+                )
+                dataset_ids.update(dp_datasets)
+                # Through common_properties (OneToOne reverse)
+                try:
+                    cp = cs.composition.common_properties
+                    if cp:
+                        dataset_ids.add(cp.dataset_id)
+                except Exception:
+                    pass
+
+        context["datasets"] = (
+            ExperimentDataset.objects
+            .filter(pk__in=dataset_ids)
+            .order_by("chemked_file_path")
+        )
+        context["dataset_count"] = len(dataset_ids)
+
+        return context
+
+
+class FuelModelMappingPreviewView(View):
+    """
+    API endpoint: return the species mapping snapshot for a fuel × model pair.
+    Used for AJAX expand-on-click in the fuel detail page.
+
+    The snapshot is stored as a list of per-dataset entries (new format) or
+    a flat dict (legacy format from before the per-dataset refactor).
+    """
+    def get(self, request, fuel_pk, model_pk):
+        from .models import FuelSpecies, FuelModelCompatibility
+
+        try:
+            compat = FuelModelCompatibility.objects.get(
+                fuel_id=fuel_pk, kinetic_model_id=model_pk
+            )
+        except FuelModelCompatibility.DoesNotExist:
+            return JsonResponse({"error": "Not found"}, status=404)
+
+        snapshot = compat.species_mapping_snapshot
+
+        # New format: list of per-dataset dicts
+        if isinstance(snapshot, list):
+            datasets = snapshot
+        elif isinstance(snapshot, dict) and snapshot:
+            # Legacy format: flat {species_name: info_dict} — wrap in one
+            # pseudo-dataset for backward compat
+            rows = []
+            for ds_name, info in snapshot.items():
+                if isinstance(info, dict):
+                    rows.append({
+                        "name": ds_name,
+                        "model_name": info.get("model_name", ""),
+                        "method": info.get("method", ""),
+                        "smiles": info.get("smiles", ""),
+                        "matched": bool(info.get("model_name")),
+                    })
+                else:
+                    rows.append({
+                        "name": ds_name,
+                        "model_name": info if info else "",
+                        "method": "unknown",
+                        "smiles": "",
+                        "matched": bool(info),
+                    })
+            datasets = [{
+                "dataset_id": None,
+                "dataset_name": "All datasets (legacy)",
+                "species": rows,
+                "matched_count": sum(1 for r in rows if r["matched"]),
+                "total_count": len(rows),
+            }]
+        else:
+            datasets = []
+
+        return JsonResponse({
+            "fuel": str(compat.fuel),
+            "fuel_pk": compat.fuel_id,
+            "model": compat.kinetic_model.model_name,
+            "model_pk": compat.kinetic_model_id,
+            "is_compatible": compat.is_compatible,
+            "matched_species": compat.matched_model_species,
+            "datasets": datasets,
+        })
+
+
+class RebuildFuelMapView(LoginRequiredMixin, View):
+    """Trigger a fuel map rebuild via the UI."""
+
+    def post(self, request):
+        from .services.fuel_model_map import rebuild_fuel_map
+
+        try:
+            stats = rebuild_fuel_map()
+            messages.success(
+                request,
+                f"Fuel map rebuilt: {stats['fuels_found']} fuels, "
+                f"{stats['compatible_pairs']} compatible pairs."
+            )
+        except Exception as e:
+            logger.exception("Fuel map rebuild failed")
+            messages.error(request, f"Rebuild failed: {e}")
+
+        return redirect("analysis:fuel-map")

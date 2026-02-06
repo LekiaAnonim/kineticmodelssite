@@ -56,6 +56,7 @@ class SimulationCreateForm(forms.Form):
     def __init__(self, *args, **kwargs):
         # Allow pre-filtering datasets
         initial_model = kwargs.pop('initial_model', None)
+        initial_fuel = kwargs.pop('initial_fuel', None)
         dataset_queryset = kwargs.pop('dataset_queryset', None)
         super().__init__(*args, **kwargs)
 
@@ -68,6 +69,55 @@ class SimulationCreateForm(forms.Form):
                 experiment_type='ignition delay'
             )
         self.fields['datasets'].queryset = dataset_queryset.order_by('chemked_file_path')
+
+        # Pre-select all datasets that contain this fuel species
+        if initial_fuel:
+            from chemked_database.models import (
+                CompositionSpecies, ExperimentDatapoint, CommonProperties,
+            )
+            from django.db.models import Q
+
+            # Find compositions containing this fuel (by InChI or SMILES)
+            inchi = initial_fuel.inchi or ''
+            smiles = initial_fuel.smiles or ''
+            norm_inchi = inchi.replace('InChI=', '') if inchi else ''
+
+            inchi_variants = [norm_inchi]
+            if norm_inchi and not norm_inchi.startswith('InChI='):
+                inchi_variants.append(f'InChI={norm_inchi}')
+
+            q = Q(inchi__in=inchi_variants)
+            if smiles:
+                q |= Q(smiles=smiles)
+
+            comp_ids = set(
+                CompositionSpecies.objects.filter(q)
+                .values_list('composition_id', flat=True)
+            )
+
+            if comp_ids:
+                # Datasets via datapoints
+                dp_ds_ids = set(
+                    ExperimentDatapoint.objects
+                    .filter(composition_id__in=comp_ids)
+                    .values_list('dataset_id', flat=True)
+                )
+                # Datasets via common_properties
+                cp_ds_ids = set(
+                    CommonProperties.objects
+                    .filter(composition_id__in=comp_ids)
+                    .values_list('dataset_id', flat=True)
+                )
+                fuel_ds_ids = dp_ds_ids | cp_ds_ids
+
+                # Pre-select these datasets (initial value for the field)
+                self.fields['datasets'].initial = list(fuel_ds_ids)
+
+                # Store for context info
+                self.fuel_info = {
+                    'name': initial_fuel.common_name or initial_fuel.smiles,
+                    'dataset_count': len(fuel_ds_ids),
+                }
 
 
 class DatasetFilterForm(forms.Form):

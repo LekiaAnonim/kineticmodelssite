@@ -204,10 +204,38 @@
                             <td class="text-muted">Total Datapoints</td>
                             <td>{{ run.result.datapoint_results.count }}</td>
                         </tr>
+                        {% if run.result.num_failed > 0 %}
+                        <tr>
+                            <td class="text-muted">Ignition Not Detected</td>
+                            <td>
+                                <span class="text-warning fw-semibold">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>{{ run.result.num_failed }} of {{ run.result.num_datapoints }} datapoint{{ run.result.num_failed|pluralize }}
+                                </span>
+                            </td>
+                        </tr>
+                        {% endif %}
                     </tbody>
                 </table>
             </div>
         </div>
+
+        {% if run.result.num_failed > 0 %}
+        <!-- Ignition Failure Warning -->
+        <div class="alert alert-warning d-flex align-items-start mb-3" role="alert">
+            <i class="bi bi-exclamation-triangle-fill me-2 mt-1"></i>
+            <div>
+                <strong>Ignition not detected for {{ run.result.num_failed }} datapoint{{ run.result.num_failed|pluralize }}.</strong>
+                <p class="mb-0 mt-1 small">
+                    A sentinel value of <code>1×10<sup>10</sup> s</code> was used in place of the
+                    simulated ignition delay for the affected point{{ run.result.num_failed|pluralize }}.
+                    This typically occurs when the conditions (temperature, pressure, composition)
+                    are outside the range where the kinetic model predicts ignition.
+                    These datapoints are highlighted in the table below with a
+                    <span class="badge bg-warning text-dark"><i class="bi bi-exclamation-triangle-fill me-1"></i>No ignition</span> badge.
+                </p>
+            </div>
+        </div>
+        {% endif %}
 
         <!-- Datapoint Results Table -->
         <div class="data-section mb-3">
@@ -226,19 +254,31 @@
                                 <th>τ<sub>exp</sub> (s)</th>
                                 <th>τ<sub>sim</sub> (s)</th>
                                 <th>Ratio</th>
+                                <th>Status</th>
                             </tr>
                         </thead>
                         <tbody>
                             {% for dp in run.result.datapoint_results.all %}
-                            <tr>
+                            <tr class="{% if not dp.success %}table-warning{% endif %}">
                                 <td class="text-muted">{{ forloop.counter }}</td>
                                 <td>{{ dp.temperature|floatformat:1 }}</td>
                                 <td>{{ dp.pressure_atm|floatformat:2 }}</td>
                                 <td>{{ dp.equivalence_ratio|floatformat:2|default:"—" }}</td>
                                 <td>{{ dp.experimental_ignition_delay|stringformat:"e" }}</td>
-                                <td>{{ dp.simulated_ignition_delay|stringformat:"e" }}</td>
                                 <td>
-                                    {% if dp.error_value %}
+                                    {% if not dp.success %}
+                                    <span class="text-warning" title="{{ dp.error_message }}">
+                                        {{ dp.simulated_ignition_delay|stringformat:"e" }}
+                                        <i class="bi bi-exclamation-triangle-fill ms-1"></i>
+                                    </span>
+                                    {% else %}
+                                    {{ dp.simulated_ignition_delay|stringformat:"e" }}
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if not dp.success %}
+                                    <span class="text-muted">—</span>
+                                    {% elif dp.error_value %}
                                     <span class="{% if dp.error_value < 0.5 %}text-success{% elif dp.error_value < 1 %}text-warning{% else %}text-danger{% endif %}">
                                         {{ dp.error_value|floatformat:3 }}
                                     </span>
@@ -248,10 +288,19 @@
                                     </span>
                                     {% endif %}
                                 </td>
+                                <td>
+                                    {% if dp.success %}
+                                    <span class="badge bg-success-subtle text-success"><i class="bi bi-check-circle me-1"></i>OK</span>
+                                    {% else %}
+                                    <span class="badge bg-warning text-dark" title="{{ dp.error_message }}">
+                                        <i class="bi bi-exclamation-triangle-fill me-1"></i>No ignition
+                                    </span>
+                                    {% endif %}
+                                </td>
                             </tr>
                             {% empty %}
                             <tr>
-                                <td colspan="7" class="text-center text-muted py-3">No datapoint results</td>
+                                <td colspan="8" class="text-center text-muted py-3">No datapoint results</td>
                             </tr>
                             {% endfor %}
                         </tbody>

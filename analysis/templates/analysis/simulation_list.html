@@ -19,6 +19,15 @@
             <p class="text-muted mb-0 mt-1">All PyTeCK simulation runs</p>
         </div>
         <div class="d-flex gap-2">
+            {% if retryable_failed_count > 0 %}
+            <form method="post" action="{% url 'analysis:retry-failed' %}" class="d-inline"
+                  onsubmit="return confirm('This will re-run {{ retryable_failed_count }} failed simulation(s) that have no completed runs. Continue?');">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-outline-danger btn-sm">
+                    <i class="bi bi-arrow-repeat me-1"></i>Retry Failed ({{ retryable_failed_count }})
+                </button>
+            </form>
+            {% endif %}
             {% if stale_count > 0 %}
             <form method="post" action="{% url 'analysis:cleanup-stale' %}" class="d-inline"
                   onsubmit="return confirm('This will mark {{ stale_count }} stale simulation(s) as failed. Continue?');">

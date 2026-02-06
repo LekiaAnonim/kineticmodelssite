@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import yaml
 import zipfile
 from dataclasses import dataclass
 
@@ -117,6 +118,7 @@ def build_cantera_yaml(kinetic_model, strict=False):
             content = handle.read()
 
     content = _patch_temperature_ranges(content)
+    content = _patch_duplicate_reactions_yaml(content)
 
     filename = os.path.basename(output_path)
     return ExportResult(content=content, filename=filename, content_type="application/x-yaml")
@@ -144,6 +146,99 @@ def _patch_temperature_ranges(content):
     if patched == text:
         return content
     return patched.encode("utf-8")
+
+
+def _patch_duplicate_reactions_yaml(content):
+    """Post-process the Cantera YAML to add ``duplicate: true`` to duplicate
+    reactions *without* re-serialising the entire file.
+
+    Cantera's ``checkDuplicates`` considers two reactions as duplicates when
+    they involve the same species on each side (ignoring direction and the
+    reversibility flag).  For example, an irreversible ``A => B`` and a
+    reversible ``B <=> A`` are duplicates.
+
+    Strategy: scan lines for ``- equation:`` entries, build canonical
+    signatures, identify duplicates, then inject ``  duplicate: true`` after
+    the equation line for each duplicate reaction that doesn't already have it.
+    This preserves the original Cantera YAML formatting exactly.
+    """
+    from collections import Counter
+
+    try:
+        text = content.decode("utf-8")
+    except Exception:
+        return content
+
+    lines = text.split("\n")
+
+    # ── 1. Locate every "- equation:" line and extract the equation ──
+    eq_re = re.compile(r"^(\s*)-\s+equation:\s*(.+?)(?:\s*#.*)?$")
+    arrow_re = re.compile(r"(<?=>?)")
+
+    def _canonical_sig(eq_str):
+        parts = arrow_re.split(eq_str, maxsplit=1)
+        if len(parts) < 3:
+            return None
+        lhs = tuple(sorted(s.strip() for s in parts[0].split("+") if s.strip()))
+        rhs = tuple(sorted(s.strip() for s in parts[2].split("+") if s.strip()))
+        return frozenset([lhs, rhs])
+
+    # (line_index, indent, signature)
+    entries = []
+    for idx, line in enumerate(lines):
+        m = eq_re.match(line)
+        if m:
+            indent = m.group(1)       # leading whitespace before "-"
+            eq_text = m.group(2)
+            sig = _canonical_sig(eq_text)
+            entries.append((idx, indent, sig))
+
+    if not entries:
+        return content
+
+    # ── 2. Find which signatures appear more than once ──
+    sig_counts = Counter(sig for _, _, sig in entries if sig is not None)
+    dup_sigs = {sig for sig, cnt in sig_counts.items() if cnt > 1}
+
+    if not dup_sigs:
+        return content
+
+    # ── 3. For each duplicate, check whether ``duplicate: true`` already
+    #       appears in the reaction block; if not, record that we need to
+    #       insert it.  A reaction block starts at the ``- equation:`` line
+    #       and ends just before the next ``- equation:`` (or EOF). ──
+    dup_re = re.compile(r"^\s+duplicate:\s*true", re.IGNORECASE)
+    inserts = []                      # (line_index_after_which, indent)
+
+    for pos, (line_idx, indent, sig) in enumerate(entries):
+        if sig not in dup_sigs:
+            continue
+        # Determine the end of this reaction block
+        if pos + 1 < len(entries):
+            block_end = entries[pos + 1][0]
+        else:
+            block_end = len(lines)
+        # Check whether `duplicate: true` already exists in the block
+        already = False
+        for check_idx in range(line_idx + 1, block_end):
+            if dup_re.match(lines[check_idx]):
+                already = True
+                break
+        if not already:
+            inserts.append((line_idx, indent))
+
+    if not inserts:
+        return content
+
+    # ── 4. Insert ``duplicate: true`` lines (iterate from bottom up to
+    #       keep indices stable). ──
+    for line_idx, indent in reversed(inserts):
+        # Insert right after the equation line, with proper indentation:
+        # "- equation: …" uses indent + "- ", so sub-keys use indent + "  "
+        new_line = indent + "  duplicate: true"
+        lines.insert(line_idx + 1, new_line)
+
+    return "\n".join(lines).encode("utf-8")
 
 
 def _generate_chemkin_files(kinetic_model, strict=False):
@@ -416,19 +511,32 @@ def _mark_duplicate_reactions(reactions):
     reactant and product species labels (order-independent).  This ensures
     that ``save_chemkin_file`` writes the ``DUPLICATE`` keyword and that
     the resulting YAML passes Cantera's duplicate-reaction validation.
+
+    Cantera also treats an irreversible reaction ``A => B`` as a duplicate
+    of a reversible reaction ``B <=> A`` (because the reversible reaction
+    already covers the reverse direction).  To catch this case we build a
+    *canonical* signature that is identical for a reaction and its reverse,
+    regardless of the reversibility flag.
     """
     from collections import Counter
 
-    def _signature(rxn):
+    def _canonical_signature(rxn):
+        """Return a direction-independent signature for duplicate detection.
+
+        The signature is the ``frozenset`` of the forward and reverse
+        species-label tuples.  This means ``(A+B -> C+D)`` and
+        ``(C+D <=> A+B)`` produce the same signature, matching the way
+        Cantera's ``checkDuplicates`` works.
+        """
         r_labels = tuple(sorted(sp.label for sp in rxn.reactants))
         p_labels = tuple(sorted(sp.label for sp in rxn.products))
-        return (r_labels, p_labels, rxn.reversible)
+        return frozenset([r_labels, p_labels])
 
-    sig_counts = Counter(_signature(rxn) for rxn in reactions)
+    sig_counts = Counter(_canonical_signature(rxn) for rxn in reactions)
     duplicate_sigs = {sig for sig, cnt in sig_counts.items() if cnt > 1}
 
     for rxn in reactions:
-        if _signature(rxn) in duplicate_sigs:
+        if _canonical_signature(rxn) in duplicate_sigs:
             rxn.duplicate = True
 
 

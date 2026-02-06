@@ -17,9 +17,23 @@
     <p class="text-muted mb-0 mt-1">Evaluate a kinetic model against experimental data using PyTeCK</p>
 </div>
 
+{% if fuel_info %}
+<div class="alert alert-info d-flex align-items-center mb-4" role="alert">
+    <i class="bi bi-fuel-pump me-2 fs-5"></i>
+    <div>
+        <strong>Bulk simulation for {{ fuel_info.name }}</strong> —
+        Model and <strong>{{ fuel_info.dataset_count }}</strong> datasets have been pre-selected.
+        Review the selections below, then click <em>Run Simulation</em>.
+    </div>
+</div>
+{% endif %}
+
 <div class="row">
     <div class="col-lg-8">
-        <form method="post" id="simulation-form">
+        <form method="post" id="simulation-form"
+              data-preselected-datasets='{{ preselected_dataset_ids }}'
+              data-preselected-model="{{ preselected_model_id }}"
+              >
             {% csrf_token %}
 
             <!-- Step 1: Select Kinetic Model -->

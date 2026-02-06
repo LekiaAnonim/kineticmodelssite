@@ -1,4 +1,13 @@
 document.addEventListener('DOMContentLoaded', function () {
+    const simForm = document.getElementById('simulation-form');
+    // Pre-selected IDs from fuel-map play button
+    let preselectedDatasetIds = [];
+    let preselectedModelId = '';
+    try {
+        preselectedDatasetIds = JSON.parse(simForm?.dataset.preselectedDatasets || '[]');
+    } catch(e) {}
+    preselectedModelId = simForm?.dataset.preselectedModel || '';
+
     // Model search
     const modelSearch = document.getElementById('model-search');
     const modelList = document.getElementById('model-list');
@@ -22,9 +31,20 @@ document.addEventListener('DOMContentLoaded', function () {
             return;
         }
 
+        // Sort pre-selected model to the top
+        if (preselectedModelId) {
+            models.sort(function (a, b) {
+                const aSelected = String(a.id) === String(preselectedModelId) ? 0 : 1;
+                const bSelected = String(b.id) === String(preselectedModelId) ? 0 : 1;
+                return aSelected - bSelected;
+            });
+        }
+
         models.forEach(function (model) {
+            const isPreselected = preselectedModelId && String(model.id) === String(preselectedModelId);
             const wrapper = document.createElement('div');
-            wrapper.className = 'model-item d-flex align-items-center p-2 border-bottom';
+            wrapper.className = 'model-item d-flex align-items-center p-2 border-bottom'
+                + (isPreselected ? ' bg-success-subtle' : '');
             wrapper.dataset.name = (model.model_name || '').toLowerCase();
 
             const input = document.createElement('input');
@@ -33,6 +53,11 @@ document.addEventListener('DOMContentLoaded', function () {
             input.name = 'kinetic_model';
             input.value = model.id;
             input.id = `model_${model.id}`;
+
+            // Pre-select if matching
+            if (preselectedModelId && String(model.id) === String(preselectedModelId)) {
+                input.checked = true;
+            }
 
             const label = document.createElement('label');
             label.className = 'flex-grow-1 mb-0';
@@ -152,9 +177,21 @@ document.addEventListener('DOMContentLoaded', function () {
             return;
         }
 
+        // Sort pre-selected datasets to the top
+        if (preselectedDatasetIds.length > 0) {
+            datasets.sort(function (a, b) {
+                const aSelected = preselectedDatasetIds.includes(a.id) ? 0 : 1;
+                const bSelected = preselectedDatasetIds.includes(b.id) ? 0 : 1;
+                return aSelected - bSelected;
+            });
+        }
+
         datasets.forEach(function (dataset) {
+            const isPreselected = preselectedDatasetIds.length > 0 &&
+                preselectedDatasetIds.includes(dataset.id);
             const wrapper = document.createElement('div');
-            wrapper.className = 'dataset-item d-flex align-items-start p-2 border-bottom';
+            wrapper.className = 'dataset-item d-flex align-items-start p-2 border-bottom'
+                + (isPreselected ? ' bg-success-subtle' : '');
             wrapper.dataset.fuel = (dataset.fuel_species || []).join(', ').toLowerCase();
             wrapper.dataset.type = (dataset.experiment_type || '').toLowerCase();
             wrapper.dataset.apparatus = (dataset.apparatus_kind || '').toLowerCase();
@@ -170,6 +207,12 @@ document.addEventListener('DOMContentLoaded', function () {
             input.id = `dataset_${dataset.id}`;
             input.style.minWidth = '16px';
             input.style.minHeight = '16px';
+
+            // Pre-select if in the fuel-map batch
+            if (preselectedDatasetIds.length > 0 &&
+                preselectedDatasetIds.includes(dataset.id)) {
+                input.checked = true;
+            }
 
             const label = document.createElement('label');
             label.className = 'flex-grow-1';
@@ -221,6 +264,18 @@ document.addEventListener('DOMContentLoaded', function () {
 
             input.addEventListener('change', updateSelectedCount);
         });
+
+        // Insert a visual separator after the pre-selected block
+        if (preselectedDatasetIds.length > 0) {
+            const preselectedItems = datasetList.querySelectorAll('.dataset-item.bg-success-subtle');
+            const lastPreselected = preselectedItems[preselectedItems.length - 1];
+            if (lastPreselected && lastPreselected.nextSibling) {
+                const sep = document.createElement('div');
+                sep.className = 'text-center text-muted small py-1 bg-light border-bottom border-top';
+                sep.innerHTML = `<i class="bi bi-dash-lg"></i> ${preselectedDatasetIds.length} pre-selected above &mdash; other datasets below <i class="bi bi-dash-lg"></i>`;
+                lastPreselected.after(sep);
+            }
+        }
 
         if (datasetCount) datasetCount.textContent = String(datasets.length);
         updateSelectedCount();

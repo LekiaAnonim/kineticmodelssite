@@ -138,7 +138,149 @@ def get_chemked_dataset_path(
             if match:
                 return match
 
+    # ---- Fallback: generate ChemKED YAML from database ----
+    # Many datasets (especially those imported from ReSpecTh XML) have their
+    # data fully in the DB but no corresponding YAML file on disk.
+    if hasattr(dataset, 'pk'):
+        generated = _generate_chemked_yaml_from_db(dataset)
+        if generated:
+            logger.info(
+                f"Generated ChemKED YAML on-the-fly for {dataset.chemked_file_path}"
+            )
+            return generated
+
     return None
+
+
+def _generate_chemked_yaml_from_db(dataset: ExperimentDataset) -> Optional[str]:
+    """
+    Generate a ChemKED YAML file from database records when no physical
+    file exists on disk.
+
+    Only ignition-delay datasets are supported (the only type PyTeCK evaluates).
+
+    Returns:
+        Path to the generated temporary YAML file, or None on failure.
+    """
+    from chemked_database.models import (
+        CommonProperties, CompositionSpecies, IgnitionDelayDatapoint,
+    )
+
+    if not dataset or dataset.experiment_type != 'ignition delay':
+        return None
+
+    try:
+        cp = CommonProperties.objects.filter(dataset=dataset).first()
+        if not cp or not cp.composition_id:
+            return None
+
+        # --- composition ---
+        comp_species = CompositionSpecies.objects.filter(
+            composition_id=cp.composition_id
+        )
+        if not comp_species.exists():
+            return None
+
+        species_list = []
+        for sp in comp_species:
+            entry = {'species-name': sp.species_name}
+            if sp.inchi:
+                entry['InChI'] = sp.inchi
+            entry['amount'] = [float(sp.amount)]
+            species_list.append(entry)
+
+        comp_kind = cp.composition.kind if cp.composition else 'mole fraction'
+
+        # --- ignition type ---
+        ign_target = cp.ignition_target or 'pressure'
+        ign_type = cp.ignition_type or 'd/dt max'
+
+        # --- datapoints ---
+        datapoints = dataset.datapoints.all().order_by('temperature')
+        if not datapoints.exists():
+            return None
+
+        dp_list = []
+        for dp in datapoints:
+            # Get ignition delay
+            try:
+                igd = dp.ignition_delay
+                if not igd or not igd.ignition_delay:
+                    continue
+            except IgnitionDelayDatapoint.DoesNotExist:
+                continue
+
+            dp_entry = {
+                'temperature': [f'{dp.temperature} K'],
+                'ignition-delay': [f'{igd.ignition_delay} s'],
+                'ignition-type': {
+                    'target': ign_target,
+                    'type': ign_type,
+                },
+                'composition': {
+                    'kind': comp_kind,
+                    'species': species_list,
+                },
+            }
+
+            # Pressure — stored in Pa in DB, convert to atm for ChemKED
+            if dp.pressure:
+                pressure_atm = dp.pressure / 101325.0
+                dp_entry['pressure'] = [f'{pressure_atm} atm']
+
+            dp_list.append(dp_entry)
+
+        if not dp_list:
+            return None
+
+        # --- apparatus ---
+        # dataset.apparatus is a FK to Apparatus model; extract .kind string
+        if dataset.apparatus and hasattr(dataset.apparatus, 'kind'):
+            apparatus = dataset.apparatus.kind or 'shock tube'
+        else:
+            apparatus = 'shock tube'
+
+        # --- build the full YAML document ---
+        doc = {
+            'file-authors': [{'name': 'auto-generated'}],
+            'file-version': 0,
+            'chemked-version': '0.4.1',
+            'reference': {
+                'doi': dataset.reference_doi or '',
+                'authors': [],
+                'year': dataset.reference_year or 0,
+                'detail': f'Auto-generated from database record {dataset.chemked_file_path}',
+            },
+            'experiment-type': 'ignition delay',
+            'apparatus': {
+                'kind': apparatus,
+            },
+            'common-properties': {
+                'composition': {
+                    'kind': comp_kind,
+                    'species': species_list,
+                },
+                'ignition-type': {
+                    'target': ign_target,
+                    'type': ign_type,
+                },
+            },
+            'datapoints': dp_list,
+        }
+
+        # Write to a temp file
+        temp_dir = tempfile.mkdtemp(prefix='chemked_gen_')
+        filename = f'{dataset.chemked_file_path}.yaml'
+        filepath = os.path.join(temp_dir, filename)
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            yaml.dump(doc, f, default_flow_style=False, allow_unicode=True)
+
+        return filepath
+
+    except Exception as e:
+        logger.error(f"Failed to generate ChemKED YAML for {dataset}: {e}")
+        return None
 
 
 def get_chemked_root_dir() -> str:
@@ -230,16 +372,37 @@ def get_species_label_smiles_map(model: KineticModel) -> OrderedDict:
 
 
 def get_dataset_species_map(dataset: ExperimentDataset) -> OrderedDict:
-    """Return {species_name: smiles_or_name} for a ChemKED dataset."""
+    """Return {species_name: smiles_or_name} for a ChemKED dataset.
+
+    Tries the per-datapoint composition first (file-based datasets), then
+    falls back to CommonProperties.composition (DB-only / ReSpecTh imports
+    where composition lives at the dataset level, not per-datapoint).
+    """
     species_map = OrderedDict()
     if not dataset:
         return species_map
-        
+
+    composition = None
+
+    # 1. Try per-datapoint composition
     dp = dataset.datapoints.first()
-    if not dp or not dp.composition:
+    if dp and dp.composition_id:
+        composition = dp.composition
+
+    # 2. Fallback: CommonProperties composition
+    if composition is None:
+        try:
+            from chemked_database.models import CommonProperties
+            cp = CommonProperties.objects.filter(dataset=dataset).first()
+            if cp and cp.composition_id:
+                composition = cp.composition
+        except Exception:
+            pass
+
+    if composition is None:
         return species_map
 
-    for sp in dp.composition.species.all():
+    for sp in composition.species.all():
         key = sp.species_name
         value = sp.smiles or sp.species_name
         species_map[key] = value
@@ -436,7 +599,30 @@ def run_pyteck_simulation(
         Tuple of (success, message, results_dict)
     """
     from pyteck.eval_model import evaluate_model
-    
+    from pyteck.utils import units as _pyteck_units
+    import pyteck.simulation as _pyteck_sim
+
+    # Monkey-patch process_results to handle cases where ignition is not
+    # detected (empty peak array → "argmax of empty sequence").  We wrap
+    # the original method so that it sets a large sentinel value instead
+    # of crashing, allowing the rest of the PyTeCK pipeline to proceed.
+    _orig_process_results = _pyteck_sim.Simulation.process_results
+
+    def _safe_process_results(self):
+        try:
+            _orig_process_results(self)
+        except ValueError as exc:
+            if 'argmax' in str(exc) or 'empty sequence' in str(exc):
+                self.meta['simulated-ignition-delay'] = 1.0e10 * _pyteck_units.second
+                logger.warning(
+                    "Ignition not detected for a datapoint; "
+                    "setting simulated ignition delay to 1e10 s."
+                )
+            else:
+                raise
+
+    _pyteck_sim.Simulation.process_results = _safe_process_results
+
     try:
         # Export mechanism
         mechanism_path = get_cantera_mechanism_from_model(model)
@@ -459,6 +645,13 @@ def run_pyteck_simulation(
         if not dataset_path:
             return False, f"Dataset file not found: {dataset.chemked_file_path}", None
         
+        # If the dataset was generated on-the-fly (lives in a temp dir),
+        # use its parent directory as data_path so PyTeCK can find it.
+        if not dataset_path.startswith(chemked_root):
+            effective_data_path = os.path.dirname(dataset_path)
+        else:
+            effective_data_path = chemked_root
+        
         # Create temp directory for this run
         work_dir = tempfile.mkdtemp(prefix='pyteck_run_')
         
@@ -473,9 +666,12 @@ def run_pyteck_simulation(
         )
         
         # Write dataset list file
+        # PyTeCK joins data_path + <line from this file>, so the entry
+        # must match the actual filename relative to effective_data_path.
         dataset_list_path = os.path.join(work_dir, 'datasets.txt')
+        dataset_rel = os.path.relpath(dataset_path, effective_data_path)
         with open(dataset_list_path, 'w') as f:
-            f.write(f"{dataset.chemked_file_path}\n")
+            f.write(f"{dataset_rel}\n")
         
         # Run PyTeCK evaluation
         # NOTE: PyTeCK writes results YAML to the current working directory,
@@ -489,13 +685,15 @@ def run_pyteck_simulation(
                 model_name=mechanism_filename,
                 spec_keys_file=spec_keys_path,
                 dataset_file=dataset_list_path,
-                data_path=chemked_root,
+                data_path=effective_data_path,
                 model_path=mechanism_dir,
                 results_path=results_dir,
                 skip_validation=skip_validation,
             )
         finally:
             os.chdir(original_cwd)
+            # Restore the original process_results method
+            _pyteck_sim.Simulation.process_results = _orig_process_results
         
         # Parse results
         expected_results_file = os.path.join(
@@ -541,7 +739,33 @@ def run_pyteck_simulation(
             
     except Exception as e:
         logger.exception(f"PyTeCK simulation failed: {e}")
+        # Restore the original process_results method in case of error
+        try:
+            _pyteck_sim.Simulation.process_results = _orig_process_results
+        except NameError:
+            pass
         return False, str(e), None
+
+
+# Sentinel threshold – any simulated ignition delay ≥ this value (in seconds)
+# is treated as "ignition not detected" rather than a real prediction.
+_IGNITION_SENTINEL_THRESHOLD = 1.0e9  # seconds
+
+
+def _parse_value_magnitude(value):
+    """Extract the numeric magnitude from a PyTeCK value string like '1.0e10 s'.
+
+    Returns the float magnitude, or None if parsing fails.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    # PyTeCK stores values as "1.0e10 s" or "323.19 K" etc.
+    try:
+        return float(str(value).split()[0])
+    except (ValueError, IndexError):
+        return None
 
 
 def parse_pyteck_results(results: Dict[str, Any]) -> Dict[str, Any]:
@@ -552,7 +776,10 @@ def parse_pyteck_results(results: Dict[str, Any]) -> Dict[str, Any]:
         results: Parsed YAML results dict
         
     Returns:
-        Structured results with metrics and datapoints
+        Structured results with metrics and datapoints.
+        Each datapoint includes an ``ignition_detected`` flag (False when
+        the simulated delay equals the sentinel value) and a human-readable
+        ``note`` string when ignition was not detected.
     """
     parsed = {
         'average_error_function': results.get('average error function'),
@@ -567,13 +794,28 @@ def parse_pyteck_results(results: Dict[str, Any]) -> Dict[str, Any]:
         }
         
         for dp in ds.get('datapoints', []):
+            sim_delay_raw = dp.get('simulated ignition delay')
+            sim_mag = _parse_value_magnitude(sim_delay_raw)
+
+            ignition_detected = True
+            note = ''
+            if sim_mag is not None and sim_mag >= _IGNITION_SENTINEL_THRESHOLD:
+                ignition_detected = False
+                note = (
+                    f"Ignition was not detected for this datapoint. "
+                    f"A sentinel value of {sim_mag:.0e} s was used in place "
+                    f"of the simulated ignition delay."
+                )
+
             datapoint = {
                 'temperature': dp.get('temperature'),
                 'pressure': dp.get('pressure'),
                 'composition': dp.get('composition', []),
                 'composition_type': dp.get('composition type'),
                 'experimental_ignition_delay': dp.get('experimental ignition delay'),
-                'simulated_ignition_delay': dp.get('simulated ignition delay'),
+                'simulated_ignition_delay': sim_delay_raw,
+                'ignition_detected': ignition_detected,
+                'note': note,
             }
             dataset_result['datapoints'].append(datapoint)
         

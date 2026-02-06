@@ -31,7 +31,7 @@
         </div>
         <div class="section-body">
             <div class="row g-3">
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <a href="{% url 'analysis:run-create' %}" class="search-link">
                         <div class="d-flex align-items-center">
                             <div class="search-icon bg-primary-subtle text-primary">
@@ -45,7 +45,21 @@
                         </div>
                     </a>
                 </div>
-                <div class="col-md-4">
+                <div class="col-md-3">
+                    <a href="{% url 'analysis:fuel-map' %}" class="search-link">
+                        <div class="d-flex align-items-center">
+                            <div class="search-icon bg-info-subtle text-info">
+                                <i class="bi bi-fuel-pump"></i>
+                            </div>
+                            <div class="ms-3">
+                                <strong>Fuel-Model Map</strong>
+                                <small class="d-block text-muted">Fuel → model compatibility</small>
+                            </div>
+                            <i class="bi bi-chevron-right ms-auto text-muted"></i>
+                        </div>
+                    </a>
+                </div>
+                <div class="col-md-3">
                     <a href="{% url 'analysis:coverage-matrix' %}" class="search-link">
                         <div class="d-flex align-items-center">
                             <div class="search-icon bg-success-subtle text-success">
@@ -59,7 +73,7 @@
                         </div>
                     </a>
                 </div>
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <a href="{% url 'analysis:compare-models' %}" class="search-link">
                         <div class="d-flex align-items-center">
                             <div class="search-icon bg-warning-subtle text-warning">
