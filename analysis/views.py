@@ -861,11 +861,66 @@ class CoverageMatrixView(TemplateView):
         }
 
         # ---- Fuel-folder display names ----
-        fuel_display = {
+        # Well-known fuel name normalization for display
+        _FUEL_DISPLAY_NAMES = {
             'n-butanol': 'n-Butanol', 'i-butanol': 'i-Butanol',
             't-butanol': 't-Butanol', '2-butanol': '2-Butanol',
-            'n-heptane': 'n-Heptane',
+            'n-heptane': 'n-Heptane', 'n-pentane': 'n-Pentane',
+            'iso-pentane': 'iso-Pentane', 'neo-pentane': 'neo-Pentane',
+            'methane': 'Methane', 'ethane': 'Ethane', 'propane': 'Propane',
+            'n-butane': 'n-Butane', 'iso-butane': 'iso-Butane',
+            'hydrogen': 'Hydrogen', 'methanol': 'Methanol',
+            'ethanol': 'Ethanol', 'dimethyl ether': 'DME',
         }
+
+        def _nice_fuel_name(raw: str) -> str:
+            """Capitalize / prettify a fuel name for display."""
+            lower = raw.lower().strip()
+            if lower in _FUEL_DISPLAY_NAMES:
+                return _FUEL_DISPLAY_NAMES[lower]
+            # Generic: title-case but keep hyphens, e.g. "nc5h12" → "NC5H12"
+            if _re.match(r'^[a-z0-9]+$', lower):
+                return raw.upper()  # formula-like
+            return raw.replace('_', ' ').title()
+
+        def _fuel_for_dataset(ds) -> str:
+            """Determine the fuel name for a dataset.
+
+            Strategy (most-reliable first):
+            1. Use the dataset's composition to find the primary fuel species
+               (excludes O2, N2, Ar, He, etc.).
+            2. If the chemked_file_path has ≥ 2 path segments, the top-level
+               folder is typically the fuel (e.g. "n-heptane/Author/file.yaml").
+            3. Try to extract a fuel formula from the filename itself
+               (e.g. "NC5H12_JohnBugler_2016_10011004" → "NC5H12").
+            4. Fall back to "Other".
+            """
+            # --- 1. From composition (most reliable) ---
+            try:
+                fuels = ds.fuel_species  # property on ExperimentDataset
+                if fuels:
+                    return ', '.join(sorted(fuels))
+            except Exception:
+                pass
+
+            # --- 2. From folder structure ---
+            if ds.chemked_file_path:
+                parts = ds.chemked_file_path.split('/')
+                if len(parts) >= 2:
+                    # Top-level folder is the fuel name
+                    return parts[0]
+
+                # --- 3. Extract formula prefix from flat filename ---
+                # e.g. "NC5H12_JohnBugler_2016_10011004" → "NC5H12"
+                stem = parts[0].replace('.yaml', '')
+                m = _re.match(
+                    r'^([A-Za-z]*C\d+H\d+(?:[A-Za-z0-9]*)?)',
+                    stem,
+                )
+                if m:
+                    return m.group(1).upper()
+
+            return "Other"
 
         def _dataset_short_label(ds):
             """Concise per-dataset label (author + condition)."""
@@ -896,15 +951,10 @@ class CoverageMatrixView(TemplateView):
                 return f"{author} {year} ({tag})"
             return stem[:30]
 
-        def _fuel_folder(ds):
-            if not ds.chemked_file_path:
-                return "Other"
-            return ds.chemked_file_path.split("/")[0]
-
         # ---- Group datasets by fuel ----
         fuel_datasets = defaultdict(list)
         for ds in datasets_with_coverage:
-            fuel_datasets[_fuel_folder(ds)].append(
+            fuel_datasets[_fuel_for_dataset(ds)].append(
                 (ds, _dataset_short_label(ds))
             )
         # Disambiguate labels within each fuel group
@@ -922,7 +972,7 @@ class CoverageMatrixView(TemplateView):
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 1. MODEL × FUEL HEATMAP  (compact — scales to 100+ models)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        fuel_labels = [fuel_display.get(f, f) for f in fuel_order]
+        fuel_labels = [_nice_fuel_name(f) for f in fuel_order]
         model_labels = [m.model_name for m in models_with_coverage]
 
         # Build aggregated stats: per (model, fuel) → avg error
@@ -952,7 +1002,7 @@ class CoverageMatrixView(TemplateView):
             row_t = []
             for fuel in fuel_order:
                 stats = model_fuel_stats.get((model.model_name, fuel))
-                nice = fuel_display.get(fuel, fuel)
+                nice = _nice_fuel_name(fuel)
                 if stats:
                     log_val = math.log10(max(stats['avg'], 0.01))
                     row_z.append(log_val)
@@ -1014,7 +1064,7 @@ class CoverageMatrixView(TemplateView):
             fuel_breakdown = []
             for fuel in fuel_order:
                 stats = model_fuel_stats.get((model.model_name, fuel))
-                nice = fuel_display.get(fuel, fuel)
+                nice = _nice_fuel_name(fuel)
                 if stats:
                     fuel_breakdown.append({
                         'fuel': nice,
@@ -1046,7 +1096,7 @@ class CoverageMatrixView(TemplateView):
         for fuel in fuel_order:
             pairs = fuel_datasets[fuel]
             ds_labels = [lbl for _, lbl in pairs]
-            nice = fuel_display.get(fuel, fuel)
+            nice = _nice_fuel_name(fuel)
 
             traces = []
             for model in models_with_coverage:
@@ -1096,7 +1146,7 @@ class CoverageMatrixView(TemplateView):
             }
 
         context['fuel_tabs'] = [
-            {'key': f, 'label': fuel_display.get(f, f), 'count': len(fuel_datasets[f])}
+            {'key': f, 'label': _nice_fuel_name(f), 'count': len(fuel_datasets[f])}
             for f in fuel_order
         ]
         context['drill_down_json'] = json.dumps(drill_down)

@@ -162,7 +162,7 @@ def _patch_duplicate_reactions_yaml(content):
     the equation line for each duplicate reaction that doesn't already have it.
     This preserves the original Cantera YAML formatting exactly.
     """
-    from collections import Counter
+    from collections import defaultdict
 
     try:
         text = content.decode("utf-8")
@@ -183,24 +183,80 @@ def _patch_duplicate_reactions_yaml(content):
         rhs = tuple(sorted(s.strip() for s in parts[2].split("+") if s.strip()))
         return frozenset([lhs, rhs])
 
-    # (line_index, indent, signature)
-    entries = []
+    def _all_sigs(eq_str):
+        """Return all canonical signatures for an equation.
+
+        Cantera considers a three-body reaction ``A + M <=> B + M`` to be
+        a duplicate of any specific-collider variant ``A + X <=> B + X``
+        (where X is a real species).  To detect these, three-body reactions
+        expand M into every species that appears in the mechanism's reaction
+        list.  Non-M reactions only produce their literal signature.
+        """
+        base = _canonical_sig(eq_str)
+        if base is None:
+            return []
+
+        parts = arrow_re.split(eq_str, maxsplit=1)
+        lhs_raw = [s.strip() for s in parts[0].split("+") if s.strip()]
+        rhs_raw = [s.strip() for s in parts[2].split("+") if s.strip()]
+
+        sigs = [base]
+
+        if "M" in lhs_raw and "M" in rhs_raw:
+            # Three-body reaction: generate variants with M replaced by
+            # each species seen in all equations, so they match any
+            # specific-collider duplicate.
+            lhs_no_m = [s for s in lhs_raw if s != "M"]
+            rhs_no_m = [s for s in rhs_raw if s != "M"]
+            for sp in all_species_in_reactions:
+                lhs_v = sorted(lhs_no_m + [sp])
+                rhs_v = sorted(rhs_no_m + [sp])
+                sigs.append(frozenset([tuple(lhs_v), tuple(rhs_v)]))
+
+        return sigs
+
+    # ── 1a. Collect all species names that appear in reaction equations ──
+    # This is needed for three-body M expansion.
+    all_species_in_reactions: set = set()
+    eq_lines_data = []  # (line_index, indent, eq_text)
     for idx, line in enumerate(lines):
-        m = eq_re.match(line)
-        if m:
-            indent = m.group(1)       # leading whitespace before "-"
-            eq_text = m.group(2)
-            sig = _canonical_sig(eq_text)
-            entries.append((idx, indent, sig))
+        m_match = eq_re.match(line)
+        if m_match:
+            indent = m_match.group(1)
+            eq_text = m_match.group(2)
+            eq_lines_data.append((idx, indent, eq_text))
+            # Extract species names from this equation
+            parts = arrow_re.split(eq_text, maxsplit=1)
+            for side in (parts[0], parts[2] if len(parts) >= 3 else ""):
+                for sp in side.split("+"):
+                    sp = sp.strip()
+                    if sp and sp != "M" and sp != "(+M)":
+                        all_species_in_reactions.add(sp)
+
+    # (line_index, indent, primary_signature, all_signatures)
+    entries = []
+    for idx, indent, eq_text in eq_lines_data:
+        sigs = _all_sigs(eq_text)
+        primary = sigs[0] if sigs else None
+        entries.append((idx, indent, primary, sigs))
 
     if not entries:
         return content
 
     # ── 2. Find which signatures appear more than once ──
-    sig_counts = Counter(sig for _, _, sig in entries if sig is not None)
-    dup_sigs = {sig for sig, cnt in sig_counts.items() if cnt > 1}
+    # Build a map from every signature variant to the list of entry indices
+    sig_to_entries = defaultdict(list)
+    for pos, (_, _, _, sigs) in enumerate(entries):
+        for s in sigs:
+            sig_to_entries[s].append(pos)
 
-    if not dup_sigs:
+    # An entry is a duplicate if ANY of its signatures maps to >1 entry
+    dup_positions = set()
+    for positions in sig_to_entries.values():
+        if len(positions) > 1:
+            dup_positions.update(positions)
+
+    if not dup_positions:
         return content
 
     # ── 3. For each duplicate, check whether ``duplicate: true`` already
@@ -210,8 +266,8 @@ def _patch_duplicate_reactions_yaml(content):
     dup_re = re.compile(r"^\s+duplicate:\s*true", re.IGNORECASE)
     inserts = []                      # (line_index_after_which, indent)
 
-    for pos, (line_idx, indent, sig) in enumerate(entries):
-        if sig not in dup_sigs:
+    for pos, (line_idx, indent, _, _sigs) in enumerate(entries):
+        if pos not in dup_positions:
             continue
         # Determine the end of this reaction block
         if pos + 1 < len(entries):

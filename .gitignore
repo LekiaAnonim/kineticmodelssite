@@ -21,4 +21,4 @@ importer.log
 /static/
 media/
 *run_logs
-*run_results
+*run_resultsfixtures/full_database.json

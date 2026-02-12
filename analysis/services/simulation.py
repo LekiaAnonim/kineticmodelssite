@@ -5,6 +5,7 @@ Core PyTeCK simulation execution logic extracted from notebook.
 """
 
 import os
+import re
 import tempfile
 import logging
 import yaml
@@ -63,11 +64,38 @@ def get_mechanism_species_names(mechanism_path: str) -> List[str]:
     Returns:
         List of species names in the mechanism
     """
+    # Try loading the full Solution first (species + kinetics).
     try:
         solution = ct.Solution(mechanism_path)
         return list(solution.species_names)
     except Exception as e:
-        logger.error(f"Error loading mechanism {mechanism_path}: {e}")
+        logger.warning(f"Full mechanism load failed ({e}); "
+                       "trying species-only load")
+
+    # Fallback: load only the thermo/species phase, skipping reaction
+    # validation.  This handles mechanisms with undeclared duplicate
+    # reactions or other kinetics errors — we only need species names.
+    try:
+        phase = ct.ThermoPhase(mechanism_path)
+        return list(phase.species_names)
+    except Exception as e:
+        logger.warning(f"ThermoPhase load failed ({e}); "
+                       "trying YAML parse")
+
+    # Last resort: extract species names from YAML with a regex.
+    # Cantera YAML files list species as ``- name: XYZ`` entries under
+    # a top-level ``species:`` key.  We scan for those lines directly
+    # because yaml.safe_load may choke on Cantera-specific formatting.
+    try:
+        with open(mechanism_path, 'r') as f:
+            text = f.read()
+        names = re.findall(r'^\s*-\s+name:\s*(\S+)', text, re.MULTILINE)
+        if names:
+            return names
+        logger.error(f"No species names found in {mechanism_path}")
+        return []
+    except Exception as e:
+        logger.error(f"Cannot extract species from {mechanism_path}: {e}")
         return []
 
 
@@ -322,35 +350,6 @@ def _normalize_label(label: str) -> str:
     return "".join(ch for ch in label.upper() if ch.isalnum())
 
 
-def _best_normalized_match(target: str, normalized_candidates: Dict[str, str]) -> Optional[str]:
-    """Find best candidate whose normalized name matches target.
-    
-    Prefers:
-    1. Exact match (always wins)
-    2. Prefix match with smallest length diff (e.g. O2 matches O225 not CO22)
-    3. Substring match with smallest length diff
-    """
-    if not target:
-        return None
-    best = None
-    best_len_diff = float('inf')
-    best_is_prefix = False
-    for norm, original in normalized_candidates.items():
-        if target == norm:
-            return original  # Exact match always wins
-        if target in norm or norm in target:
-            diff = abs(len(norm) - len(target))
-            is_prefix = norm.startswith(target) or target.startswith(norm)
-            # Prefer prefix matches over substring matches;
-            # among same type, prefer smaller length diff
-            if (is_prefix and not best_is_prefix) or \
-               (is_prefix == best_is_prefix and diff < best_len_diff):
-                best = original
-                best_len_diff = diff
-                best_is_prefix = is_prefix
-    return best
-
-
 def get_species_label_smiles_map(model: KineticModel) -> OrderedDict:
     """
     Return OrderedDict of {label: smiles} for a KineticModel.
@@ -433,7 +432,6 @@ def build_spec_keys_for_dataset(
     # Also build a map from base name (without index suffix) to mechanism name.
     # Mechanism names follow the pattern "label(index)" e.g. "O2(25)", "sc4h9oh(55)".
     # Stripping the "(index)" gives the base name used during export.
-    import re
     base_to_mech: Dict[str, str] = {}
     if model_species_names:
         for name in model_species_names:
@@ -530,17 +528,56 @@ def build_spec_keys_for_dataset(
                 pass
 
         # 2. Exact normalized label match against mechanism names
+        #    e.g. dataset "N2" matches mechanism "N2" (both normalize to "N2")
         if not model_label and model_species_names:
             model_label = normalized_model_names.get(ds_norm)
 
-        # 3. Substring match
-        if not model_label and model_species_names:
-            model_label = _best_normalized_match(ds_norm, normalized_model_names)
+        # 3. Base-name match — mechanism names like "Ar(1)" have base "Ar"
+        #    which normalizes to "AR".  Dataset species "Ar" or "AR" also
+        #    normalize to "AR", so this catches case-insensitive + index
+        #    suffix mismatches.
+        if not model_label and base_to_mech:
+            model_label = base_to_mech.get(ds_norm)
 
         # 4. Direct label match against DB labels
         if not model_label and ds_label in model_label_smiles:
             model_label = ds_label
 
+        # 5. Case-insensitive search against DB labels, then resolve
+        #    through the DB alias chain to find the mechanism name.
+        if not model_label:
+            for db_label, smiles in model_label_smiles.items():
+                if _normalize_label(db_label) == ds_norm:
+                    # Found a matching DB label — resolve to mechanism name
+                    resolved = (
+                        normalized_model_names.get(ds_norm)
+                        or base_to_mech.get(ds_norm)
+                    )
+                    if not resolved:
+                        # Try all aliases for this Species in the DB
+                        sn_obj = SpeciesName.objects.filter(
+                            kinetic_model=model, name=db_label
+                        ).select_related("species").first()
+                        if sn_obj:
+                            for alias in SpeciesName.objects.filter(
+                                species=sn_obj.species
+                            ).values_list("name", flat=True):
+                                if not alias:
+                                    continue
+                                alias_norm = _normalize_label(alias)
+                                candidate = (
+                                    normalized_model_names.get(alias_norm)
+                                    or base_to_mech.get(alias_norm)
+                                )
+                                if candidate:
+                                    resolved = candidate
+                                    break
+                    model_label = resolved or db_label
+                    break
+
+        # If still unmapped, leave as the dataset label.  The pre-flight
+        # validation in run_pyteck_simulation() will catch this and return
+        # a clear error instead of letting Cantera crash.
         spec_keys[ds_label] = model_label or ds_label
 
     return spec_keys
@@ -664,6 +701,40 @@ def run_pyteck_simulation(
             mechanism_filename=mechanism_filename,
             model_species_names=model_species_names
         )
+
+        # ── Pre-flight validation ──
+        # Verify every mapped species name actually exists in the mechanism.
+        # If any species can't be mapped (no InChI/SMILES match, no
+        # normalized label match), abort early with a clear error instead
+        # of letting Cantera crash with "Unknown species".
+        spec_keys = build_spec_keys_for_dataset(
+            model, dataset, model_species_names
+        )
+
+        logger.info(
+            f"Pre-flight spec_keys for {dataset.chemked_file_path}: "
+            f"{dict(spec_keys)}"
+        )
+
+        mech_set = set(model_species_names)
+        unmapped_species = []
+        for ds_label, mapped_name in spec_keys.items():
+            if mapped_name not in mech_set:
+                unmapped_species.append((ds_label, mapped_name))
+
+        if unmapped_species:
+            names = ", ".join(f"{d}→{m}" for d, m in unmapped_species)
+            msg = (
+                f"Cannot run simulation: dataset species could not be mapped "
+                f"to mechanism species: [{names}]. "
+                f"This usually means the dataset requires species that are "
+                f"not present in this kinetic model, or the species lacks a "
+                f"unique identifier (InChI/SMILES) in the database. "
+                f"Mechanism has {len(model_species_names)} species. "
+                f"First 20: {model_species_names[:20]}"
+            )
+            logger.error(msg)
+            return False, msg, None
         
         # Write dataset list file
         # PyTeCK joins data_path + <line from this file>, so the entry

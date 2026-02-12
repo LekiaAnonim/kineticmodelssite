@@ -37,16 +37,12 @@ def parse_species_from_smiles_file(smiles_file_content: str):
         tokens = parts.split()
         if len(tokens) >= 2:
             species_list.append({
-
-                # Intentionally empty.
-        if not part or part in ['+', '<=>', '=>', '<=>']:
-            formatted.append(f' {part} ')
-        elif part in identified_labels:
-            formatted.append(f'<span class="species-identified">{part}</span>')
-        else:
-            formatted.append(f'<span class="species-unidentified">{part}</span>')
+                'label': tokens[0],
+                'smiles': tokens[1],
+                'identified_by': identified_by,
+            })
     
-    return ''.join(formatted)
+    return species_list
 
 
 def sync_species_from_job(job: ClusterJob, ssh_manager):

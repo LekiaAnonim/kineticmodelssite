@@ -337,7 +337,6 @@
                     <a class="btn btn-outline-danger btn-sm" href="{% url 'analysis:api-run-log' run.id %}">
                         <i class="bi bi-download me-1"></i>View log
                     </a>
-                    <span class="small text-muted align-self-center">Includes traceback + model/dataset debug info</span>
                 </div>
 
                 {% if run.traceback %}
@@ -346,30 +345,6 @@
                     <pre class="mt-2 small text-danger bg-danger-subtle p-2 rounded">{{ run.traceback }}</pre>
                 </details>
                 {% endif %}
-
-                <div class="border rounded p-2 mb-3 bg-light">
-                    <div class="small text-muted mb-1">Debug info</div>
-                    <ul class="small mb-0 ps-3">
-                        <li><strong>Model:</strong> {{ run.kinetic_model.model_name }}</li>
-                        <li><strong>Model reactions file:</strong> {{ run.kinetic_model.chemkin_reactions_file.name|default:"—" }}</li>
-                        <li><strong>Model thermo file:</strong> {{ run.kinetic_model.chemkin_thermo_file.name|default:"—" }}</li>
-                        <li><strong>Model transport file:</strong> {{ run.kinetic_model.chemkin_transport_file.name|default:"—" }}</li>
-                        <li><strong>Dataset:</strong> {{ run.dataset.short_name }}</li>
-                        <li><strong>ChemKED path:</strong> {{ run.dataset.chemked_file_path|default:"—" }}</li>
-                        <li><strong>Results directory:</strong> {{ run.results_dir|default:"—" }}</li>
-                        <li><strong>Shared log file:</strong> {{ BASE_DIR|default:"" }}/analysis/run_logs/simulation_runs.log</li>
-                        <li><strong>Skip validation:</strong> {{ run.skip_validation }}</li>
-                    </ul>
-                </div>
-
-                <div class="alert alert-warning small mb-0">
-                    <strong>Common causes:</strong>
-                    <ul class="mb-0 ps-3">
-                        <li>Missing or invalid ChemKED dataset fields</li>
-                        <li>Model file path not found or unreadable</li>
-                        <li>PyTeCK runtime error (check logs)</li>
-                    </ul>
-                </div>
             </div>
         </div>
         {% endif %}

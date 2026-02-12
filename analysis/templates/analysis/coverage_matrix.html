@@ -137,42 +137,56 @@
     </div>
 </div>
 
-<!-- SECTION 3: Per-Fuel Drill-Down (Tabbed) -->
+<!-- SECTION 3: Per-Fuel Drill-Down -->
 <div class="data-section mb-4" id="fuel-detail-section">
-    <div class="section-header">
+    <div class="section-header d-flex align-items-center justify-content-between flex-wrap gap-2">
         <h6 class="mb-0"><i class="bi bi-bar-chart-steps me-2"></i>Per-Dataset Detail</h6>
+        <!-- Fuel selector dropdown (scales to any number of fuels) -->
+        <div class="d-flex align-items-center gap-2">
+            <label for="fuelSelect" class="form-label mb-0 small text-muted text-nowrap">Fuel:</label>
+            <select class="form-select form-select-sm" id="fuelSelect" style="min-width:180px;max-width:280px;">
+                {% for ft in fuel_tabs %}
+                <option value="{{ ft.key }}" {% if forloop.first %}selected{% endif %}>
+                    {{ ft.label }} ({{ ft.count }} datasets)
+                </option>
+                {% endfor %}
+            </select>
+        </div>
     </div>
     <div class="section-body">
-        <p class="small text-muted mb-3">
-            Select a fuel to see error function values for every individual dataset.
+        <p class="small text-muted mb-2">
+            Select a fuel above, then browse or search datasets below.
             Each bar is one model; hover for details.
         </p>
-        <!-- Fuel tabs -->
-        <ul class="nav nav-pills nav-fill mb-3" id="fuelTabs" role="tablist">
-            {% for ft in fuel_tabs %}
-            <li class="nav-item" role="presentation">
-                <button class="nav-link {% if forloop.first %}active{% endif %} py-2 px-3"
-                        id="tab-{{ ft.key }}"
-                        data-bs-toggle="pill"
-                        data-bs-target="#panel-{{ ft.key }}"
-                        data-fuel="{{ ft.key }}"
-                        type="button" role="tab">
-                    {{ ft.label }}
-                    <span class="badge bg-secondary-subtle text-secondary ms-1">{{ ft.count }}</span>
-                </button>
-            </li>
-            {% endfor %}
-        </ul>
-        <!-- Tab content -->
-        <div class="tab-content" id="fuelTabContent">
-            {% for ft in fuel_tabs %}
-            <div class="tab-pane fade {% if forloop.first %}show active{% endif %}"
-                 id="panel-{{ ft.key }}" role="tabpanel">
-                <div style="overflow-x: auto;">
-                    <div id="chart-{{ ft.key }}" style="min-height: 360px;"></div>
-                </div>
+
+        <!-- Dataset search / filter within selected fuel -->
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="position-relative flex-grow-1" style="max-width:360px;">
+                <i class="bi bi-search position-absolute" style="left:10px;top:50%;transform:translateY(-50%);color:#adb5bd;"></i>
+                <input type="text" class="form-control form-control-sm ps-4"
+                       id="datasetSearchInput"
+                       placeholder="Search datasets by name, author, conditions…">
             </div>
-            {% endfor %}
+            <span class="small text-muted text-nowrap" id="datasetMatchCount"></span>
+        </div>
+
+        <!-- Paginated dataset list for the selected fuel -->
+        <div id="datasetListContainer" class="mb-3" style="max-height:220px;overflow-y:auto;border:1px solid #e9ecef;border-radius:6px;">
+            <!-- Populated dynamically by JS -->
+        </div>
+        <div class="d-flex align-items-center justify-content-between mb-3" id="datasetPaginationRow">
+            <button class="btn btn-outline-secondary btn-sm" id="datasetPrevBtn" disabled>
+                <i class="bi bi-chevron-left me-1"></i>Previous
+            </button>
+            <small class="text-muted" id="datasetPageInfo"></small>
+            <button class="btn btn-outline-secondary btn-sm" id="datasetNextBtn" disabled>
+                Next<i class="bi bi-chevron-right ms-1"></i>
+            </button>
+        </div>
+
+        <!-- Chart for selected fuel -->
+        <div style="overflow-x:auto;">
+            <div id="fuelDrillChart" style="min-height:380px;"></div>
         </div>
     </div>
 </div>
@@ -303,58 +317,200 @@
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     var plotCfg = {responsive: true, displayModeBar: false};
+    var DATASETS_PER_PAGE = 50;  // Show 50 datasets at a time in the chart
 
-    // 1. Overview Heatmap
+    // ── 1. Overview Heatmap ──
     {% if heatmap_json %}
     var hmSpec = {{ heatmap_json|safe }};
     Plotly.newPlot('overview-heatmap', hmSpec.data, hmSpec.layout, plotCfg);
 
-    // Click a heatmap cell -> activate the matching fuel tab & scroll
+    // Click a heatmap cell → select matching fuel in dropdown & scroll
     document.getElementById('overview-heatmap').on('plotly_click', function(evtData) {
         if (!evtData.points || !evtData.points.length) return;
         var fuelLabel = evtData.points[0].x;
-        document.querySelectorAll('#fuelTabs button').forEach(function(btn) {
-            if (btn.textContent.trim().indexOf(fuelLabel) === 0) {
-                btn.click();
+        var sel = document.getElementById('fuelSelect');
+        for (var i = 0; i < sel.options.length; i++) {
+            if (sel.options[i].text.indexOf(fuelLabel) === 0) {
+                sel.value = sel.options[i].value;
+                sel.dispatchEvent(new Event('change'));
                 setTimeout(function() {
                     document.getElementById('fuel-detail-section').scrollIntoView({behavior: 'smooth', block: 'start'});
                 }, 100);
+                break;
             }
-        });
+        }
     });
     {% endif %}
 
-    // 2. Per-fuel drill-down charts (lazy-render on tab show)
+    // ── 2. Per-Fuel Drill-Down with Search + Pagination ──
     {% if drill_down_json %}
     var drillData = {{ drill_down_json|safe }};
-    var rendered = {};
 
-    function renderFuel(key) {
-        if (rendered[key]) return;
-        var spec = drillData[key];
-        if (!spec) return;
-        var el = document.getElementById('chart-' + key);
-        if (!el) return;
-        Plotly.newPlot(el, spec.data, spec.layout, plotCfg);
-        rendered[key] = true;
+    // State
+    var currentFuel = null;
+    var currentPage = 0;
+    var filteredIndices = [];   // indices into the full dataset label list
+
+    var fuelSelect = document.getElementById('fuelSelect');
+    var searchInput = document.getElementById('datasetSearchInput');
+    var matchCount = document.getElementById('datasetMatchCount');
+    var listContainer = document.getElementById('datasetListContainer');
+    var prevBtn = document.getElementById('datasetPrevBtn');
+    var nextBtn = document.getElementById('datasetNextBtn');
+    var pageInfo = document.getElementById('datasetPageInfo');
+    var chartEl = document.getElementById('fuelDrillChart');
+
+    // ── helpers ──
+    function getAllLabels(fuel) {
+        var spec = drillData[fuel];
+        if (!spec || !spec.data || !spec.data.length) return [];
+        return spec.data[0].x || [];
     }
 
-    // Render the first tab immediately
-    {% for ft in fuel_tabs %}{% if forloop.first %}
-    renderFuel('{{ ft.key }}');
-    {% endif %}{% endfor %}
+    function applyFilter(fuel, query) {
+        var labels = getAllLabels(fuel);
+        query = (query || '').trim().toLowerCase();
+        var indices = [];
+        for (var i = 0; i < labels.length; i++) {
+            if (!query || labels[i].toLowerCase().indexOf(query) !== -1) {
+                indices.push(i);
+            }
+        }
+        return indices;
+    }
 
-    // Lazy-render + resize on tab switch
-    document.querySelectorAll('#fuelTabs button').forEach(function(btn) {
-        btn.addEventListener('shown.bs.tab', function() {
-            var key = this.getAttribute('data-fuel');
-            renderFuel(key);
-            setTimeout(function() {
-                var el = document.getElementById('chart-' + key);
-                if (el && el.data) Plotly.Plots.resize(el);
-            }, 60);
-        });
+    function renderDatasetList(fuel, indices, page) {
+        var labels = getAllLabels(fuel);
+        var start = page * DATASETS_PER_PAGE;
+        var end = Math.min(start + DATASETS_PER_PAGE, indices.length);
+        var totalPages = Math.ceil(indices.length / DATASETS_PER_PAGE) || 1;
+
+        // Build compact list
+        var html = '<div class="list-group list-group-flush">';
+        if (indices.length === 0) {
+            html += '<div class="list-group-item text-muted small text-center py-3">No datasets match your search.</div>';
+        } else {
+            for (var i = start; i < end; i++) {
+                var idx = indices[i];
+                // Find best error across models for this dataset
+                var spec = drillData[fuel];
+                var bestErr = null;
+                for (var t = 0; t < spec.data.length; t++) {
+                    var v = spec.data[t].y[idx];
+                    if (v !== null && v !== undefined && (bestErr === null || v < bestErr)) {
+                        bestErr = v;
+                    }
+                }
+                var errBadge = '';
+                if (bestErr !== null) {
+                    var cls = bestErr < 1 ? 'bg-success-subtle text-success'
+                            : bestErr < 10 ? 'bg-warning-subtle text-warning'
+                            : bestErr < 100 ? 'bg-warning-subtle text-warning'
+                            : 'bg-danger-subtle text-danger';
+                    errBadge = '<span class="badge ' + cls + ' ms-auto">' + bestErr.toFixed(1) + '</span>';
+                }
+                html += '<div class="list-group-item d-flex align-items-center py-1 px-3 small">'
+                      + '<span class="text-muted me-2" style="min-width:28px;">' + (i + 1) + '.</span>'
+                      + '<span class="text-truncate">' + labels[idx] + '</span>'
+                      + errBadge
+                      + '</div>';
+            }
+        }
+        html += '</div>';
+        listContainer.innerHTML = html;
+
+        // Pagination controls
+        prevBtn.disabled = (page <= 0);
+        nextBtn.disabled = (end >= indices.length);
+        pageInfo.textContent = indices.length > 0
+            ? 'Showing ' + (start + 1) + '–' + end + ' of ' + indices.length + ' datasets (page ' + (page + 1) + '/' + totalPages + ')'
+            : '';
+        matchCount.textContent = indices.length + ' dataset' + (indices.length !== 1 ? 's' : '');
+
+        // Hide pagination row if only one page
+        document.getElementById('datasetPaginationRow').style.display =
+            (indices.length <= DATASETS_PER_PAGE) ? 'none' : '';
+    }
+
+    function renderChart(fuel, indices, page) {
+        var spec = drillData[fuel];
+        if (!spec) { Plotly.purge(chartEl); return; }
+
+        var start = page * DATASETS_PER_PAGE;
+        var end = Math.min(start + DATASETS_PER_PAGE, indices.length);
+        var pageIndices = indices.slice(start, end);
+
+        var labels = getAllLabels(fuel);
+        var pageLabels = pageIndices.map(function(i) { return labels[i]; });
+
+        // Slice each model trace to only the current page indices
+        var traces = [];
+        for (var t = 0; t < spec.data.length; t++) {
+            var orig = spec.data[t];
+            var ySlice = pageIndices.map(function(i) { return orig.y[i]; });
+            var hSlice = pageIndices.map(function(i) { return orig.text[i]; });
+            traces.push({
+                type: 'bar',
+                name: orig.name,
+                x: pageLabels,
+                y: ySlice,
+                text: hSlice,
+                hoverinfo: 'text',
+                marker: orig.marker,
+            });
+        }
+
+        var nDs = pageLabels.length;
+        var nM = spec.data.length;
+        var chartW = Math.max(400, nDs * nM * 18 + 120);
+
+        var layout = {
+            barmode: 'group',
+            yaxis: {title: 'Error Function', type: 'log', gridcolor: '#eee'},
+            xaxis: {tickangle: -40, tickfont: {size: 9}, type: 'category'},
+            margin: {l: 60, r: 20, t: 10, b: 120},
+            height: 380,
+            width: chartW,
+            legend: {orientation: 'h', y: 1.08, x: 0.5, xanchor: 'center'},
+            plot_bgcolor: '#fff',
+            paper_bgcolor: '#fff',
+        };
+
+        Plotly.newPlot(chartEl, traces, layout, plotCfg);
+    }
+
+    function refresh() {
+        renderDatasetList(currentFuel, filteredIndices, currentPage);
+        renderChart(currentFuel, filteredIndices, currentPage);
+    }
+
+    // ── Events ──
+    fuelSelect.addEventListener('change', function() {
+        currentFuel = this.value;
+        currentPage = 0;
+        searchInput.value = '';
+        filteredIndices = applyFilter(currentFuel, '');
+        refresh();
     });
+
+    searchInput.addEventListener('input', function() {
+        currentPage = 0;
+        filteredIndices = applyFilter(currentFuel, this.value);
+        refresh();
+    });
+
+    prevBtn.addEventListener('click', function() {
+        if (currentPage > 0) { currentPage--; refresh(); }
+    });
+    nextBtn.addEventListener('click', function() {
+        var totalPages = Math.ceil(filteredIndices.length / DATASETS_PER_PAGE);
+        if (currentPage < totalPages - 1) { currentPage++; refresh(); }
+    });
+
+    // ── Initial render (first fuel) ──
+    currentFuel = fuelSelect.value;
+    filteredIndices = applyFilter(currentFuel, '');
+    refresh();
     {% endif %}
 });
 </script>
