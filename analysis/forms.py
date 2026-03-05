@@ -181,3 +181,61 @@ class SpeciesMappingForm(forms.Form):
             'placeholder': 'Reason for override...'
         })
     )
+
+
+# ---------------------------------------------------------------------------
+# Inline species-mapping review (pre-simulation)
+# ---------------------------------------------------------------------------
+
+class SpeciesMappingReviewForm(forms.Form):
+    """
+    One row per species in the mapping table shown before launching a run.
+
+    Hidden fields carry the auto-matched values; the user can edit
+    ``model_species_name`` to override.
+    """
+    dataset_species_name = forms.CharField(
+        max_length=200,
+        widget=forms.HiddenInput(),
+    )
+    original_model_species_name = forms.CharField(
+        max_length=200,
+        widget=forms.HiddenInput(),
+        required=False,
+    )
+    model_species_name = forms.CharField(
+        max_length=200,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control form-control-sm',
+        }),
+    )
+    confidence = forms.FloatField(
+        widget=forms.HiddenInput(),
+        required=False,
+    )
+    mapping_method = forms.CharField(
+        max_length=30,
+        widget=forms.HiddenInput(),
+        required=False,
+    )
+    # True when the user edits the auto-matched value
+    is_override = forms.BooleanField(
+        required=False,
+        widget=forms.HiddenInput(),
+    )
+    override_reason = forms.CharField(
+        max_length=200,
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control form-control-sm',
+            'placeholder': 'Reason (optional)...',
+        }),
+    )
+
+
+from django.forms import formset_factory
+
+SpeciesMappingReviewFormSet = formset_factory(
+    SpeciesMappingReviewForm,
+    extra=0,
+)

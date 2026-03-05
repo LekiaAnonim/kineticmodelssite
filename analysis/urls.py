@@ -14,6 +14,7 @@ urlpatterns = [
     # Simulation runs
     path("run/create/", views.SimulationCreateView.as_view(), name="run-create"),
     path("run/<int:pk>/", views.SimulationDetailView.as_view(), name="run-detail"),
+    path("run/<int:pk>/mapping-review/", views.SpeciesMappingReviewView.as_view(), name="mapping-review"),
     path("run/<int:pk>/execute/", views.SimulationRunView.as_view(), name="run-execute"),
     path("run/<int:pk>/rerun/", views.SimulationRerunView.as_view(), name="run-rerun"),
     path("run/<int:pk>/cancel/", views.SimulationCancelView.as_view(), name="run-cancel"),

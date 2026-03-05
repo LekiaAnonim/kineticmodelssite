@@ -113,15 +113,66 @@ class DatapointResultAdmin(admin.ModelAdmin):
 class SpeciesMappingAdmin(admin.ModelAdmin):
     list_display = [
         'kinetic_model',
+        'dataset_display',
         'dataset_species_name',
         'model_species_name',
         'mapping_method',
-        'confidence',
+        'confidence_badge',
         'is_manual_override',
     ]
+    list_display_links = ['dataset_species_name']
+    list_editable = ['model_species_name', 'is_manual_override']
     list_filter = ['mapping_method', 'is_manual_override', 'kinetic_model']
     search_fields = ['dataset_species_name', 'model_species_name']
     raw_id_fields = ['kinetic_model', 'dataset', 'override_by']
+    readonly_fields = ['created_at', 'updated_at']
+    fieldsets = (
+        ('Mapping', {
+            'fields': (
+                'kinetic_model', 'dataset',
+                'dataset_species_name', 'model_species_name',
+            ),
+        }),
+        ('Match info', {
+            'fields': ('mapping_method', 'confidence', 'smiles', 'inchi'),
+        }),
+        ('Manual override', {
+            'fields': ('is_manual_override', 'override_by', 'override_reason'),
+        }),
+        ('Timestamps', {
+            'classes': ('collapse',),
+            'fields': ('created_at', 'updated_at'),
+        }),
+    )
+
+    def dataset_display(self, obj):
+        if obj.dataset:
+            return obj.dataset.short_name
+        return format_html('<span class="text-muted">All datasets</span>')
+    dataset_display.short_description = 'Dataset'
+
+    def confidence_badge(self, obj):
+        if obj.confidence >= 0.9:
+            color = '#28a745'
+        elif obj.confidence >= 0.6:
+            color = '#ffc107'
+        else:
+            color = '#dc3545'
+        return format_html(
+            '<span style="background-color: {}; color: white; padding: 2px 8px; '
+            'border-radius: 4px; font-size: 11px;">{:.0%}</span>',
+            color, obj.confidence
+        )
+    confidence_badge.short_description = 'Confidence'
+
+    def save_model(self, request, obj, form, change):
+        """Auto-set override metadata when admin edits a mapping."""
+        if change and 'model_species_name' in form.changed_data:
+            obj.is_manual_override = True
+            obj.mapping_method = 'manual'
+            obj.confidence = 1.0
+            obj.override_by = request.user
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(ModelDatasetCoverage)

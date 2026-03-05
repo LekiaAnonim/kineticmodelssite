@@ -381,39 +381,145 @@ class DatapointResult(models.Model):
             return self.pressure / 101325.0
         return None
 
+    # Species that are NOT fuels (oxidizers, diluents, products)
+    _NON_FUEL_NAMES = frozenset({
+        'o2', 'oxygen', 'n2', 'nitrogen', 'ar', 'argon',
+        'he', 'helium', 'ne', 'neon', 'kr', 'krypton',
+        'co2', 'carbon dioxide', 'h2o', 'water',
+    })
+
+    # Known non-carbon fuels and their atomic compositions
+    _NON_CARBON_FUELS = {
+        'nh3': {'N': 1, 'H': 3},
+        'ammonia': {'N': 1, 'H': 3},
+        'h2': {'H': 2},
+        'hydrogen': {'H': 2},
+        'h2s': {'H': 2, 'S': 1},
+        'hydrogen sulfide': {'H': 2, 'S': 1},
+        'n2h4': {'N': 2, 'H': 4},
+        'hydrazine': {'N': 2, 'H': 4},
+    }
+
     @property
     def equivalence_ratio(self):
         """
         Calculate equivalence ratio (φ) from composition.
-        φ = (fuel/oxidizer)_actual / (fuel/oxidizer)_stoichiometric
-        For n-heptane: C7H16 + 11 O2 -> 7 CO2 + 8 H2O
+
+        φ = Σ(xᵢ · νᵢ) / x_O₂
+
+        where xᵢ is the mole fraction of fuel species *i* and νᵢ is its
+        stoichiometric O₂ requirement.
+
+        Supports:
+        - Hydrocarbons:       CₙHₘ + (n + m/4) O₂ → …
+        - Oxygenated fuels:   CₙHₘOₖ + (n + m/4 − k/2) O₂ → …
+        - Hydrogen:           H₂ + ½ O₂ → H₂O
+        - Ammonia:            NH₃ + ¾ O₂ → ½ N₂ + 3/2 H₂O
+        - Sulphur fuels:      H₂S + 3/2 O₂ → SO₂ + H₂O
         """
         if not self.composition:
             return None
-        
-        fuel_amount = 0.0
+
         oxidizer_amount = 0.0
-        
+        fuel_entries = []  # list of (amount, atoms_dict)
+
         for species in self.composition:
-            name = species.get('species-name', '').lower()
+            name = species.get('species-name', '').lower().strip()
             try:
                 amount = float(species.get('amount', 0))
             except (ValueError, TypeError):
                 continue
-            
-            # Common fuel identifiers
-            if any(f in name for f in ['c7h16', 'heptane', 'nc7', 'fuel']):
-                fuel_amount = amount
-            # Oxidizer (O2)
-            elif name in ['o2', 'oxygen']:
-                oxidizer_amount = amount
-        
-        if fuel_amount > 0 and oxidizer_amount > 0:
-            # Stoichiometric ratio for n-heptane: 11 moles O2 per mole C7H16
-            stoich_ratio = 11.0
-            actual_ratio = fuel_amount / oxidizer_amount
-            return actual_ratio * stoich_ratio
-        
+
+            if name in self._NON_FUEL_NAMES:
+                if name in ('o2', 'oxygen'):
+                    oxidizer_amount = amount
+                continue
+
+            # Potential fuel — resolve its atomic composition
+            atoms = self._parse_atomic_composition(
+                species.get('atomic-composition'),
+                name,
+            )
+            if atoms and self._compute_stoich_o2(atoms) > 0:
+                fuel_entries.append((amount, atoms))
+
+        if not fuel_entries or oxidizer_amount <= 0:
+            return None
+
+        # Sum the stoichiometric O₂ demand weighted by each fuel's amount
+        total_stoich_o2 = 0.0
+        for amount, atoms in fuel_entries:
+            nu = self._compute_stoich_o2(atoms)
+            if nu > 0:
+                total_stoich_o2 += amount * nu
+
+        if total_stoich_o2 <= 0:
+            return None
+
+        return total_stoich_o2 / oxidizer_amount
+
+    @staticmethod
+    def _compute_stoich_o2(atoms):
+        """
+        Compute the stoichiometric O₂ requirement for complete combustion.
+
+        General formula for CₙHₘOₖNⱼSₚ:
+            ν_O₂ = n + m/4 − k/2 + p
+
+        Nitrogen is released as N₂ (does not consume O₂).
+        Sulphur is oxidised to SO₂ (consumes 1 O₂ per S atom).
+
+        Returns 0.0 if the species has no positive O₂ demand.
+        """
+        n_c = atoms.get('C', 0)
+        n_h = atoms.get('H', 0)
+        n_o = atoms.get('O', 0)
+        n_s = atoms.get('S', 0)
+        nu = n_c + n_h / 4.0 - n_o / 2.0 + n_s
+        return max(nu, 0.0)
+
+    @staticmethod
+    def _parse_atomic_composition(atomic_data, species_name):
+        """
+        Return an element→count dict (e.g. ``{'C': 7, 'H': 16}``) from
+        structured JSON data or, failing that, by parsing the species name
+        as a molecular formula.
+
+        Returns ``None`` when the composition cannot be determined.
+        """
+        import re
+
+        # 1. Structured data  [{"element": "C", "amount": 7}, …] or {"C": 7, …}
+        if atomic_data:
+            atoms = {}
+            if isinstance(atomic_data, list):
+                for entry in atomic_data:
+                    elem = entry.get('element', '')
+                    count = entry.get('amount', 0)
+                    if elem:
+                        atoms[elem] = atoms.get(elem, 0) + count
+            elif isinstance(atomic_data, dict):
+                atoms = dict(atomic_data)
+            if atoms:
+                return atoms
+
+        # 2. Check known non-carbon fuels by name
+        name_lower = species_name.strip().lower()
+        known = DatapointResult._NON_CARBON_FUELS.get(name_lower)
+        if known:
+            return dict(known)
+
+        # 3. Parse formula from species name (e.g. 'c7h16', 'ch3oh', 'nh3')
+        name = species_name.strip()
+        atoms = {}
+        for match in re.finditer(r'([A-Z][a-z]?)(\d*)', name):
+            element = match.group(1)
+            count = int(match.group(2)) if match.group(2) else 1
+            atoms[element] = atoms.get(element, 0) + count
+
+        if atoms:
+            return atoms
+
         return None
 
 

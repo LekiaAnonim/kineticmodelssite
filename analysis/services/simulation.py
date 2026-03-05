@@ -23,10 +23,213 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Common inert/bath-gas species
+# ---------------------------------------------------------------------------
+# These species do not participate in chemical reactions but appear in
+# virtually every experimental dataset (as diluents).  Many RMG-generated
+# mechanisms omit them because RMG treats the bath gas separately.  When a
+# dataset requires one of these and the mechanism lacks it, we can safely
+# inject them using validated thermo/transport data from Cantera's built-in
+# databases (nasa_gas.yaml for thermo and gri30.yaml for transport).
+
+# Normalised upper-case names of species we consider "inert" bath gases.
+_INERT_NAMES: frozenset = frozenset({"N2", "AR", "HE", "NE"})
+
+# Canonical case-correct name for each inert (used as the species name in
+# the augmented mechanism).
+_INERT_CANONICAL: Dict[str, str] = {
+    "N2": "N2",
+    "AR": "Ar",
+    "HE": "He",
+    "NE": "Ne",
+}
+
+
+def _get_inert_species_defs(names: List[str]):
+    """Build Cantera-YAML-ready species definitions for inert species.
+
+    Sources thermo data from Cantera's bundled ``nasa_gas.yaml`` (the NASA
+    thermodynamic database of ~750 gas-phase species) and transport data
+    from ``gri30.yaml`` where available.
+
+    Falls back to well-known constant-Cp values (Cp/R = 5/2 for monatomic
+    ideal gases) only if Cantera data files cannot be read — but this
+    should never happen in a working Cantera installation.
+
+    Returns a list of dicts suitable for appending to a Cantera YAML
+    ``species:`` block.
+    """
+    # Resolve canonical names
+    canonical = []
+    for n in names:
+        norm = n.upper().replace(" ", "")
+        canon = _INERT_CANONICAL.get(norm)
+        if canon:
+            canonical.append(canon)
+
+    if not canonical:
+        return []
+
+    defs: List[dict] = []
+
+    # ── Load thermo from nasa_gas.yaml ──
+    # This is a species-only YAML file bundled with every Cantera install.
+    nasa_species: Dict[str, dict] = {}
+    try:
+        nasa_path = ct.get_data_directories()
+        for d in nasa_path:
+            candidate = os.path.join(d.rstrip('\x00'), 'nasa_gas.yaml')
+            if os.path.isfile(candidate):
+                with open(candidate, 'r') as f:
+                    nasa_data = yaml.safe_load(f)
+                nasa_species = {
+                    s['name']: s for s in nasa_data.get('species', [])
+                }
+                logger.debug(
+                    f"Loaded {len(nasa_species)} species from {candidate}"
+                )
+                break
+    except Exception as exc:
+        logger.warning(f"Could not load nasa_gas.yaml: {exc}")
+
+    # ── Load transport from gri30.yaml ──
+    gri_transport: Dict[str, dict] = {}
+    try:
+        gas = ct.Solution('gri30.yaml')
+        for sp_name in gas.species_names:
+            sp = gas.species(sp_name)
+            if hasattr(sp, 'transport') and sp.transport is not None:
+                tr = sp.transport
+                td: Dict[str, Any] = {
+                    'model': 'gas',
+                    'geometry': tr.geometry,           # already a string
+                    'well-depth': tr.well_depth / ct.boltzmann,  # J → K
+                    'diameter': tr.diameter * 1e10,              # m → Å
+                }
+                pol = tr.polarizability * 1e30  # m³ → Å³
+                if pol > 0:
+                    td['polarizability'] = pol
+                if tr.rotational_relaxation > 0:
+                    td['rotational-relaxation'] = tr.rotational_relaxation
+                if tr.dipole > 0:
+                    td['dipole'] = tr.dipole * ct.avogadro / (4e-21 * 3.14159)
+                gri_transport[sp_name] = td
+    except Exception as exc:
+        logger.warning(f"Could not load gri30.yaml for transport: {exc}")
+
+    # ── Fallback transport for species not in GRI-Mech ──
+    # Source: Kee, Coltrin, Glarborg "Chemically Reacting Flow" (2003),
+    # Appendix C — Lennard-Jones parameters.
+    _FALLBACK_TRANSPORT: Dict[str, dict] = {
+        "N2": {
+            "model": "gas", "geometry": "linear",
+            "well-depth": 97.53, "diameter": 3.621,
+            "polarizability": 1.76, "rotational-relaxation": 4.0,
+        },
+        "Ar": {
+            "model": "gas", "geometry": "atom",
+            "well-depth": 136.5, "diameter": 3.33,
+        },
+        "He": {
+            "model": "gas", "geometry": "atom",
+            "well-depth": 10.2, "diameter": 2.576,
+        },
+        "Ne": {
+            "model": "gas", "geometry": "atom",
+            "well-depth": 35.6, "diameter": 2.749,
+        },
+    }
+
+    for canon_name in canonical:
+        sp_def = nasa_species.get(canon_name)
+        if sp_def:
+            # Use the full species definition from NASA database
+            sp_def = dict(sp_def)  # shallow copy
+        else:
+            # Fallback for monatomic ideal gas (Ar, He, Ne): Cp/R = 5/2
+            logger.warning(
+                f"Species '{canon_name}' not found in nasa_gas.yaml; "
+                f"using ideal monatomic gas approximation"
+            )
+            sp_def = {
+                "name": canon_name,
+                "composition": {canon_name: 1},
+                "thermo": {
+                    "model": "NASA7",
+                    "temperature-ranges": [200.0, 6000.0],
+                    "data": [
+                        [2.5, 0.0, 0.0, 0.0, 0.0, -745.375, 0.0],
+                    ],
+                },
+            }
+
+        # Attach transport data (prefer GRI-Mech, then fallback table).
+        # GRI-Mech uses uppercase "AR", nasa_gas.yaml uses "Ar", so try both.
+        transport = (
+            gri_transport.get(canon_name)
+            or gri_transport.get(canon_name.upper())
+            or _FALLBACK_TRANSPORT.get(canon_name)
+        )
+        if transport:
+            sp_def['transport'] = transport
+
+        defs.append(sp_def)
+
+    return defs
+
+
+def _inject_inert_species(mechanism_path: str, species_names: List[str]):
+    """Inject missing inert species into a Cantera YAML mechanism file.
+
+    Reads the YAML file, appends inert species definitions sourced from
+    Cantera's bundled nasa_gas.yaml (thermo) and gri30.yaml (transport),
+    and writes a new file in the same directory.  Returns the path to the
+    augmented mechanism file (or the original path if nothing was injected).
+    """
+    to_inject = _get_inert_species_defs(species_names)
+
+    if not to_inject:
+        return mechanism_path
+
+    with open(mechanism_path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    data = yaml.safe_load(text)
+
+    # Append species entries
+    if "species" not in data:
+        data["species"] = []
+    for sp_def in to_inject:
+        data["species"].append(sp_def)
+
+    # Also add the species names to the phase definition so Cantera
+    # recognises them as part of the gas mixture.
+    for phase in data.get("phases", []):
+        if "species" in phase:
+            existing = phase["species"]
+            if isinstance(existing, list):
+                for sp_def in to_inject:
+                    existing.append(sp_def["name"])
+            elif isinstance(existing, str) and existing.lower() == "all":
+                pass  # "all" already picks up everything
+            # else: could be a dict mapping, skip for now
+
+    augmented_path = mechanism_path.replace(".yaml", "_aug.yaml")
+    with open(augmented_path, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+    logger.info(
+        f"Injected inert species {[s['name'] for s in to_inject]} "
+        f"into mechanism → {augmented_path}"
+    )
+    return augmented_path
+
+
+# ---------------------------------------------------------------------------
 # Mechanism Export
 # ---------------------------------------------------------------------------
 
-def get_cantera_mechanism_from_model(kinetic_model: KineticModel) -> Optional[str]:
+def get_cantera_mechanism_from_model(kinetic_model: KineticModel):
     """
     Export a KineticModel from the database to a Cantera YAML file.
     
@@ -54,7 +257,7 @@ def get_cantera_mechanism_from_model(kinetic_model: KineticModel) -> Optional[st
         return None
 
 
-def get_mechanism_species_names(mechanism_path: str) -> List[str]:
+def get_mechanism_species_names(mechanism_path: str):
     """
     Load a Cantera mechanism and return list of species names.
     
@@ -103,7 +306,7 @@ def get_mechanism_species_names(mechanism_path: str) -> List[str]:
 # ChemKED Dataset Path Resolution
 # ---------------------------------------------------------------------------
 
-def _find_file_in_tree(root_dir: str, rel_path: str) -> Optional[str]:
+def _find_file_in_tree(root_dir: str, rel_path: str):
     """Try to locate rel_path under root_dir."""
     candidate = os.path.join(root_dir, rel_path)
     if os.path.exists(candidate):
@@ -122,7 +325,7 @@ def get_chemked_dataset_path(
     dataset: ExperimentDataset,
     base_dir: Optional[str] = None,
     search_dirs: Optional[List[str]] = None
-) -> Optional[str]:
+):
     """
     Return the full file path for a ChemKED dataset.
 
@@ -180,7 +383,7 @@ def get_chemked_dataset_path(
     return None
 
 
-def _generate_chemked_yaml_from_db(dataset: ExperimentDataset) -> Optional[str]:
+def _generate_chemked_yaml_from_db(dataset: ExperimentDataset):
     """
     Generate a ChemKED YAML file from database records when no physical
     file exists on disk.
@@ -311,7 +514,7 @@ def _generate_chemked_yaml_from_db(dataset: ExperimentDataset) -> Optional[str]:
         return None
 
 
-def get_chemked_root_dir() -> str:
+def get_chemked_root_dir():
     """Get the ChemKED database root directory."""
     base_dir = getattr(settings, "BASE_DIR", "")
     candidates = [
@@ -332,7 +535,7 @@ def get_chemked_root_dir() -> str:
 # Species Mapping
 # ---------------------------------------------------------------------------
 
-def _best_species_label(species_name_obj) -> str:
+def _best_species_label(species_name_obj):
     """Pick a stable label from a SpeciesName object."""
     if species_name_obj.name:
         return species_name_obj.name
@@ -345,12 +548,12 @@ def _best_species_label(species_name_obj) -> str:
     return str(species_name_obj.species_id)
 
 
-def _normalize_label(label: str) -> str:
+def _normalize_label(label: str):
     """Normalize species label for comparison."""
     return "".join(ch for ch in label.upper() if ch.isalnum())
 
 
-def get_species_label_smiles_map(model: KineticModel) -> OrderedDict:
+def get_species_label_smiles_map(model: KineticModel):
     """
     Return OrderedDict of {label: smiles} for a KineticModel.
     """
@@ -370,7 +573,7 @@ def get_species_label_smiles_map(model: KineticModel) -> OrderedDict:
     return label_smiles
 
 
-def get_dataset_species_map(dataset: ExperimentDataset) -> OrderedDict:
+def get_dataset_species_map(dataset: ExperimentDataset):
     """Return {species_name: smiles_or_name} for a ChemKED dataset.
 
     Tries the per-datapoint composition first (file-based datasets), then
@@ -413,7 +616,7 @@ def build_spec_keys_for_dataset(
     model: KineticModel,
     dataset: ExperimentDataset,
     model_species_names: Optional[List[str]] = None
-) -> OrderedDict:
+):
     """
     Build mapping of dataset species -> model species label.
     
@@ -589,7 +792,7 @@ def write_spec_keys_yaml(
     output_path: str,
     mechanism_filename: str,
     model_species_names: Optional[List[str]] = None
-) -> str:
+):
     """
     Write spec_keys.yaml for a single model-dataset pair.
     
@@ -622,7 +825,7 @@ def run_pyteck_simulation(
     dataset: ExperimentDataset,
     results_dir: str,
     skip_validation: bool = True
-) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+):
     """
     Run PyTeCK evaluation for a model-dataset pair.
     
@@ -723,18 +926,73 @@ def run_pyteck_simulation(
                 unmapped_species.append((ds_label, mapped_name))
 
         if unmapped_species:
-            names = ", ".join(f"{d}→{m}" for d, m in unmapped_species)
-            msg = (
-                f"Cannot run simulation: dataset species could not be mapped "
-                f"to mechanism species: [{names}]. "
-                f"This usually means the dataset requires species that are "
-                f"not present in this kinetic model, or the species lacks a "
-                f"unique identifier (InChI/SMILES) in the database. "
-                f"Mechanism has {len(model_species_names)} species. "
-                f"First 20: {model_species_names[:20]}"
-            )
-            logger.error(msg)
-            return False, msg, None
+            # Separate unmapped species into inert diluents (auto-injectable)
+            # vs reactive species (genuine incompatibility).
+            inert_unmapped = []
+            reactive_unmapped = []
+            for ds_label, mapped_name in unmapped_species:
+                norm = mapped_name.upper().replace(" ", "")
+                if norm in _INERT_NAMES:
+                    inert_unmapped.append((ds_label, mapped_name))
+                else:
+                    reactive_unmapped.append((ds_label, mapped_name))
+
+            # Auto-inject missing inert species into the mechanism
+            if inert_unmapped:
+                inert_names = [m for _, m in inert_unmapped]
+                logger.info(
+                    f"Auto-injecting inert species {inert_names} into "
+                    f"mechanism (missing from {model.model_name})"
+                )
+                mechanism_path = _inject_inert_species(
+                    mechanism_path, inert_names
+                )
+                mechanism_filename = os.path.basename(mechanism_path)
+                mechanism_dir = os.path.dirname(mechanism_path)
+
+                # Reload species names from augmented mechanism
+                model_species_names = get_mechanism_species_names(
+                    mechanism_path
+                )
+                mech_set = set(model_species_names)
+
+                # Update spec_keys: map inerts to their canonical names
+                for ds_label, mapped_name in inert_unmapped:
+                    norm = mapped_name.upper().replace(" ", "")
+                    canonical = _INERT_CANONICAL.get(norm, mapped_name)
+                    spec_keys[ds_label] = canonical
+
+                # Re-write spec_keys.yaml with updated mappings
+                spec_keys_path = os.path.join(work_dir, 'spec_keys.yaml')
+                with open(spec_keys_path, "w", encoding="utf-8") as f:
+                    f.write(f"{mechanism_filename}:\n")
+                    for label, mapped in spec_keys.items():
+                        f.write(f'    {label}: "{mapped}"\n')
+
+            if reactive_unmapped:
+                reactive_names = ", ".join(
+                    f"{d}→{m}" for d, m in reactive_unmapped
+                )
+                inert_note = ""
+                if inert_unmapped:
+                    injected = ", ".join(m for _, m in inert_unmapped)
+                    inert_note = (
+                        f" (Note: inert species [{injected}] were "
+                        f"auto-injected successfully.) "
+                    )
+                msg = (
+                    f"Cannot run simulation: dataset species could not be "
+                    f"mapped to mechanism species: [{reactive_names}].{inert_note} "
+                    f"This mechanism ({model.model_name}) appears to lack "
+                    f"essential reactive species required by the dataset. "
+                    f"If this is a sub-mechanism (e.g. from RMG), it may "
+                    f"need to be merged with a base mechanism that includes "
+                    f"core combustion species like O2, H2, etc. "
+                    f"Mechanism has {len(model_species_names)} species. "
+                    f"First 20: {model_species_names[:20]}"
+                )
+                logger.error(msg)
+                return False, msg, None
         
         # Write dataset list file
         # PyTeCK joins data_path + <line from this file>, so the entry
@@ -839,7 +1097,7 @@ def _parse_value_magnitude(value):
         return None
 
 
-def parse_pyteck_results(results: Dict[str, Any]) -> Dict[str, Any]:
+def parse_pyteck_results(results: Dict[str, Any]):
     """
     Parse PyTeCK results YAML into structured format.
     

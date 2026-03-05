@@ -1,4 +1,5 @@
 import io
+import logging
 import os
 import re
 import shutil
@@ -7,8 +8,12 @@ import tempfile
 import yaml
 import zipfile
 from dataclasses import dataclass
+from typing import Optional
 
+from django.conf import settings
 from django.utils.text import slugify
+
+logger = logging.getLogger(__name__)
 
 
 class ExportError(RuntimeError):
@@ -78,19 +83,94 @@ def build_chemkin_bundle(kinetic_model, strict=False):
     return ExportResult(content=content, filename=filename, content_type="application/zip")
 
 
+def _find_rmg_chemkin_files(kinetic_model):
+    """Search for Chemkin files in the RMG-models directory on disk.
+
+    The model_name typically matches the RMG-models directory path,
+    e.g. "CombFlame2013/17-Malewicki" → ``<RMG_MODELS_ROOT>/CombFlame2013/17-Malewicki/``.
+
+    Returns ``(reactions_bytes, thermo_bytes, transport_bytes)`` — any
+    element may be ``None`` if the file was not found.
+    """
+    rmg_root = getattr(settings, 'RMG_MODELS_PATH', None)
+    if not rmg_root:
+        # Derive from project layout: kineticmodelssite/../RMG-models
+        rmg_root = os.path.join(
+            os.path.dirname(settings.BASE_DIR), 'RMG-models'
+        )
+
+    model_dir = os.path.join(rmg_root, kinetic_model.model_name or '')
+    if not os.path.isdir(model_dir):
+        return None, None, None
+
+    reactions = thermo = transport = None
+
+    # Common Chemkin file naming conventions in RMG-models
+    for fname in os.listdir(model_dir):
+        fpath = os.path.join(model_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+        fl = fname.lower()
+
+        if not reactions and (
+            fl in ('mechanism.txt', 'chem.inp', 'chem.dat')
+            or fl.endswith('_chem.inp')
+            or fl == 'reactions.txt'
+        ):
+            with open(fpath, 'rb') as f:
+                reactions = f.read()
+
+        elif not thermo and (
+            fl in ('thermo.txt', 'thermo.dat', 'therm.dat')
+            or fl.endswith('_thermo.dat')
+        ):
+            with open(fpath, 'rb') as f:
+                thermo = f.read()
+
+        elif not transport and (
+            fl in ('transport.txt', 'transport.dat', 'tran.dat')
+            or fl.endswith('_tran.dat')
+        ):
+            with open(fpath, 'rb') as f:
+                transport = f.read()
+
+    if reactions:
+        logger.info(
+            f"Found Chemkin files on disk for '{kinetic_model.model_name}' "
+            f"in {model_dir}"
+        )
+    return reactions, thermo, transport
+
+
 def build_cantera_yaml(kinetic_model, strict=False):
     reactions = _read_file_field(kinetic_model.chemkin_reactions_file)
     thermo = _read_file_field(kinetic_model.chemkin_thermo_file)
     transport = _read_file_field(kinetic_model.chemkin_transport_file)
 
     if not reactions:
-        generated = _generate_chemkin_files(kinetic_model, strict=strict)
-        reactions = next((v for k, v in generated.items() if k.endswith("_chem.inp")), None)
-        transport = next((v for k, v in generated.items() if k.endswith("_tran.dat")), None)
-        thermo = None
+        try:
+            generated = _generate_chemkin_files(kinetic_model, strict=strict)
+            reactions = next((v for k, v in generated.items() if k.endswith("_chem.inp")), None)
+            transport = next((v for k, v in generated.items() if k.endswith("_tran.dat")), None)
+            thermo = None
+        except Exception as exc:
+            logger.warning(
+                f"_generate_chemkin_files failed for '{kinetic_model.model_name}': {exc}. "
+                f"Falling back to RMG-models directory."
+            )
+
+    # Fallback: read Chemkin files directly from the RMG-models directory
+    if not reactions:
+        disk_rxn, disk_thermo, disk_transport = _find_rmg_chemkin_files(kinetic_model)
+        if disk_rxn:
+            reactions = disk_rxn
+            thermo = thermo or disk_thermo
+            transport = transport or disk_transport
 
     if not reactions:
         raise ExportError("Chemkin reactions file is required to build Cantera YAML.")
+
+    reactions = _dedupe_chemkin_species_block(reactions)
 
     with tempfile.TemporaryDirectory() as tempdir:
         input_path = os.path.join(tempdir, "chem.inp")
@@ -119,9 +199,89 @@ def build_cantera_yaml(kinetic_model, strict=False):
 
     content = _patch_temperature_ranges(content)
     content = _patch_duplicate_reactions_yaml(content)
+    content = _fix_duplicate_issues_with_cantera(content)
 
     filename = os.path.basename(output_path)
     return ExportResult(content=content, filename=filename, content_type="application/x-yaml")
+
+
+def _dedupe_chemkin_species_block(content: bytes) -> bytes:
+    """Remove duplicate species labels in a Chemkin SPECIES block.
+
+    Some legacy mechanisms contain repeated species names inside ``SPECIES``.
+    Cantera's ``ck2yaml`` raises ``InputError: Found additional declaration of
+    species ...`` for those files.  We keep the first declaration and drop
+    repeats while preserving comments and overall section structure.
+    """
+    try:
+        text = content.decode("utf-8")
+    except Exception:
+        return content
+
+    lines = text.split("\n")
+    start = None
+    end = None
+
+    for idx, line in enumerate(lines):
+        if line.strip().upper().startswith("SPECIES"):
+            start = idx
+            break
+
+    if start is None:
+        return content
+
+    for idx in range(start + 1, len(lines)):
+        if lines[idx].strip().upper().startswith("END"):
+            end = idx
+            break
+
+    if end is None or end <= start:
+        return content
+
+    seen = set()
+    removed = 0
+    new_block = []
+
+    for raw_line in lines[start + 1:end]:
+        stripped = raw_line.strip()
+        if not stripped:
+            new_block.append(raw_line)
+            continue
+        if stripped.startswith("!"):
+            new_block.append(raw_line)
+            continue
+
+        if "!" in raw_line:
+            species_part, comment_part = raw_line.split("!", 1)
+            comment_suffix = f" !{comment_part}"
+        else:
+            species_part = raw_line
+            comment_suffix = ""
+
+        kept_tokens = []
+        for token in species_part.split():
+            if token in seen:
+                removed += 1
+                continue
+            seen.add(token)
+            kept_tokens.append(token)
+
+        if kept_tokens:
+            rebuilt = " ".join(kept_tokens) + comment_suffix
+            new_block.append(rebuilt)
+        elif comment_suffix:
+            new_block.append(comment_suffix.lstrip())
+
+    if removed:
+        logger.info(
+            f"Removed {removed} duplicate species declarations from Chemkin SPECIES block"
+        )
+
+    patched_lines = lines[: start + 1] + new_block + lines[end:]
+    patched = "\n".join(patched_lines)
+    if patched == text:
+        return content
+    return patched.encode("utf-8")
 
 
 def _patch_temperature_ranges(content):
@@ -297,6 +457,148 @@ def _patch_duplicate_reactions_yaml(content):
     return "\n".join(lines).encode("utf-8")
 
 
+def _fix_duplicate_issues_with_cantera(content, max_iterations=50):
+    """Iteratively validate the YAML with Cantera and fix duplicate-reaction
+    issues that the heuristic patcher could not resolve.
+
+    Cantera's ``checkDuplicates`` has nuanced logic about which reaction
+    types can be duplicates of each other (e.g. three-body vs elementary).
+    Rather than replicating that logic, this function uses Cantera itself as
+    the oracle:
+
+    * **"No duplicate found for declared duplicate reaction number N"** →
+      remove the orphaned ``duplicate: true`` from reaction N.
+    * **"Undeclared duplicate reactions detected"** →
+      add ``duplicate: true`` to both flagged reactions.
+
+    Repeats until Cantera is happy or *max_iterations* is reached.
+    """
+    try:
+        import cantera as ct
+    except ImportError:
+        logger.warning("Cantera not available — skipping iterative duplicate fix")
+        return content
+
+    eq_re = re.compile(r"^(\s*)-\s+equation:\s*(.+?)(?:\s*#.*)?$")
+    dup_re = re.compile(r"^\s+duplicate:\s*true", re.IGNORECASE)
+    # Matches "No duplicate found for declared duplicate reaction number 363"
+    orphan_re = re.compile(
+        r"No duplicate found for declared duplicate reaction number\s+(\d+)"
+    )
+    # Matches "Reaction 314:" in undeclared-duplicate error blocks
+    undeclared_rxn_re = re.compile(r"Reaction\s+(\d+):")
+
+    for iteration in range(max_iterations):
+        # Write to temp file and try to load
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as f:
+            f.write(content)
+            tmp_path = f.name
+        try:
+            ct.Solution(tmp_path)
+            # Success — no duplicate issues remain
+            if iteration > 0:
+                logger.info(
+                    f"Resolved duplicate-reaction issues after "
+                    f"{iteration} Cantera iteration(s)"
+                )
+            return content
+        except Exception as exc:
+            msg = str(exc)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        text = content.decode("utf-8")
+        lines = text.split("\n")
+
+        # Build a mapping: 0-based reaction index → line index in YAML
+        rxn_line_indices = []
+        for idx, line in enumerate(lines):
+            if eq_re.match(line):
+                rxn_line_indices.append(idx)
+
+        changed = False
+
+        # ── Case 1: Orphaned duplicate: true ──
+        orphan_match = orphan_re.search(msg)
+        if orphan_match:
+            rxn_num = int(orphan_match.group(1))  # 0-based
+            if 0 <= rxn_num < len(rxn_line_indices):
+                eq_line = rxn_line_indices[rxn_num]
+                # Find block end
+                if rxn_num + 1 < len(rxn_line_indices):
+                    block_end = rxn_line_indices[rxn_num + 1]
+                else:
+                    block_end = len(lines)
+                # Find and remove duplicate: true in this block
+                for check_idx in range(eq_line + 1, block_end):
+                    if dup_re.match(lines[check_idx]):
+                        eq_text = lines[eq_line].strip()[:80]
+                        logger.info(
+                            f"Removing orphaned 'duplicate: true' from "
+                            f"reaction {rxn_num}: {eq_text}"
+                        )
+                        lines.pop(check_idx)
+                        changed = True
+                        break
+
+        # ── Case 2: Undeclared duplicates ──
+        if not changed and "Undeclared duplicate reactions detected" in msg:
+            undeclared_nums = [
+                int(m.group(1)) for m in undeclared_rxn_re.finditer(msg)
+            ]
+            for rxn_num in undeclared_nums:
+                if not (0 <= rxn_num < len(rxn_line_indices)):
+                    continue
+                eq_line = rxn_line_indices[rxn_num]
+                # Re-derive block end with current line list
+                _rxn_lines = [
+                    i for i, ln in enumerate(lines) if eq_re.match(ln)
+                ]
+                pos_in_list = _rxn_lines.index(eq_line) if eq_line in _rxn_lines else -1
+                if pos_in_list < 0:
+                    continue
+                if pos_in_list + 1 < len(_rxn_lines):
+                    block_end = _rxn_lines[pos_in_list + 1]
+                else:
+                    block_end = len(lines)
+                # Check if duplicate: true already exists
+                already = False
+                for check_idx in range(eq_line + 1, block_end):
+                    if dup_re.match(lines[check_idx]):
+                        already = True
+                        break
+                if not already:
+                    # Determine indent from the equation line
+                    m_eq = eq_re.match(lines[eq_line])
+                    indent = m_eq.group(1) if m_eq else ""
+                    new_line = indent + "  duplicate: true"
+                    lines.insert(eq_line + 1, new_line)
+                    eq_text = lines[eq_line].strip()[:80]
+                    logger.info(
+                        f"Adding 'duplicate: true' to undeclared duplicate "
+                        f"reaction {rxn_num}: {eq_text}"
+                    )
+                    changed = True
+
+        if not changed:
+            # The error is not a duplicate issue we can fix — bail out
+            logger.warning(
+                f"Cantera validation failed with an unfixable error "
+                f"(iteration {iteration}): {msg[:300]}"
+            )
+            return content
+
+        content = "\n".join(lines).encode("utf-8")
+
+    logger.warning(
+        f"Could not resolve duplicate issues after {max_iterations} iterations"
+    )
+    return content
+
+
 def _generate_chemkin_files(kinetic_model, strict=False):
     try:
         from rmgpy.chemkin import save_chemkin_file, save_transport_file
@@ -454,7 +756,22 @@ def _build_rmg_species_map(kinetic_model, nasa_poly_cls, nasa_cls, transport_cls
 
     for index, db_species in enumerate(species_list, start=1):
         rmg_species = rmg_species_cls(index=index, label=assign_label(db_species, index))
-        rmg_species.molecule = [structure.to_rmg() for structure in db_species.structures]
+        # Parse adjacency lists into RMG Molecule objects.  Some imported
+        # species may have malformed adjacency lists (e.g. containing
+        # ReSpecTh/PrIMe fields like 'molecularTermSymbol') that RMG
+        # cannot parse.  Skip those structures rather than aborting the
+        # entire export — the species can still be exported if it has
+        # valid thermo data.
+        molecules = []
+        for structure in db_species.structures:
+            try:
+                molecules.append(structure.to_rmg())
+            except (ValueError, AttributeError, KeyError) as exc:
+                logger.warning(
+                    f"Skipping unparseable adjacency list for species "
+                    f"'{rmg_species.label}' (species_id={db_species.id}): {exc}"
+                )
+        rmg_species.molecule = molecules
 
         thermo = thermo_map.get(db_species.id)
         if thermo is None:
@@ -654,34 +971,106 @@ def _run_ck2yaml(input_path, thermo_path, transport_path, output_path):
     if not thermo_path and _run_ck2yaml_via_rmg(input_path, transport_path, output_path):
         return
 
-    args = ["--input", input_path, "--output", output_path, "--no-validate", "--quiet"]
-    if thermo_path:
-        args.extend(["--thermo", thermo_path])
-    if transport_path:
-        args.extend(["--transport", transport_path])
+    max_thermo_repairs = 25
+    repair_count = 0
 
-    try:
-        from cantera import ck2yaml
+    while True:
+        args = ["--input", input_path, "--output", output_path, "--no-validate", "--quiet"]
+        if thermo_path:
+            args.extend(["--thermo", thermo_path])
+        if transport_path:
+            args.extend(["--transport", transport_path])
 
-        ck2yaml.main(args)
-        return
-    except Exception:
-        pass
+        last_error_text = ""
 
-    ck2yaml_executable = shutil.which("ck2yaml")
-    if ck2yaml_executable:
-        command = [ck2yaml_executable, *args]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            raise ExportError(
-                "Cantera conversion failed: "
-                f"{result.stderr.strip() or result.stdout.strip()}"
-            )
-        return
+        try:
+            from cantera import ck2yaml
+
+            ck2yaml.main(args)
+            return
+        except Exception as exc:
+            last_error_text = str(exc)
+
+        ck2yaml_executable = shutil.which("ck2yaml")
+        if ck2yaml_executable:
+            command = [ck2yaml_executable, *args]
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return
+            last_error_text = result.stderr.strip() or result.stdout.strip() or last_error_text
+
+        if (
+            thermo_path
+            and repair_count < max_thermo_repairs
+            and _repair_bad_thermo_entry_from_ck2yaml_error(thermo_path, last_error_text)
+        ):
+            repair_count += 1
+            continue
+
+        raise ExportError(
+            "Cantera conversion failed: "
+            f"{last_error_text}"
+        )
 
     raise ExportError(
         "Cantera conversion is unavailable. Install Cantera or provide the ck2yaml CLI."
     )
+
+
+def _extract_bad_thermo_label(error_text: str) -> Optional[str]:
+    marker = "species thermo entry:"
+    idx = error_text.find(marker)
+    if idx < 0:
+        return None
+
+    tail = error_text[idx + len(marker):].strip()
+    if not tail:
+        return None
+
+    first_line = tail.splitlines()[0].strip()
+    if not first_line:
+        return None
+
+    return first_line.split()[0]
+
+
+def _remove_thermo_entry_by_label(thermo_path: str, label: str) -> bool:
+    try:
+        with open(thermo_path, "r", encoding="utf-8", errors="ignore") as handle:
+            lines = handle.read().splitlines()
+    except Exception:
+        return False
+
+    # NASA7 entries are 4 lines; first line starts with the species label.
+    start_idx = None
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("!"):
+            continue
+        if stripped.startswith(label):
+            start_idx = idx
+            break
+
+    if start_idx is None:
+        return False
+
+    end_idx = min(start_idx + 4, len(lines))
+    del lines[start_idx:end_idx]
+
+    with open(thermo_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+    logger.warning(
+        f"Removed malformed thermo entry '{label}' from {thermo_path} and retrying ck2yaml"
+    )
+    return True
+
+
+def _repair_bad_thermo_entry_from_ck2yaml_error(thermo_path: str, error_text: str) -> bool:
+    label = _extract_bad_thermo_label(error_text)
+    if not label:
+        return False
+    return _remove_thermo_entry_by_label(thermo_path, label)
 
 
 def _run_ck2yaml_via_rmg(chemkin_path, transport_path, output_path):

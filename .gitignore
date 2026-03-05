@@ -20,5 +20,10 @@ importer.log
 .env
 /static/
 media/
-*run_logs
+*/run_logs
+*/run_results
+*/model_libraries
+*/figures
+*exports
 *run_resultsfixtures/full_database.json
+*kineticmodelssite/chemked_database/results

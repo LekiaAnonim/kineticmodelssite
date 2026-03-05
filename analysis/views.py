@@ -31,13 +31,18 @@ from .models import (
     SimulationStatus,
     TriggerType,
 )
-from .forms import SimulationCreateForm, DatasetFilterForm
-from .services import run_pyteck_simulation, parse_pyteck_results
+from .forms import SimulationCreateForm, DatasetFilterForm, SpeciesMappingReviewFormSet
+from .services import (
+    run_pyteck_simulation,
+    parse_pyteck_results,
+    build_spec_keys_for_dataset,
+    get_cantera_mechanism_from_model,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _get_simulation_log_dir() -> str:
+def _get_simulation_log_dir():
     """Return the persistent log directory for simulation runs."""
     base_dir = getattr(settings, "BASE_DIR", os.getcwd())
     log_dir = os.path.join(base_dir, "analysis", "run_logs")
@@ -45,7 +50,7 @@ def _get_simulation_log_dir() -> str:
     return log_dir
 
 
-def _get_simulation_results_dir(run_id: int) -> str:
+def _get_simulation_results_dir(run_id: int):
     """Return a per-run results directory inside the app folder."""
     base_dir = getattr(settings, "BASE_DIR", os.getcwd())
     results_dir = os.path.join(base_dir, "analysis", "run_results", f"run_{run_id}")
@@ -53,7 +58,7 @@ def _get_simulation_results_dir(run_id: int) -> str:
     return results_dir
 
 
-def _append_simulation_log(run: SimulationRun, message: str) -> None:
+def _append_simulation_log(run: SimulationRun, message: str):
     """Append a message to the shared simulation log file."""
     log_dir = _get_simulation_log_dir()
     log_path = os.path.join(log_dir, "simulation_runs.log")
@@ -260,21 +265,31 @@ class SimulationCreateView(FormView):
             run.results_dir = _get_simulation_results_dir(run.pk)
             run.save(update_fields=['results_dir'])
             created_runs.append(run)
-            
-            # Auto-execute the simulation in background
-            if auto_execute:
-                execute_simulation_async(run.pk)
 
-        if auto_execute:
-            messages.success(
+        # If auto_execute is OFF → redirect to species mapping review
+        if not auto_execute:
+            run_ids = ','.join(str(r.pk) for r in created_runs)
+            messages.info(
                 self.request,
-                f"Created {len(created_runs)} simulation run(s). Execution started automatically."
+                f"Created {len(created_runs)} simulation run(s). "
+                f"Review species mappings before executing."
             )
-        else:
-            messages.success(
-                self.request,
-                f"Created {len(created_runs)} simulation run(s). Click 'Execute Now' to start."
+            if len(created_runs) == 1:
+                return redirect('analysis:mapping-review', pk=created_runs[0].pk)
+            # Multiple runs: redirect to first, rest queued
+            return redirect(
+                reverse('analysis:mapping-review', kwargs={'pk': created_runs[0].pk})
+                + f'?next_runs={",".join(str(r.pk) for r in created_runs[1:])}'
             )
+
+        # Auto-execute: start simulations immediately
+        for run in created_runs:
+            execute_simulation_async(run.pk)
+
+        messages.success(
+            self.request,
+            f"Created {len(created_runs)} simulation run(s). Execution started automatically."
+        )
 
         # If only one run, redirect to its detail page
         if len(created_runs) == 1:
@@ -399,6 +414,153 @@ def execute_simulation_async(run_id):
     
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
+
+
+# ---------------------------------------------------------------------------
+# Species Mapping Review (pre-simulation)
+# ---------------------------------------------------------------------------
+
+class SpeciesMappingReviewView(TemplateView):
+    """
+    Pre-simulation review page that shows the auto-generated species
+    mapping for a pending SimulationRun, letting the user correct any
+    mismatches before executing.
+
+    Flow:
+        SimulationCreateView (auto_execute=off)
+          → redirect here
+          → user reviews / edits mapping table
+          → POST saves overrides + launches simulation
+    """
+    template_name = "analysis/mapping_review.html"
+
+    def _get_run(self):
+        return get_object_or_404(
+            SimulationRun.objects.select_related('kinetic_model', 'dataset'),
+            pk=self.kwargs['pk'],
+        )
+
+    def _build_initial_data(self, run):
+        """Compute the auto-matched mapping and return formset initial data."""
+        spec_keys = build_spec_keys_for_dataset(
+            run.kinetic_model, run.dataset
+        )
+
+        # Determine confidence / method per entry by checking SpeciesMapping
+        saved = {
+            sm.dataset_species_name: sm
+            for sm in SpeciesMapping.objects.filter(
+                kinetic_model=run.kinetic_model,
+                dataset_species_name__in=spec_keys.keys(),
+            ).filter(
+                Q(dataset=run.dataset) | Q(dataset__isnull=True)
+            )
+        }
+
+        # Load mechanism species for the dropdown hint
+        try:
+            mechanism_path = get_cantera_mechanism_from_model(run.kinetic_model)
+            from .services.simulation import get_mechanism_species_names
+            mech_species = set(get_mechanism_species_names(mechanism_path)) if mechanism_path else set()
+        except Exception:
+            mech_species = set()
+
+        initial = []
+        for ds_label, mapped_name in spec_keys.items():
+            sm = saved.get(ds_label)
+            in_mechanism = mapped_name in mech_species
+            initial.append({
+                'dataset_species_name': ds_label,
+                'original_model_species_name': mapped_name,
+                'model_species_name': mapped_name,
+                'confidence': sm.confidence if sm else (0.9 if in_mechanism else 0.3),
+                'mapping_method': sm.mapping_method if sm else ('auto' if in_mechanism else 'fallback'),
+                'is_override': False,
+                'override_reason': '',
+            })
+
+        return initial, mech_species
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        run = self._get_run()
+        initial, mech_species = self._build_initial_data(run)
+
+        context['run'] = run
+        context['formset'] = SpeciesMappingReviewFormSet(initial=initial)
+        context['mech_species_json'] = json.dumps(sorted(mech_species))
+        context['next_runs'] = self.request.GET.get('next_runs', '')
+        return context
+
+    def post(self, request, pk):
+        run = self._get_run()
+        formset = SpeciesMappingReviewFormSet(request.POST)
+
+        if not formset.is_valid():
+            initial, mech_species = self._build_initial_data(run)
+            return self.render_to_response({
+                'run': run,
+                'formset': formset,
+                'mech_species_json': json.dumps(sorted(mech_species)),
+                'next_runs': request.POST.get('next_runs', ''),
+            })
+
+        # Save overrides to SpeciesMapping + build spec_keys_snapshot
+        spec_keys_snapshot = {}
+        user = request.user if request.user.is_authenticated else None
+
+        for form_data in formset.cleaned_data:
+            ds_name = form_data['dataset_species_name']
+            model_name = form_data['model_species_name']
+            original = form_data.get('original_model_species_name', '')
+            spec_keys_snapshot[ds_name] = model_name
+
+            # Detect if the user changed the mapping
+            was_edited = (model_name != original)
+
+            # Upsert the SpeciesMapping row
+            sm, created = SpeciesMapping.objects.update_or_create(
+                kinetic_model=run.kinetic_model,
+                dataset=run.dataset,
+                dataset_species_name=ds_name,
+                defaults={
+                    'model_species_name': model_name,
+                    'mapping_method': 'manual' if was_edited else (
+                        form_data.get('mapping_method') or 'fallback'
+                    ),
+                    'confidence': 1.0 if was_edited else (
+                        form_data.get('confidence') or 0.5
+                    ),
+                    'is_manual_override': was_edited,
+                    'override_by': user if was_edited else None,
+                    'override_reason': form_data.get('override_reason', '') if was_edited else '',
+                },
+            )
+
+        # Persist snapshot on the run
+        run.spec_keys_snapshot = spec_keys_snapshot
+        run.save(update_fields=['spec_keys_snapshot'])
+
+        # Execute the simulation
+        execute_simulation_async(run.pk)
+        messages.success(
+            request,
+            f"Species mapping saved. Simulation #{run.pk} is now running."
+        )
+
+        # Chain to the next pending run if there are more
+        next_runs = request.POST.get('next_runs', '')
+        if next_runs:
+            run_ids = [r.strip() for r in next_runs.split(',') if r.strip()]
+            if run_ids:
+                next_pk = run_ids.pop(0)
+                remaining = ','.join(run_ids)
+                url = reverse('analysis:mapping-review', kwargs={'pk': next_pk})
+                if remaining:
+                    url += f'?next_runs={remaining}'
+                return redirect(url)
+
+        return redirect('analysis:run-detail', pk=run.pk)
 
 
 class SimulationRunView(View):
@@ -873,7 +1035,7 @@ class CoverageMatrixView(TemplateView):
             'ethanol': 'Ethanol', 'dimethyl ether': 'DME',
         }
 
-        def _nice_fuel_name(raw: str) -> str:
+        def _nice_fuel_name(raw: str):
             """Capitalize / prettify a fuel name for display."""
             lower = raw.lower().strip()
             if lower in _FUEL_DISPLAY_NAMES:
@@ -883,7 +1045,7 @@ class CoverageMatrixView(TemplateView):
                 return raw.upper()  # formula-like
             return raw.replace('_', ' ').title()
 
-        def _fuel_for_dataset(ds) -> str:
+        def _fuel_for_dataset(ds):
             """Determine the fuel name for a dataset.
 
             Strategy (most-reliable first):
