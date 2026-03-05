@@ -14,9 +14,10 @@ from django.db.models import Case, When, Value, IntegerField, Q
 import json
 import logging
 import os
+from django.conf import settings
 
 from .models import ClusterJob, ImportJobConfig, JobLog, ImportJobStatus, VotingReaction
-from .ssh_manager import SSHJobManager
+from .manager_factory import get_job_manager
 from .logger import dashboard_logger, setup_dashboard_logging
 
 # Set up dashboard logging - this forwards Python logging to dashboard_logger
@@ -145,17 +146,17 @@ def job_detail(request, job_id):
         }
     )
     
-    # Check if host needs to be updated from SLURM
+    # Check if host needs to be updated
     if job.status == 'running' and (not job.host or job.host == 'Pending...') and config:
         try:
             dashboard_logger.info(
-                "Refreshing job status from SLURM", 
+                "Refreshing job status", 
                 "dashboard",
                 job_id=job.id,
                 job_name=job.name
             )
-            ssh_manager = SSHJobManager(config=config)
-            ssh_manager.refresh_statuses()
+            manager = get_job_manager(config=config)
+            manager.refresh_statuses()
             job.refresh_from_db()
             dashboard_logger.success(
                 f"Updated host: {job.host}", 
@@ -164,7 +165,6 @@ def job_detail(request, job_id):
                 job_name=job.name,
                 details={
                     'host': job.host,
-                    'slurm_job_id': job.slurm_job_id
                 }
             )
         except Exception as e:
@@ -182,8 +182,7 @@ def job_detail(request, job_id):
     # Now try to fetch live progress if we have a valid host
     if job.status == 'running' and job.host and job.host != 'Pending...' and config:
         try:
-            ssh_manager = SSHJobManager(config=config) if 'ssh_manager' not in locals() else ssh_manager
-            progress_url = (job.ood_url + 'progress.json') if job.ood_url else f"http://localhost:{job.port}/progress.json"
+            manager = get_job_manager(config=config) if 'manager' not in locals() else manager
 
             dashboard_logger.info(
                 "Attempting to fetch live progress", 
@@ -191,14 +190,12 @@ def job_detail(request, job_id):
                 job_id=job.id,
                 job_name=job.name,
                 details={
-                    'progress_url': progress_url,
                     'host': job.host,
                     'port': job.port,
-                    'tunnel_active': job.tunnel_active
                 }
             )
 
-            progress = ssh_manager.get_progress_json(job)
+            progress = manager.get_progress_json(job)
             if progress:
                 # Update job progress from live data - map ALL progress.json fields
                 job.total_species = progress.get('total', 0)
@@ -227,13 +224,12 @@ def job_detail(request, job_id):
                 )
             else:
                 dashboard_logger.warning(
-                    "No progress data returned - job may still be initializing or OOD endpoint unavailable", 
+                    "No progress data returned - job may still be initializing", 
                     "dashboard",
                     job_id=job.id,
                     job_name=job.name,
                     details={
-                        'suggestion': 'If using OOD, verify the compute-node web URL is reachable; otherwise job may still be starting.',
-                        'progress_url': progress_url
+                        'suggestion': 'Job may still be starting up.',
                     }
                 )
         except Exception as e:
@@ -245,7 +241,6 @@ def job_detail(request, job_id):
                 details={
                     'error': str(e),
                     'error_type': type(e).__name__,
-                    'suggestion': 'Verify OOD base URL configuration and that the job has an assigned host'
                 }
             )
 
@@ -258,8 +253,8 @@ def job_detail(request, job_id):
                 job_id=job.id,
                 job_name=job.name
             )
-            ssh_manager = SSHJobManager(config=config) if 'ssh_manager' not in locals() else ssh_manager
-            completion_stats = ssh_manager.get_completion_stats(job)
+            manager = get_job_manager(config=config) if 'manager' not in locals() else manager
+            completion_stats = manager.get_completion_stats(job)
             
             if completion_stats:
                 job.total_species = completion_stats.get('total_species', 0)
@@ -294,7 +289,7 @@ def job_detail(request, job_id):
         if not job.host or job.host == 'Pending...':
             progress_status = {
                 'type': 'warning',
-                'message': 'Job is running but compute node not yet assigned. Progress will be available once SLURM assigns a node.'
+                'message': 'Job is running but host not yet assigned. Progress will be available once a worker picks up the job.'
             }
         elif job.total_species == 0:
             progress_status = {
@@ -323,7 +318,7 @@ def job_detail(request, job_id):
     elif job.status == 'pending':
         progress_status = {
             'type': 'info',
-            'message': 'Job is pending in SLURM queue. Waiting for compute resources.'
+            'message': 'Job is pending in the queue. Waiting for an available worker.'
         }
     
     # Get recent logs
@@ -385,43 +380,35 @@ def job_start(request, job_id):
     
     try:
         dashboard_logger.info(
-            f"Connecting to cluster...", 
+            f"Connecting...", 
             "dashboard",
             job_id=job.id,
             job_name=job.name,
-            details={'host': config.ssh_host, 'port': config.ssh_port}
+            details={'action': 'start_job'}
         )
-        ssh_manager = SSHJobManager(config=config)
-        ssh_manager.connect()
-        dashboard_logger.success(
-            "Connected to cluster", 
-            "dashboard",
-            job_id=job.id,
-            job_name=job.name,
-            details={'host': config.ssh_host}
-        )
+        manager = get_job_manager(config=config)
         
         dashboard_logger.info(
-            f"Submitting job to SLURM...", 
+            f"Submitting job...", 
             "dashboard",
             job_id=job.id,
             job_name=job.name,
-            details={
-                'partition': config.slurm_partition,
-                'time_limit': config.slurm_time_limit,
-                'memory': config.slurm_memory
-            }
         )
-        slurm_job_id, host = ssh_manager.start_job(job)
+        task_id, host = manager.start_job(job)
         
-        job.slurm_job_id = slurm_job_id
+        # Assign to the correct field based on deployment mode
+        importer_mode = getattr(settings, 'IMPORTER_MODE', 'cluster')
+        if importer_mode == 'local':
+            job.celery_task_id = task_id
+        else:
+            job.slurm_job_id = task_id
         job.started_by = request.user
         job.mark_as_running(host=host)
         
         JobLog.objects.create(
             job=job,
             log_type='info',
-            message=f'Job started by {request.user.username} with SLURM ID {slurm_job_id}'
+            message=f'Job started by {request.user.username} (ID: {task_id})'
         )
         
         dashboard_logger.success(
@@ -430,12 +417,12 @@ def job_start(request, job_id):
             job_id=job.id,
             job_name=job.name,
             details={
-                'slurm_job_id': slurm_job_id,
+                'task_id': task_id,
                 'host': host,
                 'user': request.user.username
             }
         )
-        messages.success(request, f'Job started successfully (SLURM ID: {slurm_job_id})')
+        messages.success(request, f'Job started successfully (ID: {task_id})')
         
     except Exception as e:
         dashboard_logger.error(
@@ -469,38 +456,37 @@ def job_kill(request, job_id):
     
     config = job.config or ImportJobConfig.objects.filter(is_default=True).first()
     
-    if not job.slurm_job_id:
+    if not job.slurm_job_id and not job.celery_task_id:
         dashboard_logger.warning(
-            f"Job has no SLURM ID", 
+            f"Job has no task ID", 
             "dashboard",
             job_id=job.id,
             job_name=job.name
         )
-        messages.error(request, "Job does not have a SLURM ID")
+        messages.error(request, "Job does not have a task ID")
         return redirect('importer_dashboard:index')
     
     try:
         dashboard_logger.info(
-            "Connecting to cluster...", 
+            "Cancelling job...", 
             "dashboard",
             job_id=job.id,
             job_name=job.name,
-            details={'host': config.ssh_host}
+            details={'task_id': job.slurm_job_id or job.celery_task_id}
         )
-        ssh_manager = SSHJobManager(config=config)
-        ssh_manager.connect()
+        manager = get_job_manager(config=config)
         
         dashboard_logger.info(
-            f"Sending scancel command...", 
+            f"Sending kill command...", 
             "dashboard",
             job_id=job.id,
             job_name=job.name,
-            details={'slurm_job_id': job.slurm_job_id, 'command': 'scancel'}
         )
-        ssh_manager.kill_job(job)
+        manager.kill_job(job)
         
         job.status = ImportJobStatus.CANCELLED
         job.slurm_job_id = None
+        job.celery_task_id = None
         job.host = None
         job.completed_at = timezone.now()
         job.save()
@@ -550,30 +536,25 @@ def job_log_view(request, job_id):
     
     try:
         dashboard_logger.info(
-            "Connecting to cluster", 
+            "Connecting to job backend", 
             "dashboard",
             job_id=job.id,
             job_name=job.name,
-            details={
-                'host': config.ssh_host,
-                'port': config.ssh_port
-            }
         )
-        ssh_manager = SSHJobManager(config=config)
-        ssh_manager.connect()
+        manager = get_job_manager(config=config)
         
         log_path = f"{config.root_path}/{job.name}/RMG.log" if config and job.name else "unknown"
         dashboard_logger.info(
-            f"Reading RMG.log from {job.host or 'cluster'}", 
+            f"Reading RMG.log from {job.host or 'server'}", 
             "dashboard",
             job_id=job.id,
             job_name=job.name,
             details={
                 'log_path': log_path,
-                'host': job.host or config.ssh_host
+                'host': job.host or 'localhost'
             }
         )
-        log_content = ssh_manager.get_log_tail(job)
+        log_content = manager.get_log_tail(job)
         
         line_count = len(log_content.split('\n')) if log_content else 0
         file_size = len(log_content) if log_content else 0
@@ -620,7 +601,7 @@ def job_log_view(request, job_id):
 @login_required
 def job_console_output_view(request, job_id):
     """
-    View the SLURM console output (output.log) - shows complete job execution
+    View the console output (output.log) - shows complete job execution
     """
     job = get_object_or_404(ClusterJob, id=job_id)
     dashboard_logger.info(
@@ -638,30 +619,25 @@ def job_console_output_view(request, job_id):
     
     try:
         dashboard_logger.info(
-            "Connecting to cluster", 
+            "Connecting to job backend", 
             "dashboard",
             job_id=job.id,
             job_name=job.name,
-            details={
-                'host': config.ssh_host,
-                'port': config.ssh_port
-            }
         )
-        ssh_manager = SSHJobManager(config=config)
-        ssh_manager.connect()
+        manager = get_job_manager(config=config)
         
         output_path = f"{config.root_path}/{job.name}/output.log" if config and job.name else "unknown"
         dashboard_logger.info(
-            f"Reading console output from {job.host or 'cluster'}", 
+            f"Reading console output from {job.host or 'server'}", 
             "dashboard",
             job_id=job.id,
             job_name=job.name,
             details={
                 'output_path': output_path,
-                'host': job.host or config.ssh_host
+                'host': job.host or 'localhost'
             }
         )
-        console_content = ssh_manager.get_console_output(job)
+        console_content = manager.get_console_output(job)
         
         line_count = len(console_content.split('\n')) if console_content else 0
         file_size = len(console_content) if console_content else 0
@@ -727,30 +703,25 @@ def job_error_log_view(request, job_id):
     
     try:
         dashboard_logger.info(
-            "Connecting to cluster", 
+            "Connecting to job backend", 
             "dashboard",
             job_id=job.id,
             job_name=job.name,
-            details={
-                'host': config.ssh_host,
-                'port': config.ssh_port
-            }
         )
-        ssh_manager = SSHJobManager(config=config)
-        ssh_manager.connect()
+        manager = get_job_manager(config=config)
         
         error_path = f"{config.root_path}/{job.name}" if config and job.name else "unknown"
         dashboard_logger.info(
-            f"Reading error logs from {job.host or 'cluster'}", 
+            f"Reading error logs from {job.host or 'server'}", 
             "dashboard",
             job_id=job.id,
             job_name=job.name,
             details={
                 'error_path': error_path,
-                'host': job.host or config.ssh_host
+                'host': job.host or 'localhost'
             }
         )
-        error_content = ssh_manager.get_error_log(job)
+        error_content = manager.get_error_log(job)
         error_updated = timezone.now()
         
         # Parse error file modification time from stat output
@@ -878,35 +849,27 @@ def refresh_jobs(request):
         ssh_username = os.getenv('SSH_USERNAME', 'unknown')
         
         dashboard_logger.info(
-            "Connecting to SSH", 
+            "Connecting to job backend", 
             "dashboard",
             details={
-                'host': config.ssh_host,
-                'port': config.ssh_port,
                 'user': ssh_username
             }
         )
-        ssh_manager = SSHJobManager(config=config)
-        ssh_manager.connect()
+        manager = get_job_manager(config=config)
         dashboard_logger.success(
-            "SSH connection established", 
+            "Connection established", 
             "dashboard",
-            details={
-                'host': config.ssh_host,
-                'connection_method': 'environment_credentials'
-            }
         )
         
         # Discover possible jobs
         dashboard_logger.info(
-            "Discovering jobs on cluster", 
+            "Discovering jobs", 
             "dashboard",
             details={
                 'root_path': config.root_path,
-                'search_location': f"{ssh_username}@{config.ssh_host}"
             }
         )
-        discovered_jobs = ssh_manager.discover_jobs()
+        discovered_jobs = manager.discover_jobs()
         dashboard_logger.success(
             f"Discovered {len(discovered_jobs)} jobs", 
             "dashboard",
@@ -918,14 +881,10 @@ def refresh_jobs(request):
         
         # Update running jobs status
         dashboard_logger.info(
-            "Querying SLURM for job status", 
+            "Querying job statuses", 
             "dashboard",
-            details={
-                'command': 'squeue',
-                'partition': config.slurm_partition
-            }
         )
-        ssh_manager.update_running_jobs_status()
+        manager.update_running_jobs_status()
         
         # Get updated counts
         running_count = ClusterJob.objects.filter(status='running').count()
@@ -990,37 +949,22 @@ def refresh_progress(request):
         return redirect('importer_dashboard:index')
     
     try:
-        ssh_username = os.getenv('SSH_USERNAME', 'unknown')
-        
         dashboard_logger.info(
-            "Connecting to SSH", 
+            "Connecting to job backend", 
             "dashboard",
-            details={
-                'host': config.ssh_host,
-                'port': config.ssh_port,
-                'user': ssh_username
-            }
         )
-        ssh_manager = SSHJobManager(config=config)
-        ssh_manager.connect()
+        manager = get_job_manager(config=config)
         dashboard_logger.success(
-            "SSH connection established", 
+            "Connection established", 
             "dashboard",
-            details={
-                'host': config.ssh_host
-            }
         )
         
-        # First update job status from SLURM
+        # First update job statuses
         dashboard_logger.info(
-            "Updating job statuses from SLURM", 
+            "Updating job statuses", 
             "dashboard",
-            details={
-                'command': 'squeue',
-                'partition': config.slurm_partition
-            }
         )
-        ssh_manager.update_running_jobs_status()
+        manager.update_running_jobs_status()
         
         # Get running jobs with hosts
         running_jobs = ClusterJob.objects.filter(status='running').exclude(host=None)
@@ -1029,12 +973,12 @@ def refresh_progress(request):
             "dashboard",
             details={
                 'active_jobs': running_jobs.count(),
-                'job_names': [job.name for job in running_jobs[:5]]  # First 5 jobs
+                'job_names': [job.name for job in running_jobs[:5]]
             }
         )
         
         # Refresh progress for each job
-        updated_count = ssh_manager.refresh_all_progress()
+        updated_count = manager.refresh_all_progress()
         
         dashboard_logger.success(
             f"Progress updated for {updated_count} jobs", 
@@ -1046,17 +990,30 @@ def refresh_progress(request):
         )
         
         # Auto-sync votes for running jobs
+        # Note: incremental_sync uses SSH internally; only run in cluster mode
         from .incremental_sync import sync_job_votes_incremental
         synced_jobs = 0
         synced_identified = 0
         synced_votes = 0
         synced_candidates = 0
         
-        dashboard_logger.info(
-            "Starting vote synchronization for running jobs",
-            "dashboard",
-            details={'job_count': running_jobs.count()}
-        )
+        importer_mode = getattr(settings, 'IMPORTER_MODE', 'cluster')
+        
+        if importer_mode == 'local':
+            # In local mode, vote databases are on the local filesystem.
+            # The incremental_sync module expects an SSH manager with exec_command,
+            # and our LocalJobManager has that — pass it through.
+            dashboard_logger.info(
+                "Starting local vote synchronization for running jobs",
+                "dashboard",
+                details={'job_count': running_jobs.count()}
+            )
+        else:
+            dashboard_logger.info(
+                "Starting vote synchronization for running jobs",
+                "dashboard",
+                details={'job_count': running_jobs.count()}
+            )
         
         for job in running_jobs:
             try:
@@ -1068,7 +1025,6 @@ def refresh_progress(request):
                 
                 # Only sync if it's been more than 5 minutes since last sync
                 if last_sync:
-                    from django.utils import timezone
                     time_since_sync = (timezone.now() - last_sync.synced_at).total_seconds()
                     if time_since_sync < 300:  # 5 minutes
                         dashboard_logger.info(
@@ -1079,14 +1035,15 @@ def refresh_progress(request):
                 
                 dashboard_logger.info(f"Syncing votes for {job.name}...", "dashboard")
                 
-                # Run incremental sync - reuse existing SSH connection!
-                result = sync_job_votes_incremental(job, ssh_manager=ssh_manager)
+                # Run incremental sync — pass the manager (works for both modes
+                # since LocalJobManager implements exec_command)
+                result = sync_job_votes_incremental(job, ssh_manager=manager)
                 
                 if result.get('success'):
                     synced_jobs += 1
                     synced_identified += result.get('identified_synced', 0)
                     synced_votes += result.get('votes_synced', 0)
-                    synced_candidates += result.get('votes_synced', 0)  # votes = candidates with votes
+                    synced_candidates += result.get('votes_synced', 0)
                     
                     # Update job counters from sync results AND actual database counts
                     job.refresh_from_db()
@@ -1185,23 +1142,23 @@ def settings_view(request):
 @login_required
 @require_http_methods(["POST"])
 def reconnect(request):
-    """Reconnect SSH connection"""
-    dashboard_logger.info("🔌 Attempting SSH reconnection...", "dashboard")
+    """Reconnect / verify the job backend connection"""
+    dashboard_logger.info("Verifying backend connection...", "dashboard")
     
     try:
         config = ImportJobConfig.objects.filter(is_default=True).first()
         if config:
-            ssh_manager = SSHJobManager(config=config)
-            ssh_manager.connect()
-            dashboard_logger.success("✅ SSH connection reestablished", "dashboard")
-            messages.success(request, "SSH connection reestablished successfully")
+            manager = get_job_manager(config=config)
+            manager.connect()  # no-op for local, real connect for SSH
+            dashboard_logger.success("Backend connection verified", "dashboard")
+            messages.success(request, "Backend connection verified successfully")
         else:
-            dashboard_logger.error("❌ No default configuration found", "dashboard")
+            dashboard_logger.error("No default configuration found", "dashboard")
             messages.error(request, "No default configuration found")
     except Exception as e:
-        dashboard_logger.error(f"❌ Failed to reconnect: {str(e)}", "dashboard")
+        dashboard_logger.error(f"Failed to connect: {str(e)}", "dashboard")
         logger.error(f"Failed to reconnect: {str(e)}")
-        messages.error(request, f"Failed to reconnect: {str(e)}")
+        messages.error(request, f"Failed to connect: {str(e)}")
     
     return redirect('importer_dashboard:index')
 
@@ -1212,18 +1169,17 @@ def git_pull(request):
     """Pull updates from GitHub repository"""
     try:
         config = ImportJobConfig.objects.filter(is_default=True).first()
-        ssh_manager = SSHJobManager(config=config)
-        ssh_manager.connect()
+        manager = get_job_manager(config=config)
         
-        cmd = f'cd {config.root_path} && git pull official master'
-        stdout, stderr = ssh_manager.exec_command(cmd)
+        root_path = getattr(settings, 'RMG_MODELS_PATH', config.root_path)
+        cmd = f'cd {root_path} && git pull official master'
+        stdout, stderr = manager.exec_command(cmd)
         
         if stderr:
             messages.warning(request, f"Git pull completed with warnings: {stderr}")
         else:
             messages.success(request, f"Git pull successful: {stdout}")
         
-        ssh_manager.disconnect()
     except Exception as e:
         logger.error(f"Failed to git pull: {str(e)}")
         messages.error(request, f"Failed to pull updates: {str(e)}")

@@ -210,6 +210,39 @@ LOGIN_URL = '/login/'
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/login/'
 
+CELERY_BROKER_URL = 'redis://localhost:6379/0'
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE  # or 'America/New_York'
+CELERY_TASK_TRACK_STARTED = True
+
+# Long-running import jobs need longer timeouts
+CELERY_TASK_TIME_LIMIT = 3 * 24 * 3600      # Hard limit: 3 days (matches your SLURM --time=3-00:00:00)
+CELERY_TASK_SOFT_TIME_LIMIT = 3 * 24 * 3600 - 300  # Soft limit: 3 days minus 5 min for cleanup
+CELERY_WORKER_CONCURRENCY = 2                # Limit concurrent imports (RMG is memory-heavy ~32GB each)
+CELERY_WORKER_MAX_MEMORY_PER_CHILD = 40_000_000  # Kill worker if it exceeds ~40GB (KB)
+
+# RMG/Importer paths on the office server
+RMG_PY_PATH = '/path/to/office/RMG-Py'
+RMG_DATABASE_PATH = '/path/to/office/RMG-database'
+RMG_MODELS_PATH = '/path/to/office/RMG-models'
+CONDA_ENV_NAME = 'rmg_env'
+
+# 'local' = Celery on office server, 'cluster' = SSH/SLURM on Explorer
+IMPORTER_MODE = 'local'
+
+# Celery Beat: periodic tasks (requires running `celery -A kms beat`)
+from celery.schedules import crontab
+
+CELERY_BEAT_SCHEDULE = {
+    'refresh-job-statuses': {
+        'task': 'importer_dashboard.refresh_all_job_statuses',
+        'schedule': 30.0,  # Every 30 seconds
+    },
+}
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Silence noisy RDKit warnings during imports/tests (e.g., unusual valence warnings)

@@ -144,6 +144,12 @@ class ClusterJob(models.Model):
     slurm_job_id = models.CharField(max_length=50, blank=True, null=True, 
                                    help_text="SLURM job ID")
     
+    # Celery task tracking (replaces SLURM for local execution)
+    celery_task_id = models.CharField(max_length=255, blank=True, null=True,
+                                      help_text="Celery task ID for local execution")
+    worker_pid = models.IntegerField(null=True, blank=True,
+                                     help_text="OS process ID of the running import")
+    
     # Job Status
     status = models.CharField(max_length=20, choices=ImportJobStatus.choices,
                              default=ImportJobStatus.PENDING)
