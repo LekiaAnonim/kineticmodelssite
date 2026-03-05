@@ -1,0 +1,140 @@
+[2026-02-26 19:17:26 -0500] [55202] [INFO] Starting gunicorn 23.0.0
+[2026-02-26 19:17:26 -0500] [55202] [INFO] Listening at: unix:/run/gunicorn/prometheus.sock (55202)
+[2026-02-26 19:17:26 -0500] [55202] [INFO] Using worker: sync
+[2026-02-26 19:17:26 -0500] [55212] [INFO] Booting worker with pid: 55212
+[2026-02-26 19:17:26 -0500] [55213] [INFO] Booting worker with pid: 55213
+[2026-02-26 19:17:26 -0500] [55214] [INFO] Booting worker with pid: 55214
+[2026-02-26 19:17:26 -0500] [55215] [INFO] Booting worker with pid: 55215
+[2026-02-26 19:31:55 -0500] [55202] [INFO] Handling signal: term
+[2026-02-27 00:31:55 +0000] [55212] [INFO] Worker exiting (pid: 55212)
+[2026-02-27 00:31:55 +0000] [55213] [INFO] Worker exiting (pid: 55213)
+[2026-02-27 00:31:55 +0000] [55214] [INFO] Worker exiting (pid: 55214)
+[2026-02-27 00:31:55 +0000] [55215] [INFO] Worker exiting (pid: 55215)
+[2026-02-26 19:31:55 -0500] [55202] [INFO] Shutting down: Master
+[2026-02-26 19:31:55 -0500] [57826] [INFO] Starting gunicorn 23.0.0
+[2026-02-26 19:31:55 -0500] [57826] [INFO] Listening at: unix:/run/gunicorn/prometheus.sock (57826)
+[2026-02-26 19:31:55 -0500] [57826] [INFO] Using worker: sync
+[2026-02-26 19:31:55 -0500] [57835] [INFO] Booting worker with pid: 57835
+[2026-02-26 19:31:55 -0500] [57836] [INFO] Booting worker with pid: 57836
+[2026-02-26 19:31:55 -0500] [57838] [INFO] Booting worker with pid: 57838
+[2026-02-26 19:31:56 -0500] [57839] [INFO] Booting worker with pid: 57839
+[2026-02-27 19:48:29 -0500] [57826] [CRITICAL] WORKER TIMEOUT (pid:57835)
+[2026-02-28 00:48:29 +0000] [57835] [ERROR] Error handling request /importer/logs/stream/
+Traceback (most recent call last):
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/gunicorn/workers/sync.py", line 134, in handle
+    self.handle_request(listener, req, client, addr)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/gunicorn/workers/sync.py", line 177, in handle_request
+    respiter = self.wsgi(environ, resp.start_response)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/wsgi.py", line 124, in __call__
+    response = self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/base.py", line 140, in get_response
+    response = self._middleware_chain(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/base.py", line 197, in _get_response
+    response = wrapped_callback(request, *callback_args, **callback_kwargs)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/contrib/auth/decorators.py", line 23, in _wrapper_view
+    return view_func(request, *args, **kwargs)
+  File "/home/prometheus/app/importer_dashboard/views.py", line 1301, in stream_logs
+    response = HttpResponse(event_stream(), content_type='text/event-stream')
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/http/response.py", line 376, in __init__
+    self.content = content
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/http/response.py", line 401, in content
+    content = b"".join(self.make_bytes(chunk) for chunk in value)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/http/response.py", line 401, in <genexpr>
+    content = b"".join(self.make_bytes(chunk) for chunk in value)
+  File "/home/prometheus/app/importer_dashboard/views.py", line 1299, in event_stream
+    time.sleep(2)  # Check every 2 seconds
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/gunicorn/workers/base.py", line 204, in handle_abort
+    sys.exit(1)
+SystemExit: 1
+[2026-02-28 00:48:29 +0000] [57835] [INFO] Worker exiting (pid: 57835)
+[2026-02-27 19:48:30 -0500] [230486] [INFO] Booting worker with pid: 230486
+[2026-02-27 19:50:35 -0500] [57826] [CRITICAL] WORKER TIMEOUT (pid:57839)
+[2026-02-28 00:50:35 +0000] [57839] [ERROR] Error handling request /importer/logs/stream/
+Traceback (most recent call last):
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/gunicorn/workers/sync.py", line 134, in handle
+    self.handle_request(listener, req, client, addr)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/gunicorn/workers/sync.py", line 177, in handle_request
+    respiter = self.wsgi(environ, resp.start_response)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/wsgi.py", line 124, in __call__
+    response = self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/base.py", line 140, in get_response
+    response = self._middleware_chain(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/utils/deprecation.py", line 134, in __call__
+    response = response or self.get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/exception.py", line 55, in inner
+    response = get_response(request)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/core/handlers/base.py", line 197, in _get_response
+    response = wrapped_callback(request, *callback_args, **callback_kwargs)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/contrib/auth/decorators.py", line 23, in _wrapper_view
+    return view_func(request, *args, **kwargs)
+  File "/home/prometheus/app/importer_dashboard/views.py", line 1301, in stream_logs
+    response = HttpResponse(event_stream(), content_type='text/event-stream')
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/http/response.py", line 376, in __init__
+    self.content = content
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/http/response.py", line 401, in content
+    content = b"".join(self.make_bytes(chunk) for chunk in value)
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/django/http/response.py", line 401, in <genexpr>
+    content = b"".join(self.make_bytes(chunk) for chunk in value)
+  File "/home/prometheus/app/importer_dashboard/views.py", line 1299, in event_stream
+    time.sleep(2)  # Check every 2 seconds
+  File "/home/prometheus/miniconda3/envs/kms/lib/python3.9/site-packages/gunicorn/workers/base.py", line 204, in handle_abort
+    sys.exit(1)
+SystemExit: 1
+[2026-02-28 00:50:35 +0000] [57839] [INFO] Worker exiting (pid: 57839)
+[2026-02-27 19:50:35 -0500] [230817] [INFO] Booting worker with pid: 230817
