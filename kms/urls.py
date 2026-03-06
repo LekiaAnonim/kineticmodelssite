@@ -30,6 +30,7 @@ urlpatterns = [
     ),
     path("chemked/", include("chemked_database.urls")),
     path("analysis/", include(("analysis.urls", "analysis"), namespace="analysis")),
+    path("livequery/", include(("livequery.urls", "livequery"), namespace="livequery")),
     path("admin/", admin.site.urls),
     path("login/", LoginView.as_view(template_name="database/login.html"), name="login"),
     path("logout/", LogoutView.as_view(), name="logout"),

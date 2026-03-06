@@ -43,6 +43,7 @@ ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split(" ")
 # Application definition
 
 INSTALLED_APPS = [
+    "livequery.apps.LiveQueryConfig",
     "analysis.apps.AnalysisConfig",
     "chemked_database.apps.ChemkedDatabaseConfig",
     "importer_dashboard.apps.ImporterDashboardConfig",
