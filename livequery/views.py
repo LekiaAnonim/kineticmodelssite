@@ -349,7 +349,7 @@ def _get_table_columns(table_name: str):
         return []
 
 
-@login_required
+# @login_required
 def query_console(request):
     form = QueryForm(request.POST or None)
     columns: list[str] = []
