@@ -200,7 +200,14 @@ class LocalJobManager:
             if result.state == 'PENDING':
                 job.status = ImportJobStatus.PENDING
             elif result.state == 'STARTED' or result.state == 'RETRY':
-                job.status = ImportJobStatus.RUNNING
+                if job.worker_pid and not self._is_pid_running(job.worker_pid):
+                    job.status = ImportJobStatus.FAILED
+                    job.completed_at = timezone.now()
+                    logger.warning(
+                        f"Marking job {job.name} as failed: worker PID {job.worker_pid} is not running"
+                    )
+                else:
+                    job.status = ImportJobStatus.RUNNING
             elif result.state == 'SUCCESS':
                 job.status = ImportJobStatus.COMPLETED
                 job.completed_at = timezone.now()
@@ -313,3 +320,11 @@ class LocalJobManager:
         except Exception as e:
             logger.warning(f"Could not tail {path}: {e}")
             return None
+
+    def _is_pid_running(self, pid):
+        """Return True if a local PID currently exists."""
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True

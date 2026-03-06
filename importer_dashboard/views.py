@@ -50,6 +50,14 @@ def dashboard_index(request):
         }
     )
 
+    # Keep statuses fresh so stale local/Celery jobs don't appear as running.
+    if config:
+        try:
+            manager = get_job_manager(config=config)
+            manager.update_running_jobs_status()
+        except Exception as exc:
+            logger.warning(f"Could not refresh job statuses on dashboard load: {exc}")
+
     # Get all jobs ordered with running jobs first, then alphabetically by name
     jobs = ClusterJob.objects.annotate(
         status_priority=Case(

@@ -58,21 +58,17 @@ def run_import_job(self, job_id):
     models_root = getattr(settings, 'RMG_MODELS_PATH', '/path/to/rmg_models')
     rmg_py_path = getattr(settings, 'RMG_PY_PATH', '/path/to/RMG-Py')
     conda_env = getattr(settings, 'CONDA_ENV_NAME', 'rmg_env')
+    conda_base = getattr(settings, 'CONDA_BASE_PATH', '/home/prometheus/miniconda3')
     job_path = os.path.join(models_root, job.name)
+
+    # Parse the actual import.sh to get the correct command for this mechanism.
+    # Each import.sh has different filenames (species, thermo, reactions, etc.)
+    import_sh_path = os.path.join(job_path, 'import.sh')
+    command = _build_command_from_import_sh(import_sh_path, rmg_py_path, conda_env, job_path)
 
     # Build the command that import.sh used to run
     # This mirrors the sbatch script from the cluster
     port = job.port or 0
-    command = (
-        f'source activate {conda_env} && '
-        f'cd {job_path} && '
-        f'python {rmg_py_path}/scripts/importChemkin.py '
-        f'--name "{job.name}" '
-        f'--port {port} '
-        f'mechanism.txt '
-        f'thermo.txt '
-        f'2>&1'
-    )
 
     # Set up log files (same structure as the cluster)
     output_log = os.path.join(job_path, 'output.log')
@@ -80,6 +76,14 @@ def run_import_job(self, job_id):
 
     logger.info(f"Starting import for {job.name} at {job_path}")
     logger.info(f"Command: {command}")
+
+    conda_bin = os.path.join(conda_base, 'envs', conda_env, 'bin')
+    proc_env = {
+        **os.environ,
+        'PYTHONPATH': rmg_py_path,
+        'RMG': rmg_py_path,
+        'PATH': f'{conda_bin}:{os.environ.get("PATH", "")}',
+    }
 
     process = None
     try:
@@ -91,11 +95,7 @@ def run_import_job(self, job_id):
                 stderr=stderr_f,
                 cwd=job_path,
                 preexec_fn=os.setsid,  # Create process group for clean kill
-                env={
-                    **os.environ,
-                    'PYTHONPATH': rmg_py_path,
-                    'RMG': rmg_py_path,
-                }
+                env=proc_env,
             )
 
             # Store PID for potential cancellation
@@ -162,6 +162,102 @@ def run_import_job(self, job_id):
             message=f'Unexpected error: {str(e)}'
         )
         return {'status': 'error', 'job_id': job_id, 'error': str(e)}
+
+
+def _build_command_from_import_sh(import_sh_path, rmg_py_path, conda_env, job_path):
+    """
+    Parse import.sh and build a local command from it.
+
+    Each mechanism's import.sh has different filenames and flags. Example:
+
+        python -m cProfile -o importChemkin.profile $RMGpy/importChemkin.py \\
+            --species hfcmech_v448a.txt \\
+            --reactions hfcmech_v448a.txt \\
+            --thermo thermo-hfo1234zee-burcat-c.txt \\
+            --known SMILES.txt \\
+            --port 8179
+
+    This function:
+    1. Reads import.sh
+    2. Strips SLURM headers (#SBATCH), comments, blank lines, and the
+       cProfile/gprof2dot wrapper
+    3. Extracts the actual importChemkin.py invocation with all its args
+    4. Replaces $RMGpy with the real path
+    5. Wraps it with conda activation
+
+    Returns a shell command string ready for subprocess.
+    """
+    import re
+
+    if not os.path.exists(import_sh_path):
+        raise FileNotFoundError(
+            f"import.sh not found at {import_sh_path}. "
+            f"Cannot determine the correct command for this mechanism."
+        )
+
+    with open(import_sh_path, 'r') as f:
+        raw_content = f.read()
+
+    # Join continuation lines (backslash + newline)
+    content = raw_content.replace('\\\n', ' ')
+
+    # Find the line that runs importChemkin.py
+    import_cmd = None
+    for line in content.splitlines():
+        stripped = line.strip()
+
+        # Skip empty lines, shebangs, SBATCH directives, comments
+        if not stripped or stripped.startswith('#'):
+            continue
+
+        # Skip gprof2dot post-processing line
+        if 'gprof2dot' in stripped:
+            continue
+
+        # This is the importChemkin command (possibly wrapped in cProfile)
+        if 'importChemkin' in stripped:
+            import_cmd = stripped
+            break
+
+    if not import_cmd:
+        raise ValueError(
+            f"Could not find importChemkin.py command in {import_sh_path}. "
+            f"File contents:\n{raw_content[:500]}"
+        )
+
+    # Strip cProfile wrapper: "python -m cProfile -o importChemkin.profile $RMGpy/importChemkin.py ..."
+    # becomes:                 "python $RMGpy/importChemkin.py ..."
+    import_cmd = re.sub(
+        r'python\s+-m\s+cProfile\s+-o\s+\S+\s+',
+        'python ',
+        import_cmd
+    )
+
+    # Replace $RMGpy or ${RMGpy} with the actual path
+    import_cmd = import_cmd.replace('$RMGpy', rmg_py_path)
+    import_cmd = import_cmd.replace('${RMGpy}', rmg_py_path)
+    import_cmd = import_cmd.replace('$RMG', rmg_py_path)
+    import_cmd = import_cmd.replace('${RMG}', rmg_py_path)
+
+    # Collapse multiple spaces
+    import_cmd = re.sub(r'\s+', ' ', import_cmd).strip()
+
+    import_cmd = re.sub(
+        r'^python\b',
+        f'/home/prometheus/miniconda3/envs/{conda_env}/bin/python',
+        import_cmd
+    )
+
+    # Wrap with conda activation and cd
+    command = (
+        f'cd {job_path} && '
+        f'{import_cmd} '
+        f'2>&1'
+    )
+
+    logger.info(f"Built command from import.sh: {command}")
+    return command
+
 
 
 def _update_completion_stats(job, job_path):

@@ -114,15 +114,17 @@
                 </td>
                 <td>{{ job.host|default:"-" }}</td>
                 <td>
-                    {% if job.slurm_job_id %}
+                    {% if job.status == 'running' and job.port %}
                         {% if job.host == 'Pending...' %}
                             <a href="{% url 'importer_dashboard:refresh_jobs' %}">refresh</a>
+                        {% elif job.host == 'localhost' or job.host == '127.0.0.1' %}
+                            <a href="#" onclick="window.open('http://' + window.location.hostname + ':{{ job.port }}/', '_blank'); return false;">open</a>
+                        {% elif job.ood_url %}
+                            <a href="{{ job.ood_url }}" target="_blank">open</a>
+                        {% elif job.host %}
+                            <a href="http://{{ job.host }}:{{ job.port }}/" target="_blank">open</a>
                         {% else %}
-                            {% if job.ood_url %}
-                                <a href="{{ job.ood_url }}" target="_blank">open</a>
-                            {% else %}
-                                <span title="Compute node not assigned yet">-</span>
-                            {% endif %}
+                            <span title="Compute node not assigned yet">-</span>
                         {% endif %}
                     {% else %}
                         -
