@@ -58,6 +58,7 @@ def run_import_job(self, job_id):
     models_root = getattr(settings, 'RMG_MODELS_PATH', '/path/to/rmg_models')
     rmg_py_path = getattr(settings, 'RMG_PY_PATH', '/path/to/RMG-Py')
     conda_env = getattr(settings, 'CONDA_ENV_NAME', 'rmg_env')
+    conda_base = getattr(settings, 'CONDA_BASE_PATH', '/home/prometheus/miniconda3')
     job_path = os.path.join(models_root, job.name)
 
     # Parse the actual import.sh to get the correct command for this mechanism.
@@ -65,12 +66,24 @@ def run_import_job(self, job_id):
     import_sh_path = os.path.join(job_path, 'import.sh')
     command = _build_command_from_import_sh(import_sh_path, rmg_py_path, conda_env, job_path)
 
+    # Build the command that import.sh used to run
+    # This mirrors the sbatch script from the cluster
+    port = job.port or 0
+
     # Set up log files (same structure as the cluster)
     output_log = os.path.join(job_path, 'output.log')
     error_log = os.path.join(job_path, 'error.log')
 
     logger.info(f"Starting import for {job.name} at {job_path}")
     logger.info(f"Command: {command}")
+
+    conda_bin = os.path.join(conda_base, 'envs', conda_env, 'bin')
+    proc_env = {
+        **os.environ,
+        'PYTHONPATH': rmg_py_path,
+        'RMG': rmg_py_path,
+        'PATH': f'{conda_bin}:{os.environ.get("PATH", "")}',
+    }
 
     process = None
     try:
@@ -82,11 +95,7 @@ def run_import_job(self, job_id):
                 stderr=stderr_f,
                 cwd=job_path,
                 preexec_fn=os.setsid,  # Create process group for clean kill
-                env={
-                    **os.environ,
-                    'PYTHONPATH': rmg_py_path,
-                    'RMG': rmg_py_path,
-                }
+                env=proc_env,
             )
 
             # Store PID for potential cancellation
@@ -233,9 +242,14 @@ def _build_command_from_import_sh(import_sh_path, rmg_py_path, conda_env, job_pa
     # Collapse multiple spaces
     import_cmd = re.sub(r'\s+', ' ', import_cmd).strip()
 
+    import_cmd = re.sub(
+        r'^python\b',
+        f'/home/prometheus/miniconda3/envs/{conda_env}/bin/python',
+        import_cmd
+    )
+
     # Wrap with conda activation and cd
     command = (
-        f'source activate {conda_env} && '
         f'cd {job_path} && '
         f'{import_cmd} '
         f'2>&1'
