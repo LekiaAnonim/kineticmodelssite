@@ -226,11 +226,11 @@ CELERY_WORKER_CONCURRENCY = 2                # Limit concurrent imports (RMG is 
 CELERY_WORKER_MAX_MEMORY_PER_CHILD = 40_000_000  # Kill worker if it exceeds ~40GB (KB)
 
 # RMG/Importer paths on the office server
-RMG_PY_PATH = '/home/prometheus/Importer/RMG-Py'
-RMG_DATABASE_PATH = '/home/prometheus/Importer/RMG-database'
-RMG_MODELS_PATH = '/home/prometheus/Importer/RMG-models'
-CONDA_ENV_NAME = 'rmg_env'
-CONDA_BASE_PATH = '/home/prometheus/miniconda3'
+RMG_PY_PATH = os.getenv('RMGpy', '/home/prometheus/Importer/RMG-Py')
+RMG_DATABASE_PATH = os.getenv('RMG_DATABASE_PATH', '/home/prometheus/Importer/RMG-database')
+RMG_MODELS_PATH = os.getenv('RMGMODELSPATH', '/home/prometheus/Importer/RMG-models')
+CONDA_ENV_NAME = os.getenv('CONDA_ENV_NAME', 'rmg_env')
+CONDA_BASE_PATH = os.getenv('CONDA_BASE_PATH', '/home/prometheus/miniconda3')
 
 # 'local' = Celery on office server, 'cluster' = SSH/SLURM on Explorer
 IMPORTER_MODE = 'local'
