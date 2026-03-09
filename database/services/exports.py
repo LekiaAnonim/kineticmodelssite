@@ -988,7 +988,7 @@ def _run_ck2yaml(input_path, thermo_path, transport_path, output_path):
     repair_count = 0
 
     while True:
-        args = ["--input", input_path, "--output", output_path, "--no-validate", "--quiet"]
+        args = ["--input", input_path, "--output", output_path, "--no-validate", "--quiet", "--permissive"]
         if thermo_path:
             args.extend(["--thermo", thermo_path])
         if transport_path:
