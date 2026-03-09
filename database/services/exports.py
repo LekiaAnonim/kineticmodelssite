@@ -448,11 +448,24 @@ def _patch_duplicate_reactions_yaml(content):
 
     # ── 4. Insert ``duplicate: true`` lines (iterate from bottom up to
     #       keep indices stable). ──
+    #   Multi-line equations: ck2yaml may wrap long equations across
+    #   several lines.  Continuation lines are indented deeper than
+    #   regular reaction sub-keys.  We must skip past them so that
+    #   ``duplicate: true`` is inserted after the full equation text.
+    subkey_re = re.compile(r"^(\s+)\S")
     for line_idx, indent in reversed(inserts):
-        # Insert right after the equation line, with proper indentation:
-        # "- equation: …" uses indent + "- ", so sub-keys use indent + "  "
+        insert_after = line_idx
+        # The indent level of a reaction sub-key is ``indent + "  "``
+        # (two spaces deeper than the ``-``).  Any line indented more
+        # than that is a continuation of the equation string.
+        subkey_indent = len(indent) + 2
+        for check_idx in range(line_idx + 1, len(lines)):
+            m = subkey_re.match(lines[check_idx])
+            if not m or len(m.group(1)) <= subkey_indent:
+                break
+            insert_after = check_idx
         new_line = indent + "  duplicate: true"
-        lines.insert(line_idx + 1, new_line)
+        lines.insert(insert_after + 1, new_line)
 
     return "\n".join(lines).encode("utf-8")
 
