@@ -30,7 +30,7 @@ class GridDefinition:
 
 
 def default_temperature_grid() -> tuple[float, ...]:
-    return tuple(np.arange(500.0, 3001.0, 100.0))
+    return tuple(np.arange(800.0, 3001.0, 100.0))
 
 
 def default_pressure_grid_atm() -> tuple[float, ...]:
@@ -174,7 +174,7 @@ def run_ignition_delay_case(
     phi: float,
     fuel: Optional[str] = None,
     oxidizer: Optional[str] = None,
-    max_time: float = 1.0,
+    max_time: float = 10.0,
     max_steps: int = 5000,
     ignition_target: str = 'temperature',
     ignition_type: str = 'd/dt max',
@@ -375,7 +375,7 @@ def iter_grid_results(
     task_count: int = 1,
     fuel: Optional[str] = None,
     oxidizer: Optional[str] = None,
-    max_time: float = 1.0,
+    max_time: float = 10.0,
     max_steps: int = 5000,
     ignition_target: str = 'temperature',
     ignition_type: str = 'd/dt max',

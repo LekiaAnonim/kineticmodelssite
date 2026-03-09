@@ -96,8 +96,8 @@ class Command(BaseCommand):
         parser.add_argument(
             '--max-time',
             type=float,
-            default=1.0,
-            help='Simulation end time in seconds.',
+            default=10.0,
+            help='Simulation end time in seconds.'
         )
         parser.add_argument(
             '--max-steps',
