@@ -233,6 +233,17 @@ def run_ignition_delay_case(
     times_array = np.asarray(times, dtype=float)
     temperatures_array = np.asarray(temperatures, dtype=float)
     pressures_array = np.asarray(pressures, dtype=float)
+
+    # Guard against false-positive ignition detection.  A real ignition
+    # event causes a substantial temperature rise; if the temperature
+    # barely changed, no meaningful ignition occurred and any "peak"
+    # found by detect_peaks is numerical noise.
+    delta_T = float(temperatures_array.max() - temperatures_array[0])
+    if delta_T < 50.0:
+        raise RuntimeError(
+            f'No significant temperature rise detected '
+            f'(delta_T = {delta_T:.1f} K < 50 K); ignition did not occur.'
+        )
     target_name, target = resolve_target_series(
         ignition_target=ignition_target,
         gas=gas,
