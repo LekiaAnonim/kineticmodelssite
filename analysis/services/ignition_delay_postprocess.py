@@ -3,12 +3,13 @@ import json
 import math
 import re
 import statistics
-import tempfile
 from collections import defaultdict
 from pathlib import Path
 
 # Large multi-line Cantera tracebacks can exceed the default 128 KB limit.
 csv.field_size_limit(10 * 1024 * 1024)  # 10 MB
+
+SANITIZED_SUBDIR = '_sanitized'
 
 
 def _parse_float(raw_value):
@@ -48,16 +49,39 @@ def _sanitize_error(raw: str) -> str:
     return raw.splitlines()[0].strip()
 
 
-def sanitize_shard_csvs(run_dir: Path) -> dict:
-    """Rewrite shard CSVs in-place, collapsing multi-line error fields.
+def sanitize_shard_csvs(run_dir: Path, *, include_incomplete: bool = False) -> dict:
+    """Write sanitized copies of shard CSVs to a ``_sanitized/`` subdirectory.
+
+    Originals are **never modified**, so this is safe to run while Slurm
+    tasks are still appending rows.  Shards that are still in-progress
+    (no companion ``.json`` metadata file) are skipped by default unless
+    *include_incomplete* is set.  Already-sanitized shards whose source
+    file has not grown since the last run are also skipped.
 
     Returns a summary dict with counts of sanitized rows per shard.
     """
     csv_paths = shard_csv_paths(run_dir)
+    out_dir = run_dir / SANITIZED_SUBDIR
+    out_dir.mkdir(exist_ok=True)
+
     total_sanitized = 0
+    skipped_in_progress = []
     shard_details = {}
 
     for csv_path in csv_paths:
+        # A shard is considered complete when its .json metadata exists.
+        meta_path = csv_path.with_suffix('.json')
+        if not include_incomplete and not meta_path.exists():
+            skipped_in_progress.append(csv_path.name)
+            continue
+
+        dest_path = out_dir / csv_path.name
+
+        # Skip if the sanitized copy is already up-to-date.
+        if dest_path.exists() and dest_path.stat().st_mtime >= csv_path.stat().st_mtime:
+            shard_details[csv_path.name] = 0
+            continue
+
         rows = []
         sanitized_in_shard = 0
 
@@ -72,20 +96,10 @@ def sanitize_shard_csvs(run_dir: Path) -> dict:
                     sanitized_in_shard += 1
                 rows.append(row)
 
-        if sanitized_in_shard:
-            # Atomic rewrite: write to a temp file then rename.
-            tmp_fd, tmp_path = tempfile.mkstemp(
-                dir=csv_path.parent, suffix='.tmp', prefix=csv_path.stem
-            )
-            try:
-                with open(tmp_fd, 'w', newline='', encoding='utf-8') as handle:
-                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
-                    writer.writeheader()
-                    writer.writerows(rows)
-                Path(tmp_path).replace(csv_path)
-            except BaseException:
-                Path(tmp_path).unlink(missing_ok=True)
-                raise
+        with dest_path.open('w', newline='', encoding='utf-8') as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
 
         total_sanitized += sanitized_in_shard
         shard_details[csv_path.name] = sanitized_in_shard
@@ -93,7 +107,9 @@ def sanitize_shard_csvs(run_dir: Path) -> dict:
     return {
         'shards_processed': len(csv_paths),
         'rows_sanitized': total_sanitized,
+        'sanitized_dir': str(out_dir),
         'shard_details': shard_details,
+        'skipped_in_progress': skipped_in_progress,
     }
 
 
@@ -131,6 +147,8 @@ def merge_shard_csvs(run_dir: Path, merged_csv_path: Path) -> dict:
     if not csv_paths:
         raise ValueError(f'No shard CSV files found in {run_dir}')
 
+    sanitized_dir = run_dir / SANITIZED_SUBDIR
+
     fieldnames = None
     row_count = 0
 
@@ -138,7 +156,17 @@ def merge_shard_csvs(run_dir: Path, merged_csv_path: Path) -> dict:
         writer = None
 
         for csv_path in csv_paths:
-            with csv_path.open('r', newline='', encoding='utf-8') as in_handle:
+            # Prefer the sanitized copy if it exists and is up-to-date.
+            sanitized_path = sanitized_dir / csv_path.name
+            if (
+                sanitized_path.exists()
+                and sanitized_path.stat().st_mtime >= csv_path.stat().st_mtime
+            ):
+                read_path = sanitized_path
+            else:
+                read_path = csv_path
+
+            with read_path.open('r', newline='', encoding='utf-8') as in_handle:
                 reader = csv.DictReader(in_handle)
                 if fieldnames is None:
                     fieldnames = list(reader.fieldnames or [])

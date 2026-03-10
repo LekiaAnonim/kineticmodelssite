@@ -23,6 +23,11 @@ class Command(BaseCommand):
             required=True,
             help='Run subdirectory to sanitize.',
         )
+        parser.add_argument(
+            '--include-incomplete',
+            action='store_true',
+            help='Also sanitize shards that are still in-progress (no .json metadata yet).',
+        )
 
     def handle(self, *args, **options):
         input_dir = Path(options['input_dir']).expanduser().resolve()
@@ -33,7 +38,17 @@ class Command(BaseCommand):
 
         self.stdout.write(f'Sanitizing shard CSVs in {run_dir} ...')
 
-        stats = sanitize_shard_csvs(run_dir)
+        stats = sanitize_shard_csvs(
+            run_dir, include_incomplete=options['include_incomplete'],
+        )
+
+        if stats['skipped_in_progress']:
+            self.stdout.write(
+                self.style.NOTICE(
+                    f'Skipped {len(stats["skipped_in_progress"])} in-progress '
+                    f'shards (no .json metadata). Use --include-incomplete to force.'
+                )
+            )
 
         if stats['rows_sanitized']:
             self.stdout.write(
@@ -45,6 +60,7 @@ class Command(BaseCommand):
             for name, count in sorted(stats['shard_details'].items()):
                 if count:
                     self.stdout.write(f'  {name}: {count}')
+            self.stdout.write(f'Sanitized copies in: {stats["sanitized_dir"]}')
         else:
             self.stdout.write(
                 self.style.SUCCESS(
