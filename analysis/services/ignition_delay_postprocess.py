@@ -1,9 +1,14 @@
 import csv
 import json
 import math
+import re
 import statistics
+import tempfile
 from collections import defaultdict
 from pathlib import Path
+
+# Large multi-line Cantera tracebacks can exceed the default 128 KB limit.
+csv.field_size_limit(10 * 1024 * 1024)  # 10 MB
 
 
 def _parse_float(raw_value):
@@ -20,6 +25,76 @@ def _is_valid_delay(row: dict) -> bool:
         return False
     delay = _parse_float(row.get('ignition_delay_s'))
     return math.isfinite(delay) and delay > 0.0
+
+
+_CANTERA_HEADER_RE = re.compile(
+    r'CanteraError thrown by (\S+):\s*(.+?)(?:\n|$)',
+)
+
+
+def _sanitize_error(raw: str) -> str:
+    """Collapse multi-line Cantera tracebacks into a concise single line."""
+    if '\n' not in raw:
+        return raw
+    match = _CANTERA_HEADER_RE.search(raw)
+    if match:
+        source, headline = match.group(1), match.group(2).strip()
+        return f'CanteraError in {source}: {headline}'
+    # Non-Cantera multi-line error: keep only the first non-blank line.
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped and stripped != '*' * len(stripped):
+            return stripped
+    return raw.splitlines()[0].strip()
+
+
+def sanitize_shard_csvs(run_dir: Path) -> dict:
+    """Rewrite shard CSVs in-place, collapsing multi-line error fields.
+
+    Returns a summary dict with counts of sanitized rows per shard.
+    """
+    csv_paths = shard_csv_paths(run_dir)
+    total_sanitized = 0
+    shard_details = {}
+
+    for csv_path in csv_paths:
+        rows = []
+        sanitized_in_shard = 0
+
+        with csv_path.open('r', newline='', encoding='utf-8') as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = list(reader.fieldnames or [])
+            for row in reader:
+                raw_error = row.get('error', '')
+                clean_error = _sanitize_error(raw_error)
+                if clean_error != raw_error:
+                    row['error'] = clean_error
+                    sanitized_in_shard += 1
+                rows.append(row)
+
+        if sanitized_in_shard:
+            # Atomic rewrite: write to a temp file then rename.
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=csv_path.parent, suffix='.tmp', prefix=csv_path.stem
+            )
+            try:
+                with open(tmp_fd, 'w', newline='', encoding='utf-8') as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(rows)
+                Path(tmp_path).replace(csv_path)
+            except BaseException:
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
+
+        total_sanitized += sanitized_in_shard
+        shard_details[csv_path.name] = sanitized_in_shard
+
+    return {
+        'shards_processed': len(csv_paths),
+        'rows_sanitized': total_sanitized,
+        'shard_details': shard_details,
+    }
 
 
 def shard_csv_paths(run_dir: Path) -> list[Path]:

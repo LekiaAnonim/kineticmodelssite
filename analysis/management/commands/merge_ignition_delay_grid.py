@@ -9,6 +9,7 @@ from analysis.services import (
     detect_missing_tasks,
     load_shard_metadata,
     merge_shard_csvs,
+    sanitize_shard_csvs,
 )
 
 
@@ -72,6 +73,16 @@ class Command(BaseCommand):
         self.stdout.write(f'Run directory:      {run_dir}')
         self.stdout.write(f'Metadata shards:    {len(metadata)}')
         self.stdout.write(f'Missing tasks:      {missing_tasks or "none"}')
+
+        sanitize_stats = sanitize_shard_csvs(run_dir)
+        if sanitize_stats['rows_sanitized']:
+            self.stdout.write(
+                self.style.WARNING(
+                    f'Sanitized {sanitize_stats["rows_sanitized"]} '
+                    f'multi-line error fields across '
+                    f'{sanitize_stats["shards_processed"]} shards.'
+                )
+            )
 
         merge_stats = merge_shard_csvs(run_dir, merged_csv_path)
         discrimination_stats = compute_condition_statistics(
