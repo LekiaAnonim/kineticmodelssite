@@ -38,8 +38,20 @@ class Structure(models.Model):
     def __str__(self):
         return self.adjacency_list
 
+    # Non-standard adjacency list tokens introduced by PrIMe/ReSpecTh data
+    _NON_STANDARD_TOKENS = {"molecularTermSymbol"}
+
+    def _clean_adjacency_list(self):
+        """Strip non-standard PrIMe/ReSpecTh lines from the adjacency list."""
+        lines = self.adjacency_list.splitlines()
+        cleaned = [
+            line for line in lines
+            if not line.split() or line.split()[0] not in self._NON_STANDARD_TOKENS
+        ]
+        return "\n".join(cleaned)
+
     def to_rmg(self):
-        return Molecule().from_adjacency_list(self.adjacency_list)
+        return Molecule().from_adjacency_list(self._clean_adjacency_list())
 
 
 class Species(models.Model):

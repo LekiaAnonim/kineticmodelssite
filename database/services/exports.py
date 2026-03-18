@@ -115,6 +115,7 @@ def _find_rmg_chemkin_files(kinetic_model):
         if not reactions and (
             fl in ('mechanism.txt', 'chem.inp', 'chem.dat')
             or fl.endswith('_chem.inp')
+            or fl.endswith('_chemkin.txt')
             or fl == 'reactions.txt'
         ):
             with open(fpath, 'rb') as f:
