@@ -29,6 +29,7 @@ from .ignition_delay_postprocess import (
     detect_missing_tasks,
     load_shard_metadata,
     merge_shard_csvs,
+    sanitize_shard_csvs,
 )
 
 __all__ = [
@@ -55,4 +56,5 @@ __all__ = [
     'detect_missing_tasks',
     'load_shard_metadata',
     'merge_shard_csvs',
+    'sanitize_shard_csvs',
 ]

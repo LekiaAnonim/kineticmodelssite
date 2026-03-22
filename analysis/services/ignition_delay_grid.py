@@ -40,7 +40,7 @@ def default_pressure_grid_atm() -> tuple[float, ...]:
 
 
 def default_phi_grid() -> tuple[float, ...]:
-    phi_lean = np.arange(0.05, 1.0 + 1e-9, 0.005)
+    phi_lean = np.arange(0.05, 1.0 + 1e-9, 0.05)
     phi_rich = np.arange(1.5, 8.0 + 1e-9, 0.5)
     phis = np.unique(np.concatenate([phi_lean, phi_rich]))
     return tuple(float(value) for value in phis)

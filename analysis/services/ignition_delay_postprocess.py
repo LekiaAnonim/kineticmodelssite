@@ -11,6 +11,13 @@ csv.field_size_limit(10 * 1024 * 1024)  # 10 MB
 
 SANITIZED_SUBDIR = '_sanitized'
 
+_RMG_INDEX_RE = re.compile(r'\(\d+\)$')
+
+
+def _normalize_target(name: str) -> str:
+    """Strip RMG species indices and upper-case: OH(10), oh(3) → OH."""
+    return _RMG_INDEX_RE.sub('', name).upper() if name else ''
+
 
 def _parse_float(raw_value):
     if raw_value in (None, ''):
@@ -190,20 +197,17 @@ def merge_shard_csvs(run_dir: Path, merged_csv_path: Path) -> dict:
 
 
 def compute_condition_statistics(merged_csv_path: Path, output_csv_path: Path) -> dict:
-    groups = defaultdict(list)
+    # First pass: collect rows per condition_index, deduplicating by model_pk.
+    # When duplicates exist (e.g. overlapping Slurm array runs), keep the first.
+    groups: dict[int, dict] = defaultdict(dict)  # {condition_index: {model_pk: row}}
 
     with merged_csv_path.open('r', newline='', encoding='utf-8') as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            group_key = (
-                int(row['condition_index']),
-                float(row['temperature_K']),
-                float(row['pressure_atm']),
-                float(row['phi']),
-                row.get('ignition_target') or row.get('criterion', ''),
-                row.get('ignition_type') or '',
-            )
-            groups[group_key].append(row)
+            cond_idx = int(row['condition_index'])
+            model_pk = int(row['model_pk'])
+            if model_pk not in groups[cond_idx]:
+                groups[cond_idx][model_pk] = row
 
     fieldnames = [
         'condition_index',
@@ -230,8 +234,20 @@ def compute_condition_statistics(merged_csv_path: Path, output_csv_path: Path) -
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
 
-        for key in sorted(groups):
-            rows = groups[key]
+        for cond_idx in sorted(groups):
+            model_rows = groups[cond_idx]
+            rows = list(model_rows.values())
+            first = rows[0]
+
+            # Derive condition metadata from the first row.
+            temperature_K = float(first['temperature_K'])
+            pressure_atm = float(first['pressure_atm'])
+            phi = float(first['phi'])
+            ignition_target = _normalize_target(
+                first.get('ignition_target') or first.get('criterion', '')
+            )
+            ignition_type = first.get('ignition_type') or ''
+
             delays = [
                 _parse_float(row['ignition_delay_s'])
                 for row in rows
@@ -266,12 +282,12 @@ def compute_condition_statistics(merged_csv_path: Path, output_csv_path: Path) -
 
             writer.writerow(
                 {
-                    'condition_index': key[0],
-                    'temperature_K': key[1],
-                    'pressure_atm': key[2],
-                    'phi': key[3],
-                    'ignition_target': key[4],
-                    'ignition_type': key[5],
+                    'condition_index': cond_idx,
+                    'temperature_K': temperature_K,
+                    'pressure_atm': pressure_atm,
+                    'phi': phi,
+                    'ignition_target': ignition_target,
+                    'ignition_type': ignition_type,
                     'model_count_total': model_count_total,
                     'model_count_success': model_count_success,
                     'model_count_failed': model_count_failed,
