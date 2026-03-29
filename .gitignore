@@ -18,6 +18,7 @@ importer.log
 
 # Deployment files
 .env
+.env.dev
 /static/
 media/
 */run_logs
@@ -27,3 +28,5 @@ media/
 *exports
 *run_resultsfixtures/full_database.json
 *kineticmodelssite/chemked_database/results
+*/ipynb
+*kineticmodelssite/analysis/ipynb
