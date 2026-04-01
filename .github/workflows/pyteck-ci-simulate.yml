@@ -30,7 +30,7 @@ jobs:
           COMMIT_SHA=$(echo "$PAYLOAD" | python3 -c "import sys,json; print(json.load(sys.stdin)['commit_sha'])")
           MODEL_ID=$(echo "$PAYLOAD" | python3 -c "import sys,json; p=json.load(sys.stdin); print(p.get('model_id',''))")
 
-          # Decode each file
+          # Decode each file and write a sidecar .repo_path file
           echo "$PAYLOAD" | python3 -c "
           import sys, json, base64, os
           payload = json.load(sys.stdin)
@@ -39,7 +39,10 @@ jobs:
               content = base64.b64decode(f['content_base64'])
               with open(path, 'wb') as fh:
                   fh.write(content)
-              print(f'Decoded: {path}')
+              repo_path = f.get('repo_path', f['filename'])
+              with open(path + '.repo_path', 'w') as rp:
+                  rp.write(repo_path)
+              print(f'Decoded: {path} (repo path: {repo_path})')
           "
 
           echo "pr_repo=$PR_REPO" >> "$GITHUB_OUTPUT"
@@ -49,7 +52,7 @@ jobs:
 
       - name: Run ci_simulate for each file
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
         run: |
           # Activate the conda environment with Django, Cantera, PyTeCK
           eval "$(conda shell.bash hook)"
@@ -65,12 +68,18 @@ jobs:
           for YAML_FILE in /tmp/pyteck_ci_files/*.yaml /tmp/pyteck_ci_files/*.yml; do
             [ -f "$YAML_FILE" ] || continue
             echo "=== Simulating: $(basename $YAML_FILE) ==="
+            REPO_PATH_FILE="${YAML_FILE}.repo_path"
+            REPO_FILE_PATH=""
+            if [ -f "$REPO_PATH_FILE" ]; then
+              REPO_FILE_PATH=$(cat "$REPO_PATH_FILE")
+            fi
             python manage.py ci_simulate \
               --chemked-yaml "$YAML_FILE" \
               --pr-repo "${{ steps.decode.outputs.pr_repo }}" \
               --pr-number "${{ steps.decode.outputs.pr_number }}" \
               --commit-sha "${{ steps.decode.outputs.commit_sha }}" \
               --github-token "$GITHUB_TOKEN" \
+              ${REPO_FILE_PATH:+--repo-file-path "$REPO_FILE_PATH"} \
               $MODEL_FLAG \
               || EXIT_CODE=1
           done

@@ -283,6 +283,8 @@ class GitHubPRService:
         self.token = token or os.environ.get("GITHUB_TOKEN", "")
         self.owner = owner or os.environ.get("GITHUB_REPO_OWNER", "")
         self.repo = repo or os.environ.get("GITHUB_REPO_NAME", "ChemKED-database")
+        self.pyteck_owner = os.environ.get("PYTECK_REPO_OWNER", self.owner)
+        self.pyteck_repo = os.environ.get("PYTECK_REPO_NAME", "kineticmodelssite")
         if not self.token:
             raise GitHubContributionError("GITHUB_TOKEN is required")
         self.session = requests.Session()
@@ -499,6 +501,60 @@ class GitHubPRService:
     # High-level contribution workflow
     # ------------------------------------------------------------------
 
+    def dispatch_pyteck_simulation(self, files, pr_number, commit_sha, model_id=None):
+        """Trigger the PyTeCK simulation workflow via repository_dispatch.
+
+        Sends a ``pyteck-simulate`` event to the kineticmodelssite repo.  The
+        workflow decodes each file from base64 and runs ``ci_simulate`` against
+        it, then posts results back to the ChemKED-database PR.
+
+        Parameters
+        ----------
+        files : list[dict]
+            Same list passed to ``contribute_files`` — each dict has ``path``
+            and ``content`` (bytes).
+        pr_number : int
+            The newly-created ChemKED-database PR number.
+        commit_sha : str
+            HEAD SHA of the contribution branch (used for GitHub check-run
+            attribution).
+        model_id : str or None
+            Optional kinetic-model identifier forwarded to ``ci_simulate``.
+        """
+        encoded_files = [
+            {
+                "filename": f["path"].split("/")[-1],
+                "repo_path": f["path"],
+                "content_base64": base64.b64encode(f["content"]).decode("ascii"),
+            }
+            for f in files
+        ]
+        payload = {
+            "files": encoded_files,
+            "pr_repo": f"{self.owner}/{self.repo}",
+            "pr_number": pr_number,
+            "commit_sha": commit_sha,
+        }
+        if model_id:
+            payload["model_id"] = model_id
+
+        url = f"{GITHUB_API}/repos/{self.pyteck_owner}/{self.pyteck_repo}/dispatches"
+        resp = self.session.post(url, json={"event_type": "pyteck-simulate", "client_payload": payload})
+        if resp.status_code not in (200, 204):
+            detail = resp.text
+            try:
+                detail = resp.json().get("message", detail)
+            except Exception:
+                pass
+            raise GitHubContributionError(
+                f"repository_dispatch to {self.pyteck_owner}/{self.pyteck_repo} "
+                f"failed → {resp.status_code}: {detail}"
+            )
+        logger.info(
+            "Dispatched pyteck-simulate to %s/%s for PR #%s",
+            self.pyteck_owner, self.pyteck_repo, pr_number,
+        )
+
     def contribute_files(self, files, contributor_name, contributor_orcid,
                          file_type="chemked", description="", run_pyteck=False,
                          github_username="", validation_passed=False):
@@ -580,6 +636,9 @@ class GitHubPRService:
             )
             logger.info("Committed %s", f["path"])
 
+        # Capture branch HEAD SHA after all commits (for PyTeCK check-run attribution)
+        commit_sha = self.get_branch_sha(branch_name)
+
         # 3. Build PR body with ORCID and metadata
         file_list = "\n".join(f"- `{f['path']}`" for f in files)
         orcid_link = f"https://orcid.org/{contributor_orcid}"
@@ -644,6 +703,18 @@ class GitHubPRService:
             self.add_labels(pr_number, labels)
         except GitHubContributionError:
             logger.warning("Could not add labels (may need issue write permissions)")
+
+        # 6. Trigger PyTeCK simulation if requested
+        if run_pyteck:
+            try:
+                self.dispatch_pyteck_simulation(
+                    files=files,
+                    pr_number=pr_number,
+                    commit_sha=commit_sha,
+                )
+            except GitHubContributionError as exc:
+                # Non-fatal: PR exists, simulation just won't run automatically
+                logger.warning("PyTeCK dispatch failed (PR still created): %s", exc)
 
         return {
             "pr_url": pr_url,

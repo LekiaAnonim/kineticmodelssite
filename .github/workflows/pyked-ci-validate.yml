@@ -1,0 +1,66 @@
+# Triggered by ChemKED-database CI via repository_dispatch.
+# Runs PyKED schema validation on a self-hosted runner (PyKED already installed)
+# and posts results back to the originating PR as a check-run.
+
+name: PyKED CI Validation
+
+on:
+  repository_dispatch:
+    types: [pyked-validate]
+
+jobs:
+  validate:
+    name: Run PyKED Validation
+    runs-on: self-hosted
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout kineticmodelssite
+        uses: actions/checkout@v4
+
+      - name: Decode ChemKED files from payload
+        id: decode
+        run: |
+          mkdir -p /tmp/pyked_ci_files
+          # Payload: { files: [{filename, repo_path, content_base64}], pr_repo, pr_number, commit_sha }
+          PAYLOAD='${{ toJson(github.event.client_payload) }}'
+
+          PR_REPO=$(echo "$PAYLOAD" | python3 -c "import sys,json; print(json.load(sys.stdin)['pr_repo'])")
+          PR_NUMBER=$(echo "$PAYLOAD" | python3 -c "import sys,json; print(json.load(sys.stdin)['pr_number'])")
+          COMMIT_SHA=$(echo "$PAYLOAD" | python3 -c "import sys,json; print(json.load(sys.stdin)['commit_sha'])")
+
+          echo "$PAYLOAD" | python3 -c "
+          import sys, json, base64, os
+          payload = json.load(sys.stdin)
+          for f in payload.get('files', []):
+              path = os.path.join('/tmp/pyked_ci_files', f['filename'])
+              content = base64.b64decode(f['content_base64'])
+              with open(path, 'wb') as fh:
+                  fh.write(content)
+              repo_path = f.get('repo_path', f['filename'])
+              with open(path + '.repo_path', 'w') as rp:
+                  rp.write(repo_path)
+              print(f'Decoded: {path}')
+          "
+
+          echo "pr_repo=$PR_REPO" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Run PyKED validation and post check-run
+        env:
+          GITHUB_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          eval "$(conda shell.bash hook)"
+          conda activate kms
+          cd ${{ github.workspace }}
+          python manage.py ci_validate_chemked \
+            --files-dir /tmp/pyked_ci_files \
+            --pr-repo "${{ steps.decode.outputs.pr_repo }}" \
+            --pr-number "${{ steps.decode.outputs.pr_number }}" \
+            --commit-sha "${{ steps.decode.outputs.commit_sha }}" \
+            --github-token "$GITHUB_TOKEN"
+
+      - name: Cleanup temp files
+        if: always()
+        run: rm -rf /tmp/pyked_ci_files

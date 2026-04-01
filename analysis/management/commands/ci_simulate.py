@@ -164,42 +164,96 @@ def _get_experiment_type(filepath):
     return data.get("experiment-type", "").lower().strip()
 
 
+_GH_HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+}
+
+
+def _gh_headers(token):
+    return {**_GH_HEADERS, "Authorization": f"token {token}"}
+
+
 def _post_github_comment(pr_repo, pr_number, body, token):
     """Post a comment on a GitHub PR."""
     url = f"{GITHUB_API}/repos/{pr_repo}/issues/{pr_number}/comments"
-    resp = requests.post(
-        url,
-        headers={
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json",
-        },
-        json={"body": body},
-        timeout=30,
-    )
+    resp = requests.post(url, headers=_gh_headers(token), json={"body": body}, timeout=30)
     if resp.status_code not in (200, 201):
-        logger.error(f"Failed to post PR comment: {resp.status_code} {resp.text}")
+        logger.error("Failed to post PR comment: %s %s", resp.status_code, resp.text)
     return resp
 
 
-def _post_commit_status(pr_repo, commit_sha, state, description, token):
-    """Set a commit status on GitHub."""
-    url = f"{GITHUB_API}/repos/{pr_repo}/statuses/{commit_sha}"
+def _create_check_run(pr_repo, head_sha, token):
+    """Create an in-progress check-run and return its ID."""
+    url = f"{GITHUB_API}/repos/{pr_repo}/check-runs"
     resp = requests.post(
         url,
-        headers={
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json",
-        },
+        headers=_gh_headers(token),
         json={
-            "state": state,  # "success", "failure", "pending", "error"
-            "description": description[:140],
-            "context": "PyTeCK Simulation",
+            "name": "PyTeCK Simulation",
+            "head_sha": head_sha,
+            "status": "in_progress",
+            "started_at": __import__("datetime").datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         },
         timeout=30,
     )
     if resp.status_code not in (200, 201):
-        logger.error(f"Failed to set commit status: {resp.status_code} {resp.text}")
-    return resp
+        logger.error("Failed to create check-run: %s %s", resp.status_code, resp.text)
+        return None
+    check_run_id = resp.json().get("id")
+    logger.info("Created check-run #%s", check_run_id)
+    return check_run_id
+
+
+def _update_check_run(pr_repo, check_run_id, conclusion, title, summary, annotations, token):
+    """Mark a check-run as completed with results."""
+    if check_run_id is None:
+        return
+    url = f"{GITHUB_API}/repos/{pr_repo}/check-runs/{check_run_id}"
+    resp = requests.patch(
+        url,
+        headers=_gh_headers(token),
+        json={
+            "status": "completed",
+            "conclusion": conclusion,  # "success", "failure", "neutral"
+            "completed_at": __import__("datetime").datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "output": {
+                "title": title,
+                "summary": summary,
+                # GitHub caps annotations at 50 per request
+                "annotations": annotations[:50],
+            },
+        },
+        timeout=30,
+    )
+    if resp.status_code not in (200, 201):
+        logger.error("Failed to update check-run: %s %s", resp.status_code, resp.text)
+
+
+def _build_annotations(results_table, repo_file_path):
+    """Convert simulation results into GitHub check-run annotations.
+
+    Each failed model becomes a ``failure`` annotation; passed models become
+    ``notice`` annotations.  ``repo_file_path`` is the repo-relative path of
+    the contributed YAML file used for annotation linking.
+    """
+    annotations = []
+    for r in results_table:
+        level = "failure" if not r["success"] else "notice"
+        if r["success"]:
+            ef_str = f'{r["error_function"]:.4f}' if r["error_function"] is not None else "N/A"
+            msg = f'{r["model_name"]}: PASS — error function {ef_str}, {r["num_datapoints"]} datapoints'
+        else:
+            msg = f'{r["model_name"]}: FAIL — {r["message"]}'
+        annotations.append({
+            "path": repo_file_path,
+            "start_line": 1,
+            "end_line": 1,
+            "annotation_level": level,
+            "title": f'PyTeCK: {r["model_name"]}',
+            "message": msg,
+        })
+    return annotations
 
 
 class Command(BaseCommand):
@@ -246,6 +300,15 @@ class Command(BaseCommand):
             default="",
             help="GitHub token override (defaults to GITHUB_TOKEN setting).",
         )
+        parser.add_argument(
+            "--repo-file-path",
+            default="",
+            help=(
+                "Repo-relative path of the contributed YAML file "
+                "(e.g. methane/Smith_2020/x12345678.yaml). "
+                "Used to link check-run annotations to the file in the PR diff."
+            ),
+        )
 
     def handle(self, *args, **options):
         chemked_path = options["chemked_yaml"]
@@ -254,6 +317,7 @@ class Command(BaseCommand):
         commit_sha = options["commit_sha"]
         model_id = options.get("model_id")
         max_models = options["max_models"]
+        repo_file_path = options.get("repo_file_path") or os.path.basename(chemked_path)
         github_token = options["github_token"] or getattr(settings, "GITHUB_TOKEN", "") or os.getenv("GITHUB_TOKEN", "")
 
         if not os.path.isfile(chemked_path):
@@ -264,11 +328,8 @@ class Command(BaseCommand):
                 "GitHub token required. Set GITHUB_TOKEN env var or use --github-token."
             )
 
-        # Set pending status
-        _post_commit_status(
-            pr_repo, commit_sha, "pending",
-            "PyTeCK simulation in progress...", github_token,
-        )
+        # Create in-progress check-run (visible on GitHub and polled by the web UI)
+        check_run_id = _create_check_run(pr_repo, commit_sha, github_token)
 
         filename = os.path.basename(chemked_path)
         self.stdout.write(self.style.NOTICE(f"Processing: {filename}"))
@@ -278,7 +339,14 @@ class Command(BaseCommand):
         if exp_type != "ignition delay":
             msg = f"Skipped — experiment type '{exp_type}' is not supported by PyTeCK"
             self.stdout.write(self.style.WARNING(msg))
-            _post_commit_status(pr_repo, commit_sha, "success", msg, github_token)
+            _update_check_run(
+                pr_repo, check_run_id,
+                conclusion="neutral",
+                title=f"PyTeCK Simulation — skipped ({exp_type})",
+                summary=f"⏭️ {msg}\n\nOnly ignition delay datasets can be simulated.",
+                annotations=[],
+                token=github_token,
+            )
             _post_github_comment(
                 pr_repo, pr_number,
                 f"### PyTeCK Simulation\n\n⏭️ {msg}\n\n"
@@ -306,7 +374,19 @@ class Command(BaseCommand):
             if not models_to_test:
                 msg = f"No compatible kinetic models found for fuel '{fuel_name}'"
                 self.stdout.write(self.style.WARNING(msg))
-                _post_commit_status(pr_repo, commit_sha, "success", msg, github_token)
+                _update_check_run(
+                    pr_repo, check_run_id,
+                    conclusion="neutral",
+                    title="PyTeCK Simulation — no compatible models",
+                    summary=(
+                        f"⚠️ {msg}\n\n"
+                        f"No models in the database contain the fuel species "
+                        f"**{fuel_name}** (InChI: `{fuel_inchi}`).\n"
+                        f"The dataset is valid and can still be merged."
+                    ),
+                    annotations=[],
+                    token=github_token,
+                )
                 _post_github_comment(
                     pr_repo, pr_number,
                     f"### PyTeCK Simulation\n\n⚠️ {msg}\n\n"
@@ -404,19 +484,29 @@ class Command(BaseCommand):
                     "num_datapoints": 0,
                 })
 
-        # Build markdown comment
+        # Build markdown comment and check-run output
         comment_body = _build_comment(filename, results_table)
 
-        # Post results
         passed = sum(1 for r in results_table if r["success"])
         total = len(results_table)
-        status_state = "success" if not any_failure else "failure"
-        status_desc = f"PyTeCK: {passed}/{total} models passed"
+        conclusion = "success" if not any_failure else "failure"
+        title = f"PyTeCK Simulation — {passed}/{total} models passed"
 
-        _post_commit_status(pr_repo, commit_sha, status_state, status_desc, github_token)
+        # Update check-run to completed (visible on GitHub and on the web UI via polling)
+        annotations = _build_annotations(results_table, repo_file_path)
+        _update_check_run(
+            pr_repo, check_run_id,
+            conclusion=conclusion,
+            title=title,
+            summary=comment_body,
+            annotations=annotations,
+            token=github_token,
+        )
+
+        # Also post the markdown table as a PR comment for convenience
         _post_github_comment(pr_repo, pr_number, comment_body, github_token)
 
-        self.stdout.write(self.style.SUCCESS(f"\nDone: {status_desc}"))
+        self.stdout.write(self.style.SUCCESS(f"\nDone: {title}"))
 
 
 def _create_temp_dataset(chemked_path):

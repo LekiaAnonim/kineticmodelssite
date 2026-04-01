@@ -1087,76 +1087,27 @@ class DatasetCreateWizardView(TemplateView):
 
 
 # ── ChemKED YAML formatting ─────────────────────────────────────────────
-# Standard key order matching existing ChemKED-database files
-# (e.g. methane/Asaba_1963/x10004081.yaml, 2-butanol/Bec_2014_2-b_20atm.yaml).
-
-_CHEMKED_TOP_KEY_ORDER = [
-    'file-authors',
-    'file-version',
-    'chemked-version',
-    'file-doi',
-    'respecth-version',
-    'first-publication-date',
-    'last-modification-date',
-    'reference',
-    'experiment-type',
-    'apparatus',
-    'common-properties',
-    'datapoints',
-]
-
-_CHEMKED_DATAPOINT_KEY_ORDER = [
-    'temperature',
-    'ignition-delay',
-    'pressure',
-    'composition',
-    'ignition-type',
-    'equivalence-ratio',
-]
-
-
-def _order_dict(d, key_order):
-    """Return a new dict with keys in *key_order* first, then any remaining."""
-    ordered = {}
-    for k in key_order:
-        if k in d:
-            ordered[k] = d[k]
-    for k in d:
-        if k not in ordered:
-            ordered[k] = d[k]
-    return ordered
+# Reuse the yaml_dump() and _OrderedDumper from batch_convert which already
+# preserves dict insertion order and writes the ``---`` / ``...`` markers.
+# convert_file() builds dicts with keys in standard ChemKED order, so no
+# explicit re-ordering is needed.
 
 
 def format_chemked_yaml(chemked_dict):
     """Serialize a ChemKED property dict to YAML matching database conventions.
 
-    * Keys are ordered per ChemKED standard (not alphabetically).
-    * Starts with ``---`` document marker.
-    * Internal-only ``file-type`` key is stripped.
-    * Block style for all nested structures.
+    Delegates to ``pyked.batch_convert.yaml_dump`` — the same serializer that
+    produced every file in ChemKED-database — so output is byte-identical.
     """
+    from io import StringIO
+    from pyked.batch_convert import yaml_dump
+
     d = dict(chemked_dict)
+    d.pop('file-type', None)          # internal-only key
 
-    # Remove internal-only key added by the converter
-    d.pop('file-type', None)
-
-    # Order top-level keys
-    d = _order_dict(d, _CHEMKED_TOP_KEY_ORDER)
-
-    # Order keys within each datapoint
-    if 'datapoints' in d:
-        d['datapoints'] = [
-            _order_dict(dp, _CHEMKED_DATAPOINT_KEY_ORDER)
-            for dp in d['datapoints']
-        ]
-
-    text = yaml.dump(
-        d,
-        default_flow_style=False,
-        allow_unicode=True,
-        sort_keys=False,
-    )
-    return '---\n' + text
+    buf = StringIO()
+    yaml_dump(d, buf)
+    return buf.getvalue()
 
 
 class DatasetUploadView(FormView):
@@ -1253,7 +1204,7 @@ class DatasetUploadView(FormView):
         try:
             from pyked.batch_convert import convert_file
             from .chemked_adapter import ChemKEDDictAdapter
-            chemked_dict = convert_file(temp_file_path)
+            chemked_dict = convert_file(temp_file_path, original_filename=original_filename)
             data = ChemKEDDictAdapter(chemked_dict)
             
             # Check for duplicate based on file_doi
@@ -1571,7 +1522,7 @@ class DatasetUploadView(FormView):
         from pyked.batch_convert import convert_file
         from .chemked_adapter import ChemKEDDictAdapter
         
-        chemked_dict = convert_file(temp_path)
+        chemked_dict = convert_file(temp_path, original_filename=original_filename)
         data = ChemKEDDictAdapter(chemked_dict)
         
         # Check for duplicate based on file_doi
@@ -2336,7 +2287,7 @@ class DatasetUploadView(FormView):
         from .chemked_adapter import ChemKEDDictAdapter
         
         try:
-            chemked_dict = convert_file(temp_path)
+            chemked_dict = convert_file(temp_path, original_filename=original_filename)
             data = ChemKEDDictAdapter(chemked_dict)
 
             validation_error = None
@@ -3771,7 +3722,7 @@ class DatasetProcessView(View):
                         # contributes ChemKED YAML to the database repo.
                         try:
                             from pyked.batch_convert import convert_file as _conv
-                            chemked_dict = _conv(temp_path)
+                            chemked_dict = _conv(temp_path, original_filename=original_name)
                             file_content_for_pr = format_chemked_yaml(chemked_dict).encode('utf-8')
                         except Exception:
                             logger.debug("XML→YAML conversion for PR failed; will use raw content")
