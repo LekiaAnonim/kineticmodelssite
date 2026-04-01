@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout kineticmodelssite
         uses: actions/checkout@v4
+        with:
+          clean: false
 
       - name: Decode ChemKED files from payload
         id: decode
