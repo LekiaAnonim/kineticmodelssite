@@ -61,6 +61,12 @@ jobs:
           owner: LekiaAnonim
           repositories: ChemKED-database
 
+      - name: Debug App token
+        run: |
+          TOKEN="${{ steps.app-token.outputs.token }}"
+          echo "Token length: ${#TOKEN}"
+          echo "Token prefix: ${TOKEN:0:4}"
+
       - name: Run ci_simulate for each file
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
