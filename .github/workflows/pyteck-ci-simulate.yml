@@ -50,9 +50,18 @@ jobs:
           echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
           echo "model_id=$MODEL_ID" >> "$GITHUB_OUTPUT"
 
+      - name: Generate GitHub App token for check-runs
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: LekiaAnonim
+          repositories: ChemKED-database
+
       - name: Run ci_simulate for each file
         env:
-          GITHUB_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           # Activate the conda environment with Django, Cantera, PyTeCK
           eval "$(conda shell.bash hook)"
