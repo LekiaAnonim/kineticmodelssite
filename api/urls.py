@@ -1,6 +1,8 @@
+from django.urls import path
 from rest_framework import routers
 
 from api import views
+from api.contribution_views import ContributeFilesView, ContributionStatusView
 
 
 router = routers.DefaultRouter()
@@ -13,4 +15,7 @@ router.register(r"transport", views.TransportViewSet, basename="api-transport")
 router.register(r"kinetics", views.KineticsViewSet, basename="api-kinetics")
 router.register(r"kineticmodel", views.KineticModelViewSet, basename="api-kineticmodel")
 
-urlpatterns = router.urls
+urlpatterns = router.urls + [
+    path("contribute/", ContributeFilesView.as_view(), name="api-contribute"),
+    path("contribute/status/<int:pr_number>/", ContributionStatusView.as_view(), name="api-contribute-status"),
+]

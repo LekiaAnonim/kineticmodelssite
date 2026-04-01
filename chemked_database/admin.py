@@ -2,17 +2,21 @@ from django.contrib import admin
 
 from .models import (
 	Apparatus,
+	BurnerStabilizedFlameSpeciationMeasurementDatapoint,
 	CommonProperties,
 	Composition,
 	CompositionSpecies,
+	ConcentrationTimeProfileMeasurementDatapoint,
+	EvaluatedStandardDeviation,
 	ExperimentDataset,
 	ExperimentDatapoint,
 	FileAuthor,
-	FlameSpeedDatapoint,
 	IgnitionDelayDatapoint,
+	JetStirredReactorMeasurementDatapoint,
+	LaminarBurningVelocityMeasurementDatapoint,
+	OutletConcentrationMeasurementDatapoint,
 	ReferenceAuthor,
 	RCMData,
-	SpeciesProfileDatapoint,
 	SpeciesThermo,
 	TimeHistory,
 	ValueWithUnit,
@@ -65,14 +69,34 @@ class IgnitionDelayDatapointAdmin(admin.ModelAdmin):
 	list_display = ("datapoint", "ignition_delay", "ignition_target", "ignition_type")
 
 
-@admin.register(FlameSpeedDatapoint)
-class FlameSpeedDatapointAdmin(admin.ModelAdmin):
-	list_display = ("datapoint", "laminar_flame_speed", "stretch")
+@admin.register(LaminarBurningVelocityMeasurementDatapoint)
+class LaminarBurningVelocityMeasurementDatapointAdmin(admin.ModelAdmin):
+	list_display = ("datapoint", "laminar_burning_velocity", "stretch")
 
 
-@admin.register(SpeciesProfileDatapoint)
-class SpeciesProfileDatapointAdmin(admin.ModelAdmin):
-	list_display = ("datapoint", "species_name", "quantity_units")
+@admin.register(ConcentrationTimeProfileMeasurementDatapoint)
+class ConcentrationTimeProfileMeasurementDatapointAdmin(admin.ModelAdmin):
+	list_display = ("datapoint", "tracked_species")
+
+
+@admin.register(JetStirredReactorMeasurementDatapoint)
+class JetStirredReactorMeasurementDatapointAdmin(admin.ModelAdmin):
+	list_display = ("datapoint",)
+
+
+@admin.register(OutletConcentrationMeasurementDatapoint)
+class OutletConcentrationMeasurementDatapointAdmin(admin.ModelAdmin):
+	list_display = ("datapoint",)
+
+
+@admin.register(BurnerStabilizedFlameSpeciationMeasurementDatapoint)
+class BurnerStabilizedFlameSpeciationMeasurementDatapointAdmin(admin.ModelAdmin):
+	list_display = ("datapoint",)
+
+
+@admin.register(EvaluatedStandardDeviation)
+class EvaluatedStandardDeviationAdmin(admin.ModelAdmin):
+	list_display = ("dataset", "reference", "kind", "method", "value", "units")
 
 
 @admin.register(RCMData)

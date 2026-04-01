@@ -302,25 +302,82 @@
                         </div>
                     </div>
                     
-                    <!-- ReSpecTh-specific options -->
-                    <div class="respecth-options p-3 bg-light rounded mb-4" id="respecth-options">
-                        <h6 class="text-muted mb-3"><i class="bi bi-file-code me-1"></i> ReSpecTh XML Options</h6>
+                    <!-- Contributor Information (always visible) -->
+                    <div class="contributor-info p-3 bg-light rounded mb-4" id="contributor-info">
+                        <h6 class="text-muted mb-3"><i class="bi bi-person-badge me-1"></i> Contributor Information</h6>
                         <div class="row">
                             <div class="col-md-6 mb-3">
-                                <label for="id_file_author" class="form-label">File Author</label>
+                                <label for="id_file_author" class="form-label">Name</label>
                                 {{ form.file_author }}
-                                <div class="form-text">Your name (added to file authors list)</div>
+                                <div class="form-text">Your name (used for file authorship and attribution)</div>
                             </div>
                             <div class="col-md-6 mb-3">
-                                <label for="id_file_author_orcid" class="form-label">ORCID (optional)</label>
-                                {{ form.file_author_orcid }}
+                                <label for="id_file_author_orcid" class="form-label">ORCID</label>
+                                <div class="input-group">
+                                    {{ form.file_author_orcid }}
+                                    <button type="button" class="btn btn-outline-secondary btn-sm" id="verify-orcid-btn" title="Verify ORCID">
+                                        <i class="bi bi-patch-check"></i>
+                                    </button>
+                                </div>
+                                <div id="orcid-status" class="form-text"></div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-0">
+                                <label for="id_github_username" class="form-label">GitHub Username <span class="text-muted small">(optional)</span></label>
+                                <div class="input-group">
+                                    <span class="input-group-text">@</span>
+                                    {{ form.github_username }}
+                                </div>
+                                <div id="github-username-status" class="form-text"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- GitHub Contribution Options -->
+                    <div class="contribution-options p-3 border rounded mb-4" id="contribution-options">
+                        <h6 class="text-muted mb-3"><i class="bi bi-github me-1"></i> Contribute to ChemKED Database</h6>
+                        <div class="mb-3">
+                            <div class="form-check">
+                                {{ form.contribute_to_github }}
+                                <label class="form-check-label" for="id_contribute_to_github">
+                                    Create a GitHub Pull Request
+                                </label>
+                            </div>
+                            <div class="form-text">
+                                Automatically open a PR on the
+                                <a href="https://github.com/pr-omethe-us/ChemKED-database" target="_blank">ChemKED-database</a>
+                                repository with your uploaded files. Your ORCID and GitHub username (if provided) will be used for attribution.
+                            </div>
+                        </div>
+                        <div id="contribution-extra" style="display: none;">
+                            <div class="mb-3">
+                                <div class="form-check">
+                                    {{ form.run_pyteck }}
+                                    <label class="form-check-label" for="id_run_pyteck">
+                                        Run PyTeCK simulation validation
+                                    </label>
+                                </div>
+                                <div class="form-text">
+                                    Trigger a PyTeCK simulation in CI to validate the contributed data against a kinetic model.
+                                </div>
+                            </div>
+                            <div class="mb-3">
+                                <label for="id_contribution_description" class="form-label">Description (optional)</label>
+                                {{ form.contribution_description }}
+                                <div class="form-text">Brief description of the data being contributed.</div>
+                            </div>
+                            <div class="alert alert-info py-2 mb-0 small">
+                                <i class="bi bi-info-circle me-1"></i>
+                                <strong>Required for contribution:</strong> Provide your Name and ORCID above.
+                                CI will run PyKED schema validation and ORCID verification on the PR.
                             </div>
                         </div>
                     </div>
                     
                     <div class="d-flex gap-2">
                         <button type="submit" id="upload-submit-btn" class="btn btn-primary">
-                            <i class="bi bi-upload me-1"></i>Upload & Import
+                            <i class="bi bi-upload me-1"></i>Upload & Preview
                         </button>
                         <button type="button" id="upload-cancel-btn" class="btn btn-outline-danger" style="display: none;">
                             <i class="bi bi-x-circle me-1"></i>Cancel Upload
@@ -328,6 +385,11 @@
                         <a href="{% url 'chemked_database:dataset-list' %}" id="cancel-link" class="btn btn-outline-secondary">
                             Cancel
                         </a>
+                    </div>
+                    <div class="form-text mt-2">
+                        <i class="bi bi-info-circle me-1"></i>
+                        Single ReSpecTh XML files will show a preview step before importing.
+                        Multiple files are imported directly.
                     </div>
                 </form>
             </div>
@@ -415,9 +477,21 @@ datapoints:
 document.addEventListener('DOMContentLoaded', function() {
     const fileFormatSelect = document.getElementById('id_file_format');
     const dataFileInput = document.getElementById('id_data_file');
-    const respecthOptions = document.getElementById('respecth-options');
     const fileCountDiv = document.getElementById('file-count');
     const fileCountText = document.getElementById('file-count-text');
+    
+    // Contribution elements
+    const contributeCheckbox = document.getElementById('id_contribute_to_github');
+    const contributionExtra = document.getElementById('contribution-extra');
+
+    // ORCID verification elements
+    const orcidInput = document.getElementById('id_file_author_orcid');
+    const verifyOrcidBtn = document.getElementById('verify-orcid-btn');
+    const orcidStatus = document.getElementById('orcid-status');
+
+    // GitHub username verification elements
+    const githubUsernameInput = document.getElementById('id_github_username');
+    const githubUsernameStatus = document.getElementById('github-username-status');
     
     // Progress bar elements
     const uploadForm = document.getElementById('upload-form');
@@ -434,30 +508,81 @@ document.addEventListener('DOMContentLoaded', function() {
     let uploadStartTime = null;
     
     // Only run if the required elements exist
-    if (!fileFormatSelect || !dataFileInput || !respecthOptions) {
+    if (!fileFormatSelect || !dataFileInput) {
         return;
     }
     
-    function updateRespecthVisibility() {
-        const format = fileFormatSelect.value;
-        let showRespecth = false;
-        
-        if (format === 'xml') {
-            showRespecth = true;
-        } else if (format === 'auto') {
-            // Check if any XML files are selected
-            const files = dataFileInput.files;
-            for (let i = 0; i < files.length; i++) {
-                if (files[i].name.toLowerCase().endsWith('.xml')) {
-                    showRespecth = true;
-                    break;
-                }
-            }
+    function updateContributionVisibility() {
+        if (contributeCheckbox && contributionExtra) {
+            contributionExtra.style.display = contributeCheckbox.checked ? 'block' : 'none';
         }
-        
-        respecthOptions.style.display = showRespecth ? 'block' : 'none';
     }
-    
+
+    // ---- ORCID live verification ----
+    let orcidVerifyTimeout = null;
+
+    function verifyOrcid() {
+        if (!orcidInput || !orcidStatus) return;
+        const orcid = orcidInput.value.trim();
+        if (!orcid) {
+            orcidStatus.innerHTML = '';
+            return;
+        }
+        // Quick client-side format check
+        if (!/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(orcid)) {
+            orcidStatus.innerHTML = '<span class="text-danger"><i class="bi bi-x-circle me-1"></i>Invalid format. Expected 0000-0000-0000-000X</span>';
+            return;
+        }
+        orcidStatus.innerHTML = '<span class="text-muted"><i class="bi bi-hourglass-split me-1"></i>Verifying...</span>';
+        fetch('{% url "chemked_database:verify-orcid" %}?orcid=' + encodeURIComponent(orcid))
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.verified) {
+                    orcidStatus.innerHTML = '<span class="text-success"><i class="bi bi-patch-check-fill me-1"></i>Verified: ' + data.name + '</span>';
+                } else {
+                    orcidStatus.innerHTML = '<span class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>' + (data.error || 'Not found') + '</span>';
+                }
+            })
+            .catch(function() {
+                orcidStatus.innerHTML = '<span class="text-muted"><i class="bi bi-wifi-off me-1"></i>Could not reach ORCID API</span>';
+            });
+    }
+
+    // ---- GitHub username live verification ----
+    let githubVerifyTimeout = null;
+
+    function verifyGithubUsername() {
+        if (!githubUsernameInput || !githubUsernameStatus) return;
+        const username = githubUsernameInput.value.trim().replace(/^@/, '');
+        if (!username) {
+            githubUsernameStatus.innerHTML = '';
+            return;
+        }
+        // Quick client-side format check
+        if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/.test(username)) {
+            githubUsernameStatus.innerHTML = '<span class="text-danger"><i class="bi bi-x-circle me-1"></i>Invalid GitHub username format</span>';
+            return;
+        }
+        githubUsernameStatus.innerHTML = '<span class="text-muted"><i class="bi bi-hourglass-split me-1"></i>Checking...</span>';
+        fetch('{% url "chemked_database:verify-github" %}?username=' + encodeURIComponent(username))
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.valid) {
+                    let html = '<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>' + data.name;
+                    if (data.avatar_url) {
+                        html += ' <img src="' + data.avatar_url + '" alt="" width="16" height="16" class="rounded-circle ms-1" style="vertical-align: text-bottom;">';
+                    }
+                    html += '</span>';
+                    githubUsernameStatus.innerHTML = html;
+                } else {
+                    githubUsernameStatus.innerHTML = '<span class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>' + (data.error || 'Not found') + '</span>';
+                }
+            })
+            .catch(function() {
+                githubUsernameStatus.innerHTML = '<span class="text-muted"><i class="bi bi-wifi-off me-1"></i>Could not reach GitHub API</span>';
+            });
+    }
+
     function updateFileCount() {
         const files = dataFileInput.files;
         if (files.length > 1) {
@@ -522,7 +647,7 @@ document.addEventListener('DOMContentLoaded', function() {
         statusText.textContent = 'Preparing upload...';
         speedInfo.textContent = '';
         uploadSubmitBtn.disabled = false;
-        uploadSubmitBtn.innerHTML = '<i class="bi bi-upload me-1"></i>Upload & Import';
+        uploadSubmitBtn.innerHTML = '<i class="bi bi-upload me-1"></i>Upload & Preview';
         uploadCancelBtn.style.display = 'none';
         cancelLink.style.display = '';
         dataFileInput.disabled = false;
@@ -551,6 +676,7 @@ document.addEventListener('DOMContentLoaded', function() {
         let successfulFiles = [];
         let skippedFiles = [];
         let failedFiles = [];
+        let prResult = null;
         
         eventSource.addEventListener('start', function(e) {
             const data = JSON.parse(e.data);
@@ -578,6 +704,17 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
         
+        eventSource.addEventListener('pr_created', function(e) {
+            const data = JSON.parse(e.data);
+            prResult = data;
+            setProgress(98, 'Pull request created!', true);
+        });
+        
+        eventSource.addEventListener('pr_error', function(e) {
+            const data = JSON.parse(e.data);
+            prResult = {error: data.error};
+        });
+        
         eventSource.addEventListener('complete', function(e) {
             const data = JSON.parse(e.data);
             eventSource.close();
@@ -594,6 +731,20 @@ document.addEventListener('DOMContentLoaded', function() {
             if (data.successful > 0) {
                 messagesHtml += `<div class="alert alert-success py-2 mb-2">
                     <i class="bi bi-check-circle me-2"></i>Successfully imported ${data.successful} dataset(s) with ${data.total_datapoints} total datapoints.
+                </div>`;
+            }
+            
+            // Show PR result
+            if (data.pr_url || (prResult && prResult.pr_url)) {
+                const prUrl = data.pr_url || prResult.pr_url;
+                const prNum = data.pr_number || prResult.pr_number;
+                messagesHtml += `<div class="alert alert-info py-2 mb-2">
+                    <i class="bi bi-github me-2"></i>Pull Request <a href="${prUrl}" target="_blank">#${prNum}</a> created on the ChemKED-database repository.
+                    CI will run PyKED validation and ORCID checks automatically.
+                </div>`;
+            } else if (prResult && prResult.error) {
+                messagesHtml += `<div class="alert alert-warning py-2 mb-2">
+                    <i class="bi bi-exclamation-triangle me-2"></i>Files imported locally but GitHub PR creation failed: ${prResult.error}
                 </div>`;
             }
             
@@ -623,7 +774,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 statusText.innerHTML = messagesHtml;
                 
                 if (data.redirect_url) {
-                    statusText.innerHTML += '<div class="small text-muted mt-2"><i class="bi bi-arrow-right me-1"></i>Redirecting to dataset list...</div>';
+                    statusText.innerHTML += '<div class="small text-muted mt-2"><i class="bi bi-arrow-right me-1"></i>Redirecting to submission status...</div>';
                     setTimeout(function() {
                         window.location.href = data.redirect_url;
                     }, 2500);
@@ -657,6 +808,12 @@ document.addEventListener('DOMContentLoaded', function() {
             const files = dataFileInput.files;
             if (files.length === 0) {
                 return; // Let the normal form validation handle this
+            }
+            
+            // Single file: submit normally (no AJAX) so the server can
+            // redirect to the preview page for ReSpecTh XML files.
+            if (files.length === 1) {
+                return; // Let the browser handle normal form submission
             }
             
             e.preventDefault();
@@ -779,15 +936,35 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     // Initial state
-    updateRespecthVisibility();
     updateFileCount();
+    updateContributionVisibility();
     
     // Listen for changes
-    fileFormatSelect.addEventListener('change', updateRespecthVisibility);
     dataFileInput.addEventListener('change', function() {
-        updateRespecthVisibility();
         updateFileCount();
     });
+    if (contributeCheckbox) {
+        contributeCheckbox.addEventListener('change', updateContributionVisibility);
+    }
+    // ORCID verification: on button click and after typing stops
+    if (verifyOrcidBtn) {
+        verifyOrcidBtn.addEventListener('click', verifyOrcid);
+    }
+    if (orcidInput) {
+        orcidInput.addEventListener('blur', verifyOrcid);
+        orcidInput.addEventListener('input', function() {
+            clearTimeout(orcidVerifyTimeout);
+            orcidVerifyTimeout = setTimeout(verifyOrcid, 800);
+        });
+    }
+    // GitHub username verification: after typing stops
+    if (githubUsernameInput) {
+        githubUsernameInput.addEventListener('blur', verifyGithubUsername);
+        githubUsernameInput.addEventListener('input', function() {
+            clearTimeout(githubVerifyTimeout);
+            githubVerifyTimeout = setTimeout(verifyGithubUsername, 800);
+        });
+    }
 });
 </script>
 {% endblock %}

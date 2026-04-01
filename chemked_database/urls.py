@@ -21,6 +21,14 @@ urlpatterns = [
     path("dataset/upload/process/", views.DatasetProcessView.as_view(), name="dataset-process"),
     path("dataset/clear/", views.ClearWizardView.as_view(), name="dataset-clear-wizard"),
     
+    # AJAX helpers
+    path("verify-orcid/", views.verify_orcid_view, name="verify-orcid"),
+    path("verify-github/", views.verify_github_username_view, name="verify-github"),
+
+    # Submission status
+    path("submission/<int:pk>/", views.SubmissionStatusView.as_view(), name="submission-status"),
+    path("submission/<int:pk>/check-runs/", views.SubmissionCheckRunsView.as_view(), name="submission-check-runs"),
+
     # Dataset Export
     path("dataset/<int:pk>/export/", views.DatasetExportView.as_view(), name="dataset-export"),
 

@@ -22,6 +22,7 @@ def get_experiment_type_choices():
     types = (
         ExperimentDataset.objects
         .exclude(experiment_type="")
+        .order_by("experiment_type")
         .values_list("experiment_type", flat=True)
         .distinct()
     )

@@ -11,6 +11,7 @@ import tempfile
 import logging
 import json
 import uuid
+import yaml
 from pathlib import Path
 
 from django.conf import settings
@@ -33,7 +34,8 @@ from .models import (
     Composition,
     CompositionSpecies,
     IgnitionDelayDatapoint,
-    FlameSpeedDatapoint,
+    LaminarBurningVelocityMeasurementDatapoint,
+    MeasurementType,
     RateCoefficientDatapoint,
     Apparatus,
     FileAuthor,
@@ -42,6 +44,7 @@ from .models import (
     ExperimentType,
     ApparatusKind,
     CompositionKind,
+    Submission,
 )
 from .filters import DatasetFilter, DatapointFilter
 from .forms import (
@@ -55,12 +58,112 @@ from .forms import (
     CompositionSpeciesFormSet,
     DatapointFormSet,
     IgnitionDelayFormSet,
-    FlameSpeedFormSet,
+    LaminarBurningVelocityFormSet,
     ChemKEDUploadForm,
     ExportOptionsForm,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _unwrap_equiv(value):
+    """Unwrap equivalence-ratio from list to scalar float.
+
+    PyKED normalizes scalar equivalence-ratio values to single-element
+    lists for schema validation.  The database expects a plain float.
+    """
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+# Normalise shorthand ignition-target labels to canonical choices.
+_IGNITION_TARGET_ALIASES = {
+    'p': 'pressure',
+    'p;': 'pressure',
+    't': 'temperature',
+}
+
+
+def _normalize_ignition_target(value):
+    """Map shorthand target strings ('P', 'T', 'p;') to canonical names."""
+    if not value:
+        return value
+    return _IGNITION_TARGET_ALIASES.get(value.lower().strip(), value)
+
+
+def verify_orcid_view(request):
+    """AJAX endpoint that verifies an ORCID via the public ORCID API.
+
+    GET /chemked/verify-orcid/?orcid=0000-0000-0000-000X
+    Returns JSON: {verified, name, orcid, error}
+    """
+    from .github_pr_service import verify_orcid, OrcidVerificationError
+
+    orcid = request.GET.get('orcid', '').strip()
+    if not orcid:
+        return JsonResponse({'verified': False, 'error': 'No ORCID provided.'}, status=400)
+
+    try:
+        result = verify_orcid(orcid)
+        return JsonResponse(result)
+    except OrcidVerificationError as exc:
+        return JsonResponse({'verified': False, 'orcid': orcid, 'error': str(exc)})
+
+
+def verify_github_username_view(request):
+    """AJAX endpoint that checks whether a GitHub username exists.
+
+    GET /chemked/verify-github/?username=octocat
+    Returns JSON: {valid, username, name, avatar_url, error}
+    """
+    import re
+    import requests as http_requests
+
+    username = request.GET.get('username', '').strip().lstrip('@')
+    if not username:
+        return JsonResponse({'valid': False, 'error': 'No username provided.'}, status=400)
+
+    # Basic format check – GitHub usernames: alphanumeric + hyphens, 1-39 chars
+    if not re.match(r'^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$', username):
+        return JsonResponse({
+            'valid': False,
+            'username': username,
+            'error': 'Invalid GitHub username format.',
+        })
+
+    try:
+        resp = http_requests.get(
+            f'https://api.github.com/users/{username}',
+            headers={'Accept': 'application/vnd.github.v3+json'},
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return JsonResponse({
+                'valid': True,
+                'username': data.get('login', username),
+                'name': data.get('name') or data.get('login', username),
+                'avatar_url': data.get('avatar_url', ''),
+            })
+        elif resp.status_code == 404:
+            return JsonResponse({
+                'valid': False,
+                'username': username,
+                'error': f'GitHub user "{username}" not found.',
+            })
+        else:
+            return JsonResponse({
+                'valid': False,
+                'username': username,
+                'error': 'Could not verify (GitHub API returned %d).' % resp.status_code,
+            })
+    except http_requests.RequestException:
+        return JsonResponse({
+            'valid': False,
+            'username': username,
+            'error': 'Could not reach GitHub API.',
+        })
 
 
 class ChemKEDHomeView(TemplateView):
@@ -268,10 +371,16 @@ class DatapointDetailView(DetailView):
         # Get experiment-type extension
         if hasattr(datapoint, "ignition_delay"):
             context["ignition_delay"] = datapoint.ignition_delay
-        if hasattr(datapoint, "flame_speed"):
-            context["flame_speed"] = datapoint.flame_speed
-        if hasattr(datapoint, "species_profile"):
-            context["species_profile"] = datapoint.species_profile
+        if hasattr(datapoint, "laminar_burning_velocity_measurement"):
+            context["laminar_burning_velocity_measurement"] = datapoint.laminar_burning_velocity_measurement
+        if hasattr(datapoint, "concentration_time_profile_measurement"):
+            context["concentration_time_profile_measurement"] = datapoint.concentration_time_profile_measurement
+        if hasattr(datapoint, "jet_stirred_reactor_measurement"):
+            context["jet_stirred_reactor_measurement"] = datapoint.jet_stirred_reactor_measurement
+        if hasattr(datapoint, "outlet_concentration_measurement"):
+            context["outlet_concentration_measurement"] = datapoint.outlet_concentration_measurement
+        if hasattr(datapoint, "burner_stabilized_flame_speciation_measurement"):
+            context["burner_stabilized_flame_speciation_measurement"] = datapoint.burner_stabilized_flame_speciation_measurement
 
         # RCM data
         if hasattr(datapoint, "rcm_data"):
@@ -680,10 +789,13 @@ class DatasetCreateWizardView(TemplateView):
         # Add file authors
         for author_data in data.get('file_authors', []):
             if author_data.get('name'):
-                author, _ = FileAuthor.objects.get_or_create(
+                author, created = FileAuthor.objects.get_or_create(
                     name=author_data['name'],
-                    orcid=author_data.get('orcid', ''),
+                    defaults={'orcid': author_data.get('orcid', '')},
                 )
+                if not created and author_data.get('orcid') and not author.orcid:
+                    author.orcid = author_data['orcid']
+                    author.save(update_fields=['orcid'])
                 dataset.file_authors.add(author)
         
         # Add reference authors
@@ -730,7 +842,7 @@ class DatasetCreateWizardView(TemplateView):
         common_properties = CommonProperties.objects.create(
             dataset=dataset,
             composition=common_composition,
-            ignition_target=ignition_data.get('ignition_target', ''),
+            ignition_target=_normalize_ignition_target(ignition_data.get('ignition_target', '')),
             ignition_type=ignition_data.get('ignition_type', ''),
             pressure=common_pressure,
             pressure_quantity=common_pressure_quantity,
@@ -778,7 +890,7 @@ class DatasetCreateWizardView(TemplateView):
                 pressure_quantity=press_quantity,
                 pressure_uncertainty=dp_data.get('pressure_uncertainty'),
                 pressure_uncertainty_type=dp_data.get('pressure_uncertainty_type', ''),
-                equivalence_ratio=dp_data.get('equivalence_ratio'),
+                equivalence_ratio=_unwrap_equiv(dp_data.get('equivalence_ratio')),
                 composition=common_composition,  # Use common composition
             )
             
@@ -805,7 +917,7 @@ class DatasetCreateWizardView(TemplateView):
                     ignition_delay_quantity=ign_quantity,
                     ignition_delay_uncertainty=ign_data.get('ignition_delay_uncertainty'),
                     ignition_delay_uncertainty_type=ign_data.get('ignition_delay_uncertainty_type', ''),
-                    ignition_target=ign_data.get('ignition_target_override', ''),
+                    ignition_target=_normalize_ignition_target(ign_data.get('ignition_target_override', '')),
                     ignition_type=ign_data.get('ignition_type_override', ''),
                 )
         
@@ -974,6 +1086,79 @@ class DatasetCreateWizardView(TemplateView):
         return chemked_dict
 
 
+# ── ChemKED YAML formatting ─────────────────────────────────────────────
+# Standard key order matching existing ChemKED-database files
+# (e.g. methane/Asaba_1963/x10004081.yaml, 2-butanol/Bec_2014_2-b_20atm.yaml).
+
+_CHEMKED_TOP_KEY_ORDER = [
+    'file-authors',
+    'file-version',
+    'chemked-version',
+    'file-doi',
+    'respecth-version',
+    'first-publication-date',
+    'last-modification-date',
+    'reference',
+    'experiment-type',
+    'apparatus',
+    'common-properties',
+    'datapoints',
+]
+
+_CHEMKED_DATAPOINT_KEY_ORDER = [
+    'temperature',
+    'ignition-delay',
+    'pressure',
+    'composition',
+    'ignition-type',
+    'equivalence-ratio',
+]
+
+
+def _order_dict(d, key_order):
+    """Return a new dict with keys in *key_order* first, then any remaining."""
+    ordered = {}
+    for k in key_order:
+        if k in d:
+            ordered[k] = d[k]
+    for k in d:
+        if k not in ordered:
+            ordered[k] = d[k]
+    return ordered
+
+
+def format_chemked_yaml(chemked_dict):
+    """Serialize a ChemKED property dict to YAML matching database conventions.
+
+    * Keys are ordered per ChemKED standard (not alphabetically).
+    * Starts with ``---`` document marker.
+    * Internal-only ``file-type`` key is stripped.
+    * Block style for all nested structures.
+    """
+    d = dict(chemked_dict)
+
+    # Remove internal-only key added by the converter
+    d.pop('file-type', None)
+
+    # Order top-level keys
+    d = _order_dict(d, _CHEMKED_TOP_KEY_ORDER)
+
+    # Order keys within each datapoint
+    if 'datapoints' in d:
+        d['datapoints'] = [
+            _order_dict(dp, _CHEMKED_DATAPOINT_KEY_ORDER)
+            for dp in d['datapoints']
+        ]
+
+    text = yaml.dump(
+        d,
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+    )
+    return '---\n' + text
+
+
 class DatasetUploadView(FormView):
     """
     View for uploading existing ChemKED YAML or ReSpecTh XML files.
@@ -984,7 +1169,7 @@ class DatasetUploadView(FormView):
     """
     template_name = "chemked_database/dataset_upload.html"
     form_class = ChemKEDUploadForm
-    success_url = reverse_lazy('chemked_database:dataset-list')
+    success_url = reverse_lazy('chemked_database:dataset-upload')
     
     def get(self, request, *args, **kwargs):
         """Handle GET request - check if we're in preview mode or cancelling."""
@@ -1047,6 +1232,14 @@ class DatasetUploadView(FormView):
         original_filename = form.cleaned_data['original_filename']
         file_author = form.cleaned_data.get('file_author', '')
         
+        # Retrieve GitHub contribution fields stored during preview
+        preview_data = request.session.get('respecth_preview', {})
+        contribute_to_github = preview_data.get('contribute_to_github', False)
+        run_pyteck = preview_data.get('run_pyteck', False)
+        github_username = preview_data.get('github_username', '')
+        contribution_description = preview_data.get('contribution_description', '')
+        file_author_orcid = form.cleaned_data.get('file_author_orcid', '') or preview_data.get('file_author_orcid', '')
+        
         # Clear session data
         if 'respecth_preview' in request.session:
             del request.session['respecth_preview']
@@ -1056,9 +1249,12 @@ class DatasetUploadView(FormView):
             messages.error(request, 'Temporary file expired. Please upload the file again.')
             return redirect('chemked_database:dataset-upload')
         
+        pr_result = None
         try:
-            from .respecth_v2_converter import parse_respecth_v2
-            data = parse_respecth_v2(temp_file_path)
+            from pyked.batch_convert import convert_file
+            from .chemked_adapter import ChemKEDDictAdapter
+            chemked_dict = convert_file(temp_file_path)
+            data = ChemKEDDictAdapter(chemked_dict)
             
             # Check for duplicate based on file_doi
             if data.file_doi:
@@ -1072,13 +1268,8 @@ class DatasetUploadView(FormView):
                     messages.warning(request, formatted['message'])
                     return redirect('chemked_database:dataset-upload')
             
-            # Import with the user-specified name
-            if data.file_type == 'kdetermination':
-                dataset = self._import_kdetermination(data, original_filename, file_author, custom_name=dataset_name)
-            elif data.file_type == 'tdetermination':
-                dataset = self._import_tdetermination(data, original_filename, file_author, custom_name=dataset_name)
-            else:
-                dataset = self._import_respecth_experiment(data, original_filename, file_author, custom_name=dataset_name)
+            # Import with the unified ChemKED dict importer
+            dataset = self._import_from_chemked_dict(chemked_dict, original_filename, file_author, custom_name=dataset_name)
             
             messages.success(
                 request,
@@ -1086,7 +1277,38 @@ class DatasetUploadView(FormView):
                 f'with {dataset.datapoints.count()} datapoints.'
             )
             
-            return redirect('chemked_database:dataset-detail', pk=dataset.pk)
+            # Create GitHub PR using the converter dict directly.
+            # Avoids re-exporting from the DB which introduces Django
+            # enum serialization bugs (!!python/object/apply tags).
+            if contribute_to_github:
+                pr_result = self._create_contribution_pr_from_chemked_dict(
+                    chemked_dict,
+                    dataset.chemked_file_path,
+                    file_author, file_author_orcid,
+                    run_pyteck, contribution_description,
+                    github_username=github_username,
+                )
+                if pr_result:
+                    messages.success(
+                        request,
+                        f'GitHub PR #{pr_result["pr_number"]} created: {pr_result["pr_url"]}'
+                    )
+            
+            submission = Submission.objects.create(
+                status=Submission.Status.SUCCESS,
+                successful_imports=[{
+                    'filename': original_filename,
+                    'dataset_id': dataset.pk,
+                    'dataset_name': dataset.chemked_file_path,
+                    'datapoints': dataset.datapoints.count(),
+                }],
+                contributor_name=file_author,
+                contributor_orcid=file_author_orcid,
+                pr_url=pr_result.get('pr_url', '') if pr_result else '',
+                pr_number=pr_result.get('pr_number') if pr_result else None,
+                branch=pr_result.get('branch', '') if pr_result else '',
+            )
+            return redirect('chemked_database:submission-status', pk=submission.pk)
             
         except Exception as e:
             logger.exception("Error during confirmed import")
@@ -1110,6 +1332,10 @@ class DatasetUploadView(FormView):
         validate = form.cleaned_data.get('validate_on_upload', True)
         file_author = form.cleaned_data.get('file_author', '')
         file_author_orcid = form.cleaned_data.get('file_author_orcid', '')
+        contribute_to_github = form.cleaned_data.get('contribute_to_github', False)
+        run_pyteck = form.cleaned_data.get('run_pyteck', False)
+        github_username = form.cleaned_data.get('github_username', '')
+        contribution_description = form.cleaned_data.get('contribution_description', '')
 
         if not data_files:
             if is_ajax:
@@ -1128,15 +1354,26 @@ class DatasetUploadView(FormView):
                 )
             return self.form_invalid(form)
         
-        # If only one file and it's XML (not AJAX), use the preview flow
-        if len(data_files) == 1 and not is_ajax:
+        # Single-file upload: use the preview flow (for XML) or direct import (for YAML).
+        # The JS upload handler already follows redirects via xhr.responseURL.
+        if len(data_files) == 1:
             return self._process_single_file(
-                data_files[0], file_format, validate, file_author, file_author_orcid, form
+                data_files[0], file_format, validate, file_author, file_author_orcid, form,
+                contribute_to_github=contribute_to_github,
+                run_pyteck=run_pyteck,
+                github_username=github_username,
+                contribution_description=contribution_description,
             )
         
         # For AJAX requests: Save files to temp storage and return batch_id for SSE processing
         if is_ajax:
-            return self._prepare_batch_for_sse(data_files, file_format, validate, file_author, file_author_orcid)
+            return self._prepare_batch_for_sse(
+                data_files, file_format, validate, file_author, file_author_orcid,
+                contribute_to_github=contribute_to_github,
+                run_pyteck=run_pyteck,
+                github_username=github_username,
+                contribution_description=contribution_description,
+            )
         
         # Non-AJAX multi-file: process synchronously
         successful_imports = []
@@ -1162,6 +1399,20 @@ class DatasetUploadView(FormView):
                 self.request,
                 f'Successfully imported {len(successful_imports)} dataset(s) with {total_datapoints} total datapoints.'
             )
+
+            # Create GitHub PR if requested
+            if contribute_to_github:
+                pr_result = self._create_contribution_pr(
+                    data_files, successful_imports,
+                    file_author, file_author_orcid,
+                    run_pyteck, contribution_description,
+                    github_username=github_username,
+                )
+                if pr_result:
+                    messages.success(
+                        self.request,
+                        f'GitHub PR #{pr_result["pr_number"]} created: {pr_result["pr_url"]}'
+                    )
         
         if failed_imports:
             details = "\n".join(
@@ -1182,10 +1433,23 @@ class DatasetUploadView(FormView):
             )
         
         if successful_imports:
-            return redirect('chemked_database:dataset-list')
+            submission = Submission.objects.create(
+                status=Submission.Status.SUCCESS if not failed_imports else Submission.Status.PARTIAL,
+                successful_imports=successful_imports,
+                failed_imports=failed_imports,
+                skipped_imports=skipped_imports,
+                contributor_name=file_author,
+                contributor_orcid=file_author_orcid,
+                pr_url=pr_result.get('pr_url', '') if pr_result else '',
+                pr_number=pr_result.get('pr_number') if pr_result else None,
+                branch=pr_result.get('branch', '') if pr_result else '',
+            )
+            return redirect('chemked_database:submission-status', pk=submission.pk)
         return self.form_invalid(form)
     
-    def _prepare_batch_for_sse(self, data_files, file_format, validate, file_author, file_author_orcid):
+    def _prepare_batch_for_sse(self, data_files, file_format, validate, file_author, file_author_orcid,
+                              contribute_to_github=False, run_pyteck=False,
+                              github_username='', contribution_description=''):
         """
         Save uploaded files to temp storage and return batch_id for SSE processing.
         This allows the client to track real-time progress via Server-Sent Events.
@@ -1227,6 +1491,10 @@ class DatasetUploadView(FormView):
             'validate': validate,
             'file_author': file_author,
             'file_author_orcid': file_author_orcid,
+            'contribute_to_github': contribute_to_github,
+            'run_pyteck': run_pyteck,
+            'github_username': github_username,
+            'contribution_description': contribution_description,
         }
         self.request.session.modified = True
         
@@ -1300,9 +1568,11 @@ class DatasetUploadView(FormView):
     
     def _import_respecth_xml_batch(self, temp_path, original_filename, file_author, file_author_orcid):
         """Import ReSpecTh XML in batch mode (no preview)."""
-        from .respecth_v2_converter import parse_respecth_v2
+        from pyked.batch_convert import convert_file
+        from .chemked_adapter import ChemKEDDictAdapter
         
-        data = parse_respecth_v2(temp_path)
+        chemked_dict = convert_file(temp_path)
+        data = ChemKEDDictAdapter(chemked_dict)
         
         # Check for duplicate based on file_doi
         if data.file_doi:
@@ -1331,12 +1601,7 @@ class DatasetUploadView(FormView):
                     'Skipping duplicate upload.'
                 )
         
-        if data.file_type == 'kdetermination':
-            return self._import_kdetermination(data, original_filename, file_author)
-        elif data.file_type == 'tdetermination':
-            return self._import_tdetermination(data, original_filename, file_author)
-        else:
-            return self._import_respecth_experiment(data, original_filename, file_author)
+        return self._import_from_chemked_dict(chemked_dict, original_filename, file_author)
 
     def _format_import_error(self, error_msg):
         """Normalize import errors into user-friendly messages."""
@@ -1376,7 +1641,9 @@ class DatasetUploadView(FormView):
 
         return {'kind': 'error', 'message': message}
     
-    def _process_single_file(self, data_file, file_format, validate, file_author, file_author_orcid, form):
+    def _process_single_file(self, data_file, file_format, validate, file_author, file_author_orcid, form,
+                             contribute_to_github=False, run_pyteck=False,
+                             github_username='', contribution_description=''):
         """Process a single file upload (supports preview for XML)."""
         # Determine file format
         filename = data_file.name.lower()
@@ -1398,7 +1665,13 @@ class DatasetUploadView(FormView):
         try:
             if file_format == 'xml':
                 # Try to detect ReSpecTh version
-                result = self._import_respecth_xml(temp_path, data_file.name, file_author, file_author_orcid)
+                result = self._import_respecth_xml(
+                    temp_path, data_file.name, file_author, file_author_orcid,
+                    contribute_to_github=contribute_to_github,
+                    run_pyteck=run_pyteck,
+                    github_username=github_username,
+                    contribution_description=contribution_description,
+                )
                 return result
             else:
                 # Parse ChemKED YAML
@@ -1414,7 +1687,37 @@ class DatasetUploadView(FormView):
                         self.request,
                         f'Successfully imported {file_type_label} "{data_file.name}" with {dataset.datapoints.count()} datapoints.'
                     )
-                    return redirect('chemked_database:dataset-detail', pk=dataset.pk)
+
+                    # Create GitHub PR if requested
+                    if contribute_to_github:
+                        pr_result = self._create_contribution_pr(
+                            [data_file],
+                            [{'filename': data_file.name, 'dataset_name': dataset.chemked_file_path}],
+                            file_author, file_author_orcid,
+                            run_pyteck, contribution_description,
+                            github_username=github_username,
+                        )
+                        if pr_result:
+                            messages.success(
+                                self.request,
+                                f'GitHub PR #{pr_result["pr_number"]} created: {pr_result["pr_url"]}'
+                            )
+
+                    submission = Submission.objects.create(
+                        status=Submission.Status.SUCCESS,
+                        successful_imports=[{
+                            'filename': data_file.name,
+                            'dataset_id': dataset.pk,
+                            'dataset_name': dataset.chemked_file_path,
+                            'datapoints': dataset.datapoints.count(),
+                        }],
+                        contributor_name=file_author,
+                        contributor_orcid=file_author_orcid,
+                        pr_url=pr_result.get('pr_url', '') if pr_result else '',
+                        pr_number=pr_result.get('pr_number') if pr_result else None,
+                        branch=pr_result.get('branch', '') if pr_result else '',
+                    )
+                    return redirect('chemked_database:submission-status', pk=submission.pk)
                 except ImportError:
                     messages.error(self.request, 'PyKED is not installed. Cannot import YAML files.')
                     return self.form_invalid(form)
@@ -1472,7 +1775,243 @@ class DatasetUploadView(FormView):
                     os.unlink(temp_path)
         
         return self.form_invalid(form)
-    
+
+    def _create_contribution_pr(self, data_files, successful_imports,
+                                file_author, file_author_orcid,
+                                run_pyteck=False, contribution_description='',
+                                github_username=''):
+        """Create a GitHub PR for the contributed files.
+
+        Parameters
+        ----------
+        data_files : list[UploadedFile]
+            Original uploaded files (Django UploadedFile objects).
+        successful_imports : list[dict]
+            Import results with 'filename' and 'dataset_name' keys.
+        file_author : str
+            Contributor display name.
+        file_author_orcid : str
+            ORCID identifier.
+        run_pyteck : bool
+            Whether to trigger PyTeCK simulation in CI.
+        contribution_description : str
+            Optional description for the PR.
+
+        Returns
+        -------
+        dict or None
+            Result with 'pr_url', 'pr_number', 'branch', or None on failure.
+        """
+        from .github_pr_service import GitHubPRService, GitHubContributionError, verify_orcid, OrcidVerificationError
+
+        # Verify ORCID before creating PR
+        if file_author_orcid:
+            try:
+                orcid_info = verify_orcid(file_author_orcid)
+                logger.info(
+                    "ORCID %s verified as %s", file_author_orcid, orcid_info["name"]
+                )
+            except OrcidVerificationError as exc:
+                messages.warning(
+                    self.request,
+                    f'ORCID verification warning: {exc} — PR will still be created.'
+                )
+
+        try:
+            gh = GitHubPRService(
+                token=getattr(settings, 'GITHUB_TOKEN', ''),
+                owner=getattr(settings, 'GITHUB_REPO_OWNER', ''),
+                repo=getattr(settings, 'GITHUB_REPO_NAME', 'ChemKED-database'),
+            )
+        except GitHubContributionError as exc:
+            logger.warning("GitHub PR service not configured: %s", exc)
+            messages.warning(
+                self.request,
+                'GitHub contribution is not configured. Files were imported locally only.'
+            )
+            return None
+
+        # Build file list for PR: use original uploaded file content
+        imported_names = {r['filename'] for r in successful_imports}
+        pr_files = []
+        for data_file in data_files:
+            if data_file.name in imported_names:
+                data_file.seek(0)
+                content = data_file.read()
+                repo_path = gh.determine_repo_path(data_file.name, content)
+                pr_files.append({'path': repo_path, 'content': content})
+
+        if not pr_files:
+            return None
+
+        # Determine file type
+        file_type = 'chemked'
+        if any(f['path'].lower().endswith('.xml') for f in pr_files):
+            file_type = 'respecth'
+
+        try:
+            result = gh.contribute_files(
+                files=pr_files,
+                contributor_name=file_author or 'Anonymous',
+                contributor_orcid=file_author_orcid,
+                file_type=file_type,
+                description=contribution_description,
+                run_pyteck=run_pyteck,
+                github_username=github_username,
+                validation_passed=True,
+            )
+            return result
+        except GitHubContributionError as exc:
+            logger.exception("Failed to create contribution PR")
+            messages.warning(
+                self.request,
+                f'Files imported locally but GitHub PR creation failed: {exc}'
+            )
+            return None
+
+    def _create_contribution_pr_from_dataset(self, dataset, original_filename,
+                                              file_author, file_author_orcid,
+                                              run_pyteck=False, contribution_description='',
+                                              github_username=''):
+        """Create a GitHub PR with ChemKED YAML converted from an imported dataset.
+
+        Used for ReSpecTh XML uploads: the XML is imported into the DB, then
+        exported as ChemKED YAML for the PR so that ChemKED-database receives
+        the canonical format.
+        """
+        from .github_pr_service import GitHubPRService, GitHubContributionError, verify_orcid, OrcidVerificationError
+
+        if file_author_orcid:
+            try:
+                verify_orcid(file_author_orcid)
+            except OrcidVerificationError as exc:
+                messages.warning(
+                    self.request,
+                    f'ORCID verification warning: {exc} — PR will still be created.'
+                )
+
+        try:
+            gh = GitHubPRService(
+                token=getattr(settings, 'GITHUB_TOKEN', ''),
+                owner=getattr(settings, 'GITHUB_REPO_OWNER', ''),
+                repo=getattr(settings, 'GITHUB_REPO_NAME', 'ChemKED-database'),
+            )
+        except GitHubContributionError as exc:
+            logger.warning("GitHub PR service not configured: %s", exc)
+            messages.warning(
+                self.request,
+                'GitHub contribution is not configured. Files were imported locally only.'
+            )
+            return None
+
+        # Convert dataset to ChemKED YAML
+        try:
+            export_view = DatasetExportView()
+            chemked_dict = export_view._dataset_to_chemked_dict(dataset)
+            yaml_content = format_chemked_yaml(chemked_dict).encode('utf-8')
+        except Exception as exc:
+            logger.exception("Failed to convert dataset to ChemKED YAML for PR")
+            messages.warning(
+                self.request,
+                f'Dataset imported locally but YAML conversion for GitHub PR failed: {exc}'
+            )
+            return None
+
+        # Determine repo path from the YAML content
+        yaml_filename = Path(dataset.chemked_file_path).stem + '.yaml'
+        repo_path = gh.determine_repo_path(yaml_filename, yaml_content)
+        pr_files = [{'path': repo_path, 'content': yaml_content}]
+
+        try:
+            result = gh.contribute_files(
+                files=pr_files,
+                contributor_name=file_author or 'Anonymous',
+                contributor_orcid=file_author_orcid,
+                file_type='chemked',
+                description=contribution_description,
+                run_pyteck=run_pyteck,
+                github_username=github_username,
+                validation_passed=True,
+            )
+            return result
+        except GitHubContributionError as exc:
+            logger.exception("Failed to create contribution PR")
+            messages.warning(
+                self.request,
+                f'Files imported locally but GitHub PR creation failed: {exc}'
+            )
+            return None
+
+    def _create_contribution_pr_from_chemked_dict(self, chemked_dict, dataset_name,
+                                                   file_author, file_author_orcid,
+                                                   run_pyteck=False, contribution_description='',
+                                                   github_username=''):
+        """Create a GitHub PR directly from a converter dict (no DB re-export).
+
+        This avoids the round-trip through _dataset_to_chemked_dict which can
+        introduce Django enum serialization artifacts (!!python/object/apply).
+        """
+        from .github_pr_service import GitHubPRService, GitHubContributionError, verify_orcid, OrcidVerificationError
+
+        if file_author_orcid:
+            try:
+                verify_orcid(file_author_orcid)
+            except OrcidVerificationError as exc:
+                messages.warning(
+                    self.request,
+                    f'ORCID verification warning: {exc} — PR will still be created.'
+                )
+
+        try:
+            gh = GitHubPRService(
+                token=getattr(settings, 'GITHUB_TOKEN', ''),
+                owner=getattr(settings, 'GITHUB_REPO_OWNER', ''),
+                repo=getattr(settings, 'GITHUB_REPO_NAME', 'ChemKED-database'),
+            )
+        except GitHubContributionError as exc:
+            logger.warning("GitHub PR service not configured: %s", exc)
+            messages.warning(
+                self.request,
+                'GitHub contribution is not configured. Files were imported locally only.'
+            )
+            return None
+
+        # Add contributor to file-authors if not already present
+        if file_author:
+            author_entry = {'name': file_author}
+            if file_author_orcid:
+                author_entry['ORCID'] = file_author_orcid
+            existing = chemked_dict.get('file-authors', [])
+            if not any(a.get('name') == file_author for a in existing):
+                existing.append(author_entry)
+            chemked_dict['file-authors'] = existing
+
+        yaml_content = format_chemked_yaml(chemked_dict).encode('utf-8')
+
+        yaml_filename = Path(dataset_name).stem + '.yaml'
+        repo_path = gh.determine_repo_path(yaml_filename, yaml_content)
+        pr_files = [{'path': repo_path, 'content': yaml_content}]
+
+        try:
+            result = gh.contribute_files(
+                files=pr_files,
+                contributor_name=file_author or 'Anonymous',
+                contributor_orcid=file_author_orcid,
+                file_type='chemked',
+                description=contribution_description,
+                run_pyteck=run_pyteck,
+                github_username=github_username,
+                validation_passed=True,
+            )
+            return result
+        except GitHubContributionError as exc:
+            logger.exception("Failed to create contribution PR")
+            messages.warning(
+                self.request,
+                f'Files imported locally but GitHub PR creation failed: {exc}'
+            )
+            return None
+
     def _generate_readable_name(self, data, original_filename, file_type='experiment'):
         """
         Generate a human-readable dataset name following ChemKED database conventions.
@@ -1730,13 +2269,15 @@ class DatasetUploadView(FormView):
         if 'outlet' in exp_lower and 'concentration' in exp_lower:
             return ExperimentType.OUTLET_CONCENTRATION
         if 'concentration' in exp_lower and 'profile' in exp_lower:
-            return ExperimentType.CONCENTRATION_PROFILE
+            return ExperimentType.CONCENTRATION_TIME_PROFILE
         if 'ignition' in exp_lower or 'delay' in exp_lower:
             return ExperimentType.IGNITION_DELAY
-        if 'flame' in exp_lower or 'speed' in exp_lower:
-            return ExperimentType.FLAME_SPEED
+        if 'flame' in exp_lower or 'speed' in exp_lower or 'burning' in exp_lower or 'velocity' in exp_lower:
+            return ExperimentType.LAMINAR_BURNING_VELOCITY
+        if 'burner' in exp_lower and 'stabilized' in exp_lower:
+            return ExperimentType.BSFS_MEASUREMENT
         if 'species' in exp_lower and 'profile' in exp_lower:
-            return ExperimentType.SPECIES_PROFILE
+            return ExperimentType.CONCENTRATION_TIME_PROFILE
         if 'rate' in exp_lower or 'coefficient' in exp_lower:
             return ExperimentType.RATE_COEFFICIENT
         if 'thermo' in exp_lower:
@@ -1749,7 +2290,9 @@ class DatasetUploadView(FormView):
             )
         return ExperimentType.IGNITION_DELAY
     
-    def _import_respecth_xml(self, temp_path, original_filename, file_author, file_author_orcid):
+    def _import_respecth_xml(self, temp_path, original_filename, file_author, file_author_orcid,
+                              contribute_to_github=False, run_pyteck=False,
+                              github_username='', contribution_description=''):
         """
         Import ReSpecTh XML file. Tries v2.x format first, falls back to v1.x via PyKED.
         """
@@ -1769,20 +2312,32 @@ class DatasetUploadView(FormView):
         
         if root_tag in v2_root_tags:
             # Use our ReSpecTh v2 converter
-            return self._import_respecth_v2(temp_path, original_filename, root_tag, file_author)
+            return self._import_respecth_v2(
+                temp_path, original_filename, root_tag, file_author,
+                file_author_orcid=file_author_orcid,
+                contribute_to_github=contribute_to_github,
+                run_pyteck=run_pyteck,
+                github_username=github_username,
+                contribution_description=contribution_description,
+            )
         else:
             # Try PyKED's converter for v1.x format
             return self._import_respecth_v1(temp_path, original_filename, file_author, file_author_orcid)
     
-    def _import_respecth_v2(self, temp_path, original_filename, file_type, file_author):
+    def _import_respecth_v2(self, temp_path, original_filename, file_type, file_author,
+                             file_author_orcid='', contribute_to_github=False,
+                             run_pyteck=False, github_username='',
+                             contribution_description=''):
         """
         Import ReSpecTh v2.x format file (kdetermination, tdetermination, etc.).
         Shows a preview step first so user can edit the dataset name.
         """
-        from .respecth_v2_converter import parse_respecth_v2, ReSpecThV2Data
+        from pyked.batch_convert import convert_file
+        from .chemked_adapter import ChemKEDDictAdapter
         
         try:
-            data = parse_respecth_v2(temp_path)
+            chemked_dict = convert_file(temp_path)
+            data = ChemKEDDictAdapter(chemked_dict)
 
             validation_error = None
             if data.file_type == 'experiment':
@@ -1808,11 +2363,16 @@ class DatasetUploadView(FormView):
                 'reference_journal': ref.journal if ref else '',
                 'reference_year': ref.year if ref else '',
                 'reference_authors': ', '.join([a.name for a in ref.authors]) if ref and ref.authors else '',
-                'reaction': data.reaction.preferred_key if data.reaction else '',
+                'reaction': ' / '.join(rxn.preferred_key for rxn in data.reactions) if data.reactions else '',
                 'experiment_type': data.experiment_type or data.file_type,
                 'validation_error': validation_error,
                 'can_confirm': validation_error is None,
                 'supported_experiment_types': [choice.label for choice in ExperimentType],
+                'contribute_to_github': contribute_to_github,
+                'run_pyteck': run_pyteck,
+                'github_username': github_username,
+                'contribution_description': contribution_description,
+                'file_author_orcid': file_author_orcid,
             }
             
             # Store in session for preview
@@ -1872,157 +2432,22 @@ class DatasetUploadView(FormView):
         
         return self.form_invalid(self.get_form())
     
-    @transaction.atomic
-    def _import_kdetermination(self, data, original_filename, file_author, custom_name=None):
-        """Import a ReSpecTh v2 kdetermination (rate coefficient) file."""
-        from .respecth_v2_converter import ReSpecThV2Data
-        
-        # Use custom name if provided, otherwise generate one
-        if custom_name:
-            readable_name = custom_name
-            # Ensure uniqueness
-            base_name = readable_name
-            counter = 1
-            while ExperimentDataset.objects.filter(chemked_file_path=readable_name).exists():
-                readable_name = f"{base_name}_{counter}"
-                counter += 1
-        else:
-            readable_name = self._generate_readable_name(data, original_filename, 'kdetermination')
-        
-        # Create a minimal apparatus (not really applicable for k data)
-        apparatus, _ = Apparatus.objects.get_or_create(
-            kind=ApparatusKind.SHOCK_TUBE,  # Default, can be overridden
-            institution='',
-            facility='',
-        )
-        
-        # Prepare reference data
-        ref = data.reference
-        ref_doi = ref.doi if ref else ''
-        ref_journal = ref.journal if ref else ''
-        ref_year = ref.year if ref else None
-        ref_volume = None
-        if ref and ref.volume:
-            try:
-                ref_volume = int(ref.volume)
-            except (ValueError, TypeError):
-                pass
-        ref_pages = ref.pages if ref else ''
-        ref_detail = ref.location if ref else ''
-        
-        # Create dataset with inline reference fields
-        # Use RATE_COEFFICIENT experiment type for kdetermination files
-        dataset = ExperimentDataset.objects.create(
-            chemked_file_path=readable_name,  # Use human-readable name
-            experiment_type=ExperimentType.RATE_COEFFICIENT,
-            apparatus=apparatus,
-            chemked_version='0.4.1',  # Standard ChemKED schema version
-            file_version=0,  # Start at 0, increment on modifications
-            reference_doi=ref_doi or '',
-            reference_journal=ref_journal or '',
-            reference_year=ref_year,
-            reference_volume=ref_volume,
-            reference_pages=ref_pages or '',
-            reference_detail=ref_detail or '',
-        )
-        
-        # Add reference authors
-        if ref and ref.authors:
-            for author_data in ref.authors:
-                author, _ = ReferenceAuthor.objects.get_or_create(
-                    name=author_data.name,
-                    defaults={'orcid': author_data.orcid or ''}
-                )
-                dataset.reference_authors.add(author)
-        
-        # Add file author
-        if file_author or data.file_author:
-            author_name = file_author or data.file_author
-            author, _ = FileAuthor.objects.get_or_create(name=author_name)
-            dataset.file_authors.add(author)
-        
-        # Store reaction info in reference_detail if present
-        if data.reaction:
-            reaction_info = f"Reaction: {data.reaction.preferred_key}"
-            if dataset.reference_detail:
-                dataset.reference_detail += f"\n{reaction_info}"
-            else:
-                dataset.reference_detail = reaction_info
-            dataset.save()
-        
-        # Get reaction and method info for rate coefficient records
-        reaction_str = data.reaction.preferred_key if data.reaction else ''
-        reaction_order = data.reaction.order if data.reaction else None
-        bulk_gas = data.reaction.bulk_gas if data.reaction else ''
-        method_str = data.method or ''
-        
-        # Create datapoints
-        prop_map = {p.id: p for p in data.data_properties}
-        
-        for i, dp_data in enumerate(data.datapoints):
-            # Find temperature, pressure, and rate coefficient values
-            temp_value = None
-            temp_units = 'K'
-            pressure_value = None
-            pressure_units = 'atm'
-            rate_coeff_value = None
-            rate_coeff_units = 'cm3 mol-1 s-1'
-            
-            for prop_id, value in dp_data.values.items():
-                prop = prop_map.get(prop_id)
-                if prop:
-                    prop_name_lower = prop.name.lower() if prop.name else ''
-                    if 'temperature' in prop_name_lower:
-                        try:
-                            temp_value = float(value) if value else None
-                        except (ValueError, TypeError):
-                            temp_value = None
-                        temp_units = prop.units or 'K'
-                    elif 'pressure' in prop_name_lower:
-                        try:
-                            pressure_value = float(value) if value else None
-                        except (ValueError, TypeError):
-                            pressure_value = None
-                        pressure_units = prop.units or 'atm'
-                    elif 'rate' in prop_name_lower or 'coefficient' in prop_name_lower:
-                        try:
-                            rate_coeff_value = float(value) if value else None
-                        except (ValueError, TypeError):
-                            rate_coeff_value = None
-                        rate_coeff_units = prop.units or 'cm3 mol-1 s-1'
-            
-            # Convert to SI if needed
-            temp_si = self._convert_to_si(temp_value, temp_units, 'temperature') if temp_value else 0
-            pressure_si = self._convert_to_si(pressure_value, pressure_units, 'pressure') if pressure_value else None
-            
-            # Create datapoint (temperature is required, pressure may be None for k data)
-            datapoint = ExperimentDatapoint.objects.create(
-                dataset=dataset,
-                temperature=temp_si,
-                pressure=pressure_si or 0,  # Default to 0 if no pressure data
-            )
-            
-            # Create RateCoefficientDatapoint for rate coefficient data
-            if rate_coeff_value is not None:
-                RateCoefficientDatapoint.objects.create(
-                    datapoint=datapoint,
-                    rate_coefficient=rate_coeff_value,
-                    rate_coefficient_units=rate_coeff_units,
-                    reaction=reaction_str,
-                    reaction_order=reaction_order,
-                    bulk_gas=bulk_gas,
-                    method=method_str,
-                )
-        
-        return dataset
+    # ------------------------------------------------------------------
+    # Unified import from ChemKED dict (output of batch_convert)
+    # ------------------------------------------------------------------
     
     @transaction.atomic
-    def _import_tdetermination(self, data, original_filename, file_author, custom_name=None):
-        """Import a ReSpecTh v2 tdetermination (thermochemical) file."""
-        # Use THERMOCHEMICAL experiment type
-        from .respecth_v2_converter import ReSpecThV2Data
+    def _import_from_chemked_dict(self, chemked_dict, original_filename, file_author, custom_name=None):
+        """Import a ChemKED dict (from batch_convert.convert_file) into the database.
         
-        # Use custom name if provided, otherwise generate one
+        Handles experiment, kdetermination, and tdetermination file types.
+        """
+        from .chemked_adapter import ChemKEDDictAdapter, _parse_chemked_value
+        
+        data = ChemKEDDictAdapter(chemked_dict)
+        file_type = data.file_type
+        
+        # Generate dataset name
         if custom_name:
             readable_name = custom_name
             base_name = readable_name
@@ -2031,109 +2456,25 @@ class DatasetUploadView(FormView):
                 readable_name = f"{base_name}_{counter}"
                 counter += 1
         else:
-            readable_name = self._generate_readable_name(data, original_filename, 'tdetermination')
+            readable_name = self._generate_readable_name(data, original_filename, file_type)
         
-        apparatus, _ = Apparatus.objects.get_or_create(
-            kind=ApparatusKind.SHOCK_TUBE,
-            institution='',
-            facility='',
-        )
-        
-        ref = data.reference
-        ref_doi = ref.doi if ref else ''
-        ref_journal = ref.journal if ref else ''
-        ref_year = ref.year if ref else None
-        ref_volume = None
-        if ref and ref.volume:
-            try:
-                ref_volume = int(ref.volume)
-            except (ValueError, TypeError):
-                pass
-        ref_pages = ref.pages if ref else ''
-        ref_detail = ref.location if ref else ''
-        
-        dataset = ExperimentDataset.objects.create(
-            chemked_file_path=readable_name,
-            experiment_type=ExperimentType.THERMOCHEMICAL,
-            apparatus=apparatus,
-            chemked_version='0.4.1',
-            file_version=0,
-            reference_doi=ref_doi or '',
-            reference_journal=ref_journal or '',
-            reference_year=ref_year,
-            reference_volume=ref_volume,
-            reference_pages=ref_pages or '',
-            reference_detail=ref_detail or '',
-        )
-        
-        # Add authors
-        if ref and ref.authors:
-            for author_data in ref.authors:
-                author, _ = ReferenceAuthor.objects.get_or_create(
-                    name=author_data.name,
-                    defaults={'orcid': author_data.orcid or ''}
-                )
-                dataset.reference_authors.add(author)
-        
-        if file_author or data.file_author:
-            author_name = file_author or data.file_author
-            author, _ = FileAuthor.objects.get_or_create(name=author_name)
-            dataset.file_authors.add(author)
-        
-        # Create datapoints (similar to kdetermination but without rate coefficients)
-        prop_map = {p.id: p for p in data.data_properties}
-        
-        for dp_data in data.datapoints:
-            temp_value = None
-            temp_units = 'K'
-            
-            for prop_id, value in dp_data.values.items():
-                prop = prop_map.get(prop_id)
-                if prop and 'temperature' in (prop.name or '').lower():
-                    try:
-                        temp_value = float(value) if value else None
-                    except (ValueError, TypeError):
-                        temp_value = None
-                    temp_units = prop.units or 'K'
-            
-            temp_si = self._convert_to_si(temp_value, temp_units, 'temperature') if temp_value else 0
-            
-            ExperimentDatapoint.objects.create(
-                dataset=dataset,
-                temperature=temp_si,
-                pressure=0,  # Thermochemical data typically doesn't have pressure
-            )
-        
-        return dataset
-    
-    @transaction.atomic
-    def _import_respecth_experiment(self, data, original_filename, file_author, custom_name=None):
-        """Import a ReSpecTh v2 experiment file (ignition delay, species profiles, etc.)."""
-        from .respecth_v2_converter import ReSpecThV2Data
-        
-        # Use custom name if provided, otherwise generate one
-        if custom_name:
-            readable_name = custom_name
-            base_name = readable_name
-            counter = 1
-            while ExperimentDataset.objects.filter(chemked_file_path=readable_name).exists():
-                readable_name = f"{base_name}_{counter}"
-                counter += 1
+        # Map experiment type
+        exp_type_str = data.experiment_type
+        if file_type == 'kdetermination':
+            exp_type = ExperimentType.RATE_COEFFICIENT
+        elif file_type == 'tdetermination':
+            exp_type = ExperimentType.THERMOCHEMICAL
         else:
-            readable_name = self._generate_readable_name(data, original_filename, 'experiment')
+            exp_type = self._map_experiment_type(exp_type_str, strict=True)
         
-        # Determine apparatus kind from data
-        apparatus_kind = self._map_apparatus_kind(data.apparatus_kind)
-        
+        # Apparatus
+        apparatus_kind_str = data.apparatus_kind or (data.method if file_type == 'kdetermination' else '')
+        apparatus_kind = self._map_apparatus_kind(apparatus_kind_str)
         apparatus, _ = Apparatus.objects.get_or_create(
-            kind=apparatus_kind,
-            institution='',
-            facility='',
+            kind=apparatus_kind, institution='', facility='',
         )
         
-        # Determine experiment type
-        exp_type = self._map_experiment_type(data.experiment_type, strict=True)
-        
+        # Reference
         ref = data.reference
         ref_doi = ref.doi if ref else ''
         ref_journal = ref.journal if ref else ''
@@ -2151,7 +2492,7 @@ class DatasetUploadView(FormView):
         ref_figure = ref.figure if ref else ''
         ref_location = ref.location if ref else ''
         
-        # Parse dates
+        # Dates
         first_pub_date = None
         last_mod_date = None
         if data.first_publication_date:
@@ -2167,6 +2508,7 @@ class DatasetUploadView(FormView):
             except (ValueError, TypeError):
                 pass
         
+        # Create dataset
         dataset = ExperimentDataset.objects.create(
             chemked_file_path=readable_name,
             experiment_type=exp_type,
@@ -2188,6 +2530,7 @@ class DatasetUploadView(FormView):
             first_publication_date=first_pub_date,
             last_modification_date=last_mod_date,
             method=data.method or '',
+            comments=data.comments or [],
         )
         
         # Add authors
@@ -2201,69 +2544,98 @@ class DatasetUploadView(FormView):
         
         if file_author or data.file_author:
             author_name = file_author or data.file_author
-            author, _ = FileAuthor.objects.get_or_create(name=author_name)
-            dataset.file_authors.add(author)
+            fa, _ = FileAuthor.objects.get_or_create(
+                name=author_name, defaults={'orcid': ''},
+            )
+            dataset.file_authors.add(fa)
         
-        # Import initial composition if available
-        common_composition = self._import_composition(data, dataset)
+        # Store reaction info for kdetermination
+        if data.reactions:
+            reaction_lines = [f"Reaction: {rxn.preferred_key}" for rxn in data.reactions]
+            reaction_info = '\n'.join(reaction_lines)
+            if dataset.reference_detail:
+                dataset.reference_detail += f"\n{reaction_info}"
+            else:
+                dataset.reference_detail = reaction_info
+            dataset.save()
         
-        # Extract common properties (equivalence ratio, pressure, temperature, volume, residence time)
+        # Dispatch to type-specific datapoint import
+        raw = chemked_dict
+        if file_type == 'kdetermination':
+            self._import_kdet_datapoints(raw, dataset, data, _parse_chemked_value)
+        elif file_type == 'tdetermination':
+            self._import_tdet_datapoints(raw, dataset, _parse_chemked_value)
+        else:
+            self._import_experiment_datapoints(raw, dataset, data, _parse_chemked_value)
+        
+        return dataset
+    
+    def _import_experiment_datapoints(self, raw, dataset, data, _parse_chemked_value):
+        """Import datapoints for experiment files from ChemKED dict."""
+        common = raw.get('common-properties') or {}
+        
+        # Import initial composition
+        common_composition = self._import_composition_from_chemked(common.get('composition'))
+        
+        # Extract common scalar values
         common_pressure = None
-        common_pressure_units = 'Pa'
         common_temperature = None
-        common_temperature_units = 'K'
         common_equiv_ratio = None
         common_volume = None
-        common_volume_units = 'cm3'
         common_residence_time = None
-        common_residence_time_units = 's'
         
-        if data.common_properties:
-            for prop in data.common_properties:
-                prop_name = (prop.name or '').lower()
-                if 'pressure' in prop_name and prop.value is not None:
-                    try:
-                        common_pressure = float(prop.value)
-                        common_pressure_units = prop.units or 'Pa'
-                    except (ValueError, TypeError):
-                        pass
-                elif 'temperature' in prop_name and prop.value is not None:
-                    try:
-                        common_temperature = float(prop.value)
-                        common_temperature_units = prop.units or 'K'
-                    except (ValueError, TypeError):
-                        pass
-                elif 'equivalence' in prop_name or 'phi' in prop_name:
-                    try:
-                        common_equiv_ratio = float(prop.value)
-                    except (ValueError, TypeError):
-                        pass
-                elif 'volume' in prop_name and prop.value is not None:
-                    try:
-                        common_volume = float(prop.value)
-                        common_volume_units = prop.units or 'cm3'
-                    except (ValueError, TypeError):
-                        pass
-                elif 'residence' in prop_name and prop.value is not None:
-                    try:
-                        common_residence_time = float(prop.value)
-                        common_residence_time_units = prop.units or 's'
-                    except (ValueError, TypeError):
-                        pass
+        for key in ('pressure', 'temperature', 'equivalence-ratio', 'reactor-volume',
+                     'residence-time', 'volume'):
+            val_raw = common.get(key)
+            if val_raw is None:
+                continue
+            val, units, _unc = _parse_chemked_value(val_raw)
+            if val is None:
+                continue
+            if key == 'pressure':
+                common_pressure = self._convert_to_si(val, units, 'pressure')
+            elif key == 'temperature':
+                common_temperature = self._convert_to_si(val, units, 'temperature')
+            elif key == 'equivalence-ratio':
+                common_equiv_ratio = val
+            elif key in ('reactor-volume', 'volume'):
+                common_volume = self._convert_volume_to_si(val, units)
+            elif key == 'residence-time':
+                common_residence_time = self._convert_to_si(val, units, 'time')
         
-        # Convert common pressure/temperature to SI
-        if common_pressure is not None:
-            common_pressure = self._convert_to_si(common_pressure, common_pressure_units, 'pressure')
-        if common_temperature is not None:
-            common_temperature = self._convert_to_si(common_temperature, common_temperature_units, 'temperature')
-        if common_volume is not None:
-            common_volume = self._convert_volume_to_si(common_volume, common_volume_units)
-        if common_residence_time is not None:
-            common_residence_time = self._convert_to_si(common_residence_time, common_residence_time_units, 'time')
+        # Build global uncertainty map from common-properties inline uncertainty
+        global_unc = {}
+        for key, val_raw in common.items():
+            if key in ('composition', 'ignition-type', '_pending_esd'):
+                continue
+            if isinstance(val_raw, list) and len(val_raw) > 1 and isinstance(val_raw[1], dict):
+                unc_dict = val_raw[1]
+                ref_name = key.replace('-', ' ')
+                unc_type = unc_dict.get('uncertainty-type', 'absolute')
+                
+                def _extract_unc_val(v):
+                    if v is None:
+                        return None
+                    if isinstance(v, (int, float)):
+                        return float(v)
+                    if isinstance(v, str):
+                        m = re.match(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", v)
+                        return float(m.group(1)) if m else None
+                    return None
+                
+                sym = _extract_unc_val(unc_dict.get('uncertainty'))
+                upper = _extract_unc_val(unc_dict.get('upper-uncertainty'))
+                lower = _extract_unc_val(unc_dict.get('lower-uncertainty'))
+                
+                if sym is not None or upper is not None or lower is not None:
+                    global_unc[ref_name] = {
+                        'uncertainty': sym, 'upper_uncertainty': upper,
+                        'lower_uncertainty': lower, 'type': unc_type,
+                    }
         
-        # Create common properties record if we have any
+        # Create common properties record
         if common_pressure is not None or common_equiv_ratio is not None or common_composition or common_volume is not None or common_residence_time is not None:
-            common_props = CommonProperties.objects.create(
+            CommonProperties.objects.create(
                 dataset=dataset,
                 pressure=common_pressure,
                 composition=common_composition,
@@ -2274,165 +2646,395 @@ class DatasetUploadView(FormView):
                 residence_time_units='s' if common_residence_time else '',
             )
         
-        # Create datapoints
-        prop_map = {p.id: p for p in data.data_properties}
+        # Build composition uncertainty/ESD maps from common composition species
+        comp_unc_map = {}
+        esd_map = {}
+        comp_block = common.get('composition') or {}
+        for sp in comp_block.get('species', []):
+            sp_name = sp.get('species-name', '')
+            amount_list = sp.get('amount') or []
+            if isinstance(amount_list, list) and len(amount_list) > 1 and isinstance(amount_list[1], dict):
+                meta = amount_list[1]
+                unc_val = meta.get('uncertainty')
+                if unc_val is not None:
+                    if isinstance(unc_val, str):
+                        m = re.match(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", unc_val)
+                        unc_val = float(m.group(1)) if m else None
+                    elif isinstance(unc_val, (int, float)):
+                        unc_val = float(unc_val)
+                    if unc_val is not None:
+                        comp_unc_map[sp_name] = {
+                            'value': unc_val,
+                            'kind': meta.get('uncertainty-type', 'absolute'),
+                            'source_type': meta.get('uncertainty-sourcetype', ''),
+                        }
+                esd_val = meta.get('evaluated-standard-deviation')
+                if esd_val is not None:
+                    if isinstance(esd_val, (int, float)):
+                        esd_val = float(esd_val)
+                    esd_map[sp_name] = {
+                        'value': esd_val,
+                        'kind': meta.get('evaluated-standard-deviation-type', 'absolute'),
+                        'source_type': meta.get('evaluated-standard-deviation-sourcetype', ''),
+                        'method': meta.get('evaluated-standard-deviation-method', ''),
+                    }
         
-        # Build uncertainty map for species
-        uncertainty_map = {}
-        if hasattr(data, 'uncertainties') and data.uncertainties:
-            for unc in data.uncertainties:
-                uncertainty_map[unc.species_name] = unc
+        def _resolve_unc(dp_unc, reference):
+            ref = reference.lower()
+            unc = dp_unc.get(ref) or global_unc.get(ref)
+            if unc:
+                return unc['uncertainty'], unc['upper_uncertainty'], unc['lower_uncertainty'], unc['type']
+            return None, None, None, ''
         
-        for dp_data in data.datapoints:
-            temp_value = None
-            temp_units = 'K'
-            pressure_value = None
-            pressure_units = 'Pa'
-            ignition_delay_value = None
-            ignition_delay_units = 's'
-            residence_time_value = None
-            residence_time_units = 's'
-            species_concentrations = []  # List of (species_info, concentration)
+        # Import datapoints
+        for dp in raw.get('datapoints', []):
+            temp_val, temp_units, temp_unc_dict = _parse_chemked_value(dp.get('temperature'))
+            pres_val, pres_units, pres_unc_dict = _parse_chemked_value(dp.get('pressure'))
+            ign_val, ign_units, ign_unc_dict = _parse_chemked_value(dp.get('ignition-delay'))
+            lbv_val, lbv_units, lbv_unc_dict = _parse_chemked_value(dp.get('laminar-burning-velocity'))
+            res_val, res_units, _res_unc = _parse_chemked_value(dp.get('residence-time'))
+            equiv_val, _eu, _eunc = _parse_chemked_value(dp.get('equivalence-ratio'))
             
-            for prop_id, value in dp_data.values.items():
-                prop = prop_map.get(prop_id)
-                if prop:
-                    prop_name = (prop.name or '').lower()
-                    if 'temperature' in prop_name:
-                        try:
-                            temp_value = float(value) if value else None
-                        except (ValueError, TypeError):
-                            temp_value = None
-                        temp_units = prop.units or 'K'
-                    elif 'pressure' in prop_name:
-                        try:
-                            pressure_value = float(value) if value else None
-                        except (ValueError, TypeError):
-                            pressure_value = None
-                        pressure_units = prop.units or 'Pa'
-                    elif 'ignition' in prop_name or 'delay' in prop_name:
-                        try:
-                            ignition_delay_value = float(value) if value else None
-                        except (ValueError, TypeError):
-                            ignition_delay_value = None
-                        ignition_delay_units = prop.units or 's'
-                    elif 'residence' in prop_name:
-                        try:
-                            residence_time_value = float(value) if value else None
-                        except (ValueError, TypeError):
-                            residence_time_value = None
-                        residence_time_units = prop.units or 's'
-                    elif 'composition' in prop_name and prop.species_link:
-                        # Species concentration data
-                        try:
-                            conc_value = float(value) if value else None
-                            if conc_value is not None:
-                                species_concentrations.append((prop, conc_value))
-                        except (ValueError, TypeError):
-                            pass
+            # Build per-datapoint uncertainty from inline dicts
+            dp_uncertainties = {}
+            for prop_key, unc_d in [('temperature', temp_unc_dict), ('pressure', pres_unc_dict),
+                                     ('ignition delay', ign_unc_dict),
+                                     ('laminar burning velocity', lbv_unc_dict)]:
+                if unc_d:
+                    unc_type = unc_d.get('uncertainty-type', 'absolute')
+                    
+                    def _ext(v):
+                        if v is None:
+                            return None
+                        if isinstance(v, (int, float)):
+                            return float(v)
+                        if isinstance(v, str):
+                            m = re.match(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", v)
+                            return float(m.group(1)) if m else None
+                        return None
+                    
+                    dp_uncertainties[prop_key] = {
+                        'uncertainty': _ext(unc_d.get('uncertainty')),
+                        'upper_uncertainty': _ext(unc_d.get('upper-uncertainty')),
+                        'lower_uncertainty': _ext(unc_d.get('lower-uncertainty')),
+                        'type': unc_type,
+                    }
             
-            # Convert to SI (fallback to common temperature if needed)
-            if temp_value is not None:
-                temp_si = self._convert_to_si(temp_value, temp_units, 'temperature')
-            elif common_temperature is not None:
-                temp_si = common_temperature
-            else:
-                temp_si = 0
+            # Convert to SI
+            temp_si = self._convert_to_si(temp_val, temp_units, 'temperature') if temp_val else (common_temperature or 0)
+            pres_si = self._convert_to_si(pres_val, pres_units, 'pressure') if pres_val else (common_pressure or 0)
+            res_si = self._convert_to_si(res_val, res_units, 'time') if res_val else None
             
-            # Use datapoint pressure or fall back to common pressure
-            if pressure_value is not None:
-                pressure_si = self._convert_to_si(pressure_value, pressure_units, 'pressure')
-            elif common_pressure is not None:
-                pressure_si = common_pressure
-            else:
-                pressure_si = 0
+            # Resolve uncertainties
+            temp_unc, temp_upper, temp_lower, temp_unc_type = _resolve_unc(dp_uncertainties, 'temperature')
+            press_unc, press_upper, press_lower, press_unc_type = _resolve_unc(dp_uncertainties, 'pressure')
             
-            # Convert residence time to SI if present
-            residence_time_si = None
-            if residence_time_value is not None:
-                residence_time_si = self._convert_to_si(residence_time_value, residence_time_units, 'time')
-            
-            # Create datapoint
             datapoint = ExperimentDatapoint.objects.create(
                 dataset=dataset,
                 temperature=temp_si,
-                pressure=pressure_si,
-                equivalence_ratio=common_equiv_ratio,  # Use common equivalence ratio
-                residence_time=residence_time_si,
-                residence_time_units='s' if residence_time_si else '',
+                pressure=pres_si,
+                temperature_uncertainty=temp_unc,
+                temperature_upper_uncertainty=temp_upper,
+                temperature_lower_uncertainty=temp_lower,
+                temperature_uncertainty_type=temp_unc_type,
+                pressure_uncertainty=press_unc,
+                pressure_upper_uncertainty=press_upper,
+                pressure_lower_uncertainty=press_lower,
+                pressure_uncertainty_type=press_unc_type,
+                equivalence_ratio=equiv_val or common_equiv_ratio,
+                residence_time=res_si,
+                residence_time_units='s' if res_si else '',
             )
             
-            # Create IgnitionDelayDatapoint if applicable
-            if ignition_delay_value is not None:
-                ignition_delay_si = self._convert_to_si(ignition_delay_value, ignition_delay_units, 'time')
+            # Ignition delay
+            if ign_val is not None:
+                ign_si = self._convert_to_si(ign_val, ign_units, 'time')
+                ign_unc, ign_upper, ign_lower, ign_unc_type = _resolve_unc(dp_uncertainties, 'ignition delay')
                 IgnitionDelayDatapoint.objects.create(
                     datapoint=datapoint,
-                    ignition_delay=ignition_delay_si,
+                    ignition_delay=ign_si,
+                    ignition_delay_uncertainty=ign_unc,
+                    ignition_delay_upper_uncertainty=ign_upper,
+                    ignition_delay_lower_uncertainty=ign_lower,
+                    ignition_delay_uncertainty_type=ign_unc_type,
                 )
             
-            # Create Composition with SpeciesConcentration data (stored as CompositionSpecies)
-            if species_concentrations:
-                # Create a new composition for this datapoint's measured concentrations
-                datapoint_composition = Composition.objects.create(
-                    kind=CompositionKind.MOLE_FRACTION,  # Default for concentration data
+            # Laminar burning velocity
+            if lbv_val is not None:
+                lbv_si = self._convert_to_si(lbv_val, lbv_units, 'velocity')
+                lbv_unc, lbv_upper, lbv_lower, lbv_unc_type = _resolve_unc(dp_uncertainties, 'laminar burning velocity')
+                LaminarBurningVelocityMeasurementDatapoint.objects.create(
+                    datapoint=datapoint,
+                    laminar_burning_velocity=lbv_si,
+                    laminar_burning_velocity_uncertainty=lbv_unc,
+                    laminar_burning_velocity_upper_uncertainty=lbv_upper,
+                    laminar_burning_velocity_lower_uncertainty=lbv_lower,
+                    laminar_burning_velocity_uncertainty_type=lbv_unc_type,
                 )
-                
-                for prop, conc_value in species_concentrations:
-                    species_link = prop.species_link
-                    species_name = species_link.preferred_key if species_link else ''
-                    
-                    # Look up uncertainty for this species
-                    unc_value = None
-                    unc_type = ''
-                    if species_name in uncertainty_map:
-                        unc_data = uncertainty_map[species_name]
-                        unc_value = unc_data.value
-                        unc_type = unc_data.kind
-                    
-                    # Use get_or_create to avoid duplicate species in the same composition
-                    CompositionSpecies.objects.get_or_create(
-                        composition=datapoint_composition,
-                        species_name=species_name,
-                        inchi=species_link.inchi or '' if species_link else '',
-                        smiles=species_link.smiles or '' if species_link else '',
-                        defaults={
-                            'chem_name': species_link.chem_name or '' if species_link else '',
-                            'cas': species_link.cas or '' if species_link else '',
-                            'amount': conc_value,
-                            'amount_uncertainty': unc_value,
-                            'amount_uncertainty_type': unc_type or '',
-                        }
-                    )
-                
-                # Link composition to datapoint
-                datapoint.composition = datapoint_composition
-                datapoint.save()
-        
-        return dataset
+            
+            # Per-datapoint composition (measured species concentrations)
+            dp_comp = dp.get('composition') or dp.get('measured-composition')
+            if dp_comp and isinstance(dp_comp, dict) and dp_comp.get('species'):
+                dp_composition = self._import_composition_from_chemked(
+                    dp_comp, comp_unc_map=comp_unc_map, esd_map=esd_map
+                )
+                if dp_composition:
+                    datapoint.composition = dp_composition
+                    datapoint.save()
     
-    def _import_composition(self, data, dataset):
-        """
-        Import initial composition from ReSpecTh data.
-        Returns the Composition object if created, None otherwise.
-        """
-        if not hasattr(data, 'initial_composition') or not data.initial_composition:
+    def _import_kdet_datapoints(self, raw, dataset, data, _parse_chemked_value):
+        """Import datapoints for kdetermination files from ChemKED dict."""
+        common = raw.get('common-properties') or {}
+        
+        # Extract evaluated standard deviation from common properties
+        common_eval_std_dev = None
+        common_eval_std_dev_type = ''
+        common_eval_std_dev_sourcetype = ''
+        
+        for key, val_raw in common.items():
+            if isinstance(val_raw, list) and len(val_raw) > 1 and isinstance(val_raw[1], dict):
+                meta = val_raw[1]
+                esd = meta.get('evaluated-standard-deviation')
+                if esd is not None:
+                    common_eval_std_dev = float(esd) if isinstance(esd, (int, float)) else None
+                    common_eval_std_dev_type = meta.get('evaluated-standard-deviation-type', 'absolute')
+                    common_eval_std_dev_sourcetype = meta.get('evaluated-standard-deviation-sourcetype', '')
+        
+        # Also check for top-level ESD in common that isn't inline on a property
+        # (e.g., standalone ESD for rate coefficient)
+        for key, val_raw in common.items():
+            if key in ('composition', 'ignition-type', '_pending_esd'):
+                continue
+            if isinstance(val_raw, list) and len(val_raw) > 1 and isinstance(val_raw[1], dict):
+                meta = val_raw[1]
+                esd = meta.get('evaluated-standard-deviation')
+                if esd is not None and common_eval_std_dev is None:
+                    if isinstance(esd, str):
+                        m = re.match(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", esd)
+                        common_eval_std_dev = float(m.group(1)) if m else None
+                    else:
+                        common_eval_std_dev = float(esd)
+                    common_eval_std_dev_type = meta.get('evaluated-standard-deviation-type', 'absolute')
+                    common_eval_std_dev_sourcetype = meta.get('evaluated-standard-deviation-sourcetype', '')
+        
+        # Common pressure
+        common_pressure_si = None
+        pval, punits, _punc = _parse_chemked_value(common.get('pressure'))
+        if pval is not None:
+            common_pressure_si = self._convert_to_si(pval, punits, 'pressure')
+        
+        # Reaction info
+        reaction_str = ' / '.join(rxn.preferred_key for rxn in data.reactions) if data.reactions else ''
+        reaction_order = data.reaction.order if data.reaction else None
+        bulk_gas = ', '.join(filter(None, (rxn.bulk_gas for rxn in data.reactions))) if data.reactions else ''
+        method_str = data.method or ''
+        
+        for dp in raw.get('datapoints', []):
+            temp_val, temp_units, _tunc = _parse_chemked_value(dp.get('temperature'))
+            pres_val, pres_units, _punc = _parse_chemked_value(dp.get('pressure'))
+            rc_val, rc_units, rc_unc_dict = _parse_chemked_value(dp.get('rate-coefficient'))
+            br_val, br_units, br_unc_dict = _parse_chemked_value(dp.get('branching-ratio'))
+            
+            # Determine measurement type and values
+            if br_val is not None:
+                meas_val, meas_units, meas_unc_dict = br_val, br_units or 'unitless', br_unc_dict
+                measurement_type = MeasurementType.BRANCHING_RATIO
+            elif rc_val is not None:
+                meas_val, meas_units, meas_unc_dict = rc_val, rc_units or 'cm3 mol-1 s-1', rc_unc_dict
+                measurement_type = MeasurementType.RATE_COEFFICIENT
+            else:
+                continue
+            
+            # Parse inline uncertainty
+            rc_uncertainty = None
+            rc_upper = None
+            rc_lower = None
+            rc_unc_type = ''
+            dp_eval_std_dev = None
+            dp_eval_std_dev_type = ''
+            dp_eval_std_dev_sourcetype = ''
+            
+            if meas_unc_dict:
+                rc_unc_type = meas_unc_dict.get('uncertainty-type', 'absolute')
+                
+                def _ext(v):
+                    if v is None:
+                        return None
+                    if isinstance(v, (int, float)):
+                        return float(v)
+                    if isinstance(v, str):
+                        m = re.match(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", v)
+                        return float(m.group(1)) if m else None
+                    return None
+                
+                rc_uncertainty = _ext(meas_unc_dict.get('uncertainty'))
+                rc_upper = _ext(meas_unc_dict.get('upper-uncertainty'))
+                rc_lower = _ext(meas_unc_dict.get('lower-uncertainty'))
+                
+                # Per-datapoint ESD from inline dict
+                esd_raw = meas_unc_dict.get('evaluated-standard-deviation')
+                if esd_raw is not None:
+                    dp_eval_std_dev = _ext(esd_raw)
+                    dp_eval_std_dev_type = meas_unc_dict.get('evaluated-standard-deviation-type', 'absolute')
+                    dp_eval_std_dev_sourcetype = meas_unc_dict.get('evaluated-standard-deviation-sourcetype', '')
+            
+            # Convert temperature/pressure to SI
+            temp_si = self._convert_to_si(temp_val, temp_units, 'temperature') if temp_val else 0
+            if pres_val is not None:
+                pressure_si = self._convert_to_si(pres_val, pres_units, 'pressure')
+            else:
+                pressure_si = common_pressure_si
+            
+            # Create ValueWithUnit for rate coefficient
+            eff_esd = dp_eval_std_dev if dp_eval_std_dev is not None else common_eval_std_dev
+            eff_esd_type = dp_eval_std_dev_type or common_eval_std_dev_type
+            eff_esd_sourcetype = dp_eval_std_dev_sourcetype or common_eval_std_dev_sourcetype
+            
+            rc_vu = ValueWithUnit.objects.create(
+                value=meas_val,
+                units=meas_units,
+                uncertainty=rc_uncertainty,
+                upper_uncertainty=rc_upper,
+                lower_uncertainty=rc_lower,
+                uncertainty_type=rc_unc_type,
+                evaluated_standard_deviation=eff_esd,
+                evaluated_standard_deviation_type=eff_esd_type,
+                evaluated_standard_deviation_sourcetype=eff_esd_sourcetype,
+            )
+            
+            # Create temperature ValueWithUnit
+            temp_vu = None
+            if temp_val is not None:
+                temp_vu = ValueWithUnit.objects.create(value=temp_val, units=temp_units or 'K')
+            
+            # Create pressure ValueWithUnit
+            pressure_vu = None
+            if pres_val is not None:
+                pressure_vu = ValueWithUnit.objects.create(value=pres_val, units=pres_units or 'atm')
+            
+            datapoint = ExperimentDatapoint.objects.create(
+                dataset=dataset,
+                temperature=temp_si,
+                temperature_quantity=temp_vu,
+                pressure=pressure_si or 0,
+                pressure_quantity=pressure_vu,
+            )
+            
+            RateCoefficientDatapoint.objects.create(
+                datapoint=datapoint,
+                measurement_type=measurement_type,
+                rate_coefficient=meas_val,
+                rate_coefficient_units=meas_units,
+                rate_coefficient_uncertainty=rc_uncertainty,
+                rate_coefficient_uncertainty_type=rc_unc_type,
+                rate_coefficient_upper_uncertainty=rc_upper,
+                rate_coefficient_lower_uncertainty=rc_lower,
+                rate_coefficient_quantity=rc_vu,
+                evaluated_standard_deviation=eff_esd,
+                evaluated_standard_deviation_type=eff_esd_type,
+                evaluated_standard_deviation_sourcetype=eff_esd_sourcetype,
+                reaction=reaction_str,
+                reaction_order=reaction_order,
+                bulk_gas=bulk_gas,
+                method=method_str,
+            )
+    
+    def _import_tdet_datapoints(self, raw, dataset, _parse_chemked_value):
+        """Import datapoints for tdetermination files from ChemKED dict."""
+        for dp in raw.get('datapoints', []):
+            temp_val, temp_units, _tunc = _parse_chemked_value(dp.get('temperature'))
+            temp_si = self._convert_to_si(temp_val, temp_units, 'temperature') if temp_val else 0
+            
+            ExperimentDatapoint.objects.create(
+                dataset=dataset,
+                temperature=temp_si,
+                pressure=0,
+            )
+    
+    def _import_composition_from_chemked(self, comp_data, comp_unc_map=None, esd_map=None):
+        """Import a ChemKED composition block into a Composition model."""
+        if not comp_data or not isinstance(comp_data, dict):
             return None
         
-        # Create composition record
-        composition = Composition.objects.create(
-            kind=CompositionKind.MOLE_FRACTION,  # Default, most common
-        )
+        species_list = comp_data.get('species') or []
+        if not species_list:
+            return None
         
-        for comp_data in data.initial_composition:
-            # Use get_or_create to avoid duplicate species in the same composition
+        kind_str = comp_data.get('kind', 'mole fraction')
+        kind_map = {
+            'mole fraction': CompositionKind.MOLE_FRACTION,
+            'mass fraction': CompositionKind.MASS_FRACTION,
+            'mole percent': CompositionKind.MOLE_PERCENT,
+        }
+        comp_kind = kind_map.get(kind_str, CompositionKind.MOLE_FRACTION)
+        
+        composition = Composition.objects.create(kind=comp_kind)
+        
+        for sp in species_list:
+            sp_name = sp.get('species-name', '')
+            amount_list = sp.get('amount') or []
+            amount_val = 0.0
+            if isinstance(amount_list, list) and amount_list:
+                try:
+                    amount_val = float(amount_list[0])
+                except (ValueError, TypeError):
+                    pass
+            elif isinstance(amount_list, (int, float)):
+                amount_val = float(amount_list)
+            
+            # Species uncertainty from inline amount dict or comp_unc_map
+            unc_value = None
+            unc_type = ''
+            unc_sourcetype = ''
+            if isinstance(amount_list, list) and len(amount_list) > 1 and isinstance(amount_list[1], dict):
+                meta = amount_list[1]
+                unc_raw = meta.get('uncertainty')
+                if unc_raw is not None:
+                    unc_value = float(unc_raw) if isinstance(unc_raw, (int, float)) else None
+                    unc_type = meta.get('uncertainty-type', '')
+                    unc_sourcetype = meta.get('uncertainty-sourcetype', '')
+            if unc_value is None and comp_unc_map and sp_name in comp_unc_map:
+                cu = comp_unc_map[sp_name]
+                unc_value = cu['value']
+                unc_type = cu['kind']
+                unc_sourcetype = cu.get('source_type', '')
+            
+            # ESD from inline or esd_map
+            esd_value = None
+            esd_type = ''
+            esd_sourcetype = ''
+            esd_method = ''
+            if isinstance(amount_list, list) and len(amount_list) > 1 and isinstance(amount_list[1], dict):
+                meta = amount_list[1]
+                esd_raw = meta.get('evaluated-standard-deviation')
+                if esd_raw is not None:
+                    esd_value = float(esd_raw) if isinstance(esd_raw, (int, float)) else None
+                    esd_type = meta.get('evaluated-standard-deviation-type', '')
+                    esd_sourcetype = meta.get('evaluated-standard-deviation-sourcetype', '')
+                    esd_method = meta.get('evaluated-standard-deviation-method', '')
+            if esd_value is None and esd_map and sp_name in esd_map:
+                e = esd_map[sp_name]
+                esd_value = e['value']
+                esd_type = e['kind']
+                esd_sourcetype = e.get('source_type', '')
+                esd_method = e.get('method', '')
+            
             CompositionSpecies.objects.get_or_create(
                 composition=composition,
-                species_name=comp_data.species_name,
-                inchi=getattr(comp_data, 'inchi', '') or '',
-                smiles=getattr(comp_data, 'smiles', '') or '',
+                species_name=sp_name,
+                inchi=sp.get('InChI', ''),
+                smiles=sp.get('SMILES', ''),
                 defaults={
-                    'amount': comp_data.amount,
-                    'cas': getattr(comp_data, 'cas', '') or '',
+                    'chem_name': sp.get('chem-name', ''),
+                    'cas': sp.get('CAS', ''),
+                    'amount': amount_val,
+                    'amount_uncertainty': unc_value,
+                    'amount_uncertainty_type': unc_type or '',
+                    'amount_uncertainty_sourcetype': unc_sourcetype or '',
+                    'amount_evaluated_standard_deviation': esd_value,
+                    'amount_evaluated_standard_deviation_type': esd_type or '',
+                    'amount_evaluated_standard_deviation_sourcetype': esd_sourcetype or '',
+                    'amount_evaluated_standard_deviation_method': esd_method or '',
                 }
             )
         
@@ -2492,6 +3094,8 @@ class DatasetUploadView(FormView):
                 return quantity.to('pascal').magnitude
             elif quantity_type == 'time':
                 return quantity.to('second').magnitude
+            elif quantity_type == 'velocity':
+                return quantity.to('meter / second').magnitude
             else:
                 return value
         except Exception as e:
@@ -2527,10 +3131,13 @@ class DatasetUploadView(FormView):
         # Add file authors
         for author in ck.file_authors or []:
             if isinstance(author, dict) and author.get('name'):
-                fa, _ = FileAuthor.objects.get_or_create(
+                fa, created = FileAuthor.objects.get_or_create(
                     name=author['name'],
-                    orcid=author.get('ORCID', ''),
+                    defaults={'orcid': author.get('ORCID', '')},
                 )
+                if not created and author.get('ORCID') and not fa.orcid:
+                    fa.orcid = author['ORCID']
+                    fa.save(update_fields=['orcid'])
                 dataset.file_authors.add(fa)
         
         # Add reference authors
@@ -2594,7 +3201,7 @@ class DatasetUploadView(FormView):
                 temperature_quantity=temp_quantity,
                 pressure=si_press,
                 pressure_quantity=press_quantity,
-                equivalence_ratio=dp.equivalence_ratio,
+                equivalence_ratio=_unwrap_equiv(dp.equivalence_ratio),
                 composition=composition,
             )
             
@@ -2613,7 +3220,7 @@ class DatasetUploadView(FormView):
                 ign_target = ''
                 ign_type = ''
                 if dp.ignition_type:
-                    ign_target = dp.ignition_type.get('target', '')
+                    ign_target = _normalize_ignition_target(dp.ignition_type.get('target', ''))
                     ign_type = dp.ignition_type.get('type', '')
                 
                 IgnitionDelayDatapoint.objects.create(
@@ -2631,7 +3238,7 @@ class DatasetUploadView(FormView):
             ign_target = ''
             ign_type = ''
             if first_dp and first_dp.ignition_type:
-                ign_target = first_dp.ignition_type.get('target', '')
+                ign_target = _normalize_ignition_target(first_dp.ignition_type.get('target', ''))
                 ign_type = first_dp.ignition_type.get('type', '')
             
             CommonProperties.objects.create(
@@ -2822,7 +3429,7 @@ class DatasetExportView(View):
             cp = dataset.common_properties
             if cp.composition:
                 composition = {
-                    'kind': cp.composition.kind or 'mole fraction',
+                    'kind': str(cp.composition.kind) if cp.composition.kind else 'mole fraction',
                     'species': []
                 }
                 for sp in cp.composition.species.all():
@@ -2856,11 +3463,45 @@ class DatasetExportView(View):
             else:
                 dp_dict['temperature'] = [f"{dp.temperature} kelvin"]
             
-            # Pressure
-            if dp.pressure_quantity:
+            # Temperature uncertainty
+            if dp.temperature_uncertainty is not None:
+                dp_dict['temperature-uncertainty'] = {
+                    'type': dp.temperature_uncertainty_type or 'absolute',
+                    'value': dp.temperature_uncertainty,
+                }
+            if dp.temperature_upper_uncertainty is not None:
+                dp_dict['temperature-upper-uncertainty'] = {
+                    'type': dp.temperature_uncertainty_type or 'absolute',
+                    'value': dp.temperature_upper_uncertainty,
+                }
+            if dp.temperature_lower_uncertainty is not None:
+                dp_dict['temperature-lower-uncertainty'] = {
+                    'type': dp.temperature_uncertainty_type or 'absolute',
+                    'value': dp.temperature_lower_uncertainty,
+                }
+            
+            # Pressure (omit placeholder 0.0)
+            if dp.pressure_quantity and float(dp.pressure_quantity.value) != 0.0:
                 dp_dict['pressure'] = [f"{dp.pressure_quantity.value} {dp.pressure_quantity.units}"]
-            else:
+            elif not dp.pressure_quantity and dp.pressure and dp.pressure != 0.0:
                 dp_dict['pressure'] = [f"{dp.pressure} pascal"]
+            
+            # Pressure uncertainty
+            if dp.pressure_uncertainty is not None:
+                dp_dict['pressure-uncertainty'] = {
+                    'type': dp.pressure_uncertainty_type or 'absolute',
+                    'value': dp.pressure_uncertainty,
+                }
+            if dp.pressure_upper_uncertainty is not None:
+                dp_dict['pressure-upper-uncertainty'] = {
+                    'type': dp.pressure_uncertainty_type or 'absolute',
+                    'value': dp.pressure_upper_uncertainty,
+                }
+            if dp.pressure_lower_uncertainty is not None:
+                dp_dict['pressure-lower-uncertainty'] = {
+                    'type': dp.pressure_uncertainty_type or 'absolute',
+                    'value': dp.pressure_lower_uncertainty,
+                }
             
             # Equivalence ratio
             if dp.equivalence_ratio:
@@ -2871,7 +3512,7 @@ class DatasetExportView(View):
                 dp_dict['composition'] = composition
             elif dp.composition:
                 dp_dict['composition'] = {
-                    'kind': dp.composition.kind or 'mole fraction',
+                    'kind': str(dp.composition.kind) if dp.composition.kind else 'mole fraction',
                     'species': [
                         {'species-name': sp.species_name, 'amount': [sp.amount]}
                         for sp in dp.composition.species.all()
@@ -2891,9 +3532,105 @@ class DatasetExportView(View):
                     ]
                 elif ign.ignition_delay:
                     dp_dict['ignition-delay'] = [f"{ign.ignition_delay} s"]
-            
+                
+                # Ignition delay uncertainty
+                if ign.ignition_delay_uncertainty is not None:
+                    dp_dict['ignition-delay-uncertainty'] = {
+                        'type': ign.ignition_delay_uncertainty_type or 'absolute',
+                        'value': ign.ignition_delay_uncertainty,
+                    }
+                if ign.ignition_delay_upper_uncertainty is not None:
+                    dp_dict['ignition-delay-upper-uncertainty'] = {
+                        'type': ign.ignition_delay_uncertainty_type or 'absolute',
+                        'value': ign.ignition_delay_upper_uncertainty,
+                    }
+                if ign.ignition_delay_lower_uncertainty is not None:
+                    dp_dict['ignition-delay-lower-uncertainty'] = {
+                        'type': ign.ignition_delay_uncertainty_type or 'absolute',
+                        'value': ign.ignition_delay_lower_uncertainty,
+                    }
+
+            # Laminar burning velocity
+            if hasattr(dp, 'laminar_burning_velocity_measurement'):
+                try:
+                    lbv = dp.laminar_burning_velocity_measurement
+                    if lbv and lbv.laminar_burning_velocity is not None:
+                        if lbv.laminar_burning_velocity_quantity:
+                            dp_dict['laminar-burning-velocity'] = [
+                                f"{lbv.laminar_burning_velocity_quantity.value} {lbv.laminar_burning_velocity_quantity.units}"
+                            ]
+                        else:
+                            dp_dict['laminar-burning-velocity'] = [f"{lbv.laminar_burning_velocity} m/s"]
+                        
+                        # LBV uncertainty
+                        if lbv.laminar_burning_velocity_uncertainty is not None:
+                            dp_dict['laminar-burning-velocity-uncertainty'] = {
+                                'type': lbv.laminar_burning_velocity_uncertainty_type or 'absolute',
+                                'value': lbv.laminar_burning_velocity_uncertainty,
+                            }
+                        if lbv.laminar_burning_velocity_upper_uncertainty is not None:
+                            dp_dict['laminar-burning-velocity-upper-uncertainty'] = {
+                                'type': lbv.laminar_burning_velocity_uncertainty_type or 'absolute',
+                                'value': lbv.laminar_burning_velocity_upper_uncertainty,
+                            }
+                        if lbv.laminar_burning_velocity_lower_uncertainty is not None:
+                            dp_dict['laminar-burning-velocity-lower-uncertainty'] = {
+                                'type': lbv.laminar_burning_velocity_uncertainty_type or 'absolute',
+                                'value': lbv.laminar_burning_velocity_lower_uncertainty,
+                            }
+                except dp.__class__.laminar_burning_velocity_measurement.RelatedObjectDoesNotExist:
+                    pass
+
+            # Measured quantity (for kdetermination files)
+            if hasattr(dp, 'rate_coefficient'):
+                try:
+                    rc = dp.rate_coefficient
+                    if rc and rc.rate_coefficient is not None:
+                        yaml_key = (
+                            'branching-ratio'
+                            if rc.measurement_type == MeasurementType.BRANCHING_RATIO
+                            else 'rate-coefficient'
+                        )
+                        rc_entry = [
+                            f"{rc.rate_coefficient} {rc.rate_coefficient_units}"
+                        ]
+                        dp_dict[yaml_key] = rc_entry
+                        
+                        # Add uncertainty if present (PyKED convention)
+                        if rc.rate_coefficient_uncertainty is not None:
+                            dp_dict[f'{yaml_key}-uncertainty'] = {
+                                'type': rc.rate_coefficient_uncertainty_type or 'absolute',
+                                'value': rc.rate_coefficient_uncertainty,
+                            }
+                        if rc.rate_coefficient_upper_uncertainty is not None:
+                            dp_dict[f'{yaml_key}-upper-uncertainty'] = {
+                                'type': rc.rate_coefficient_uncertainty_type or 'absolute',
+                                'value': rc.rate_coefficient_upper_uncertainty,
+                            }
+                        if rc.rate_coefficient_lower_uncertainty is not None:
+                            dp_dict[f'{yaml_key}-lower-uncertainty'] = {
+                                'type': rc.rate_coefficient_uncertainty_type or 'absolute',
+                                'value': rc.rate_coefficient_lower_uncertainty,
+                            }
+                        
+                        # Add evaluated standard deviation if present
+                        if rc.evaluated_standard_deviation is not None:
+                            esd_dict = {
+                                'type': rc.evaluated_standard_deviation_type or 'absolute',
+                                'value': rc.evaluated_standard_deviation,
+                            }
+                            if rc.evaluated_standard_deviation_sourcetype:
+                                esd_dict['sourcetype'] = rc.evaluated_standard_deviation_sourcetype
+                            dp_dict[f'{yaml_key}-evaluated-standard-deviation'] = esd_dict
+                except dp.__class__.rate_coefficient.RelatedObjectDoesNotExist:
+                    pass
+
             datapoints.append(dp_dict)
         
+        # Ensure experiment-type is a plain string (not Django TextChoices enum)
+        exp_type = dataset.experiment_type or 'ignition delay'
+        exp_type_str = f"{exp_type}"  # Force plain str from TextChoices
+
         chemked_dict = {
             'file-version': dataset.file_version or 0,
             'chemked-version': dataset.chemked_version or '0.4.1',
@@ -2906,18 +3643,41 @@ class DatasetExportView(View):
                 'pages': dataset.reference_pages or '',
                 'detail': dataset.reference_detail or '',
             },
-            'experiment-type': dataset.experiment_type or 'ignition delay',
-            'apparatus': {
-                'kind': dataset.apparatus.kind if dataset.apparatus else 'shock tube',
+            'experiment-type': exp_type_str,
+            'apparatus': {k: v for k, v in {
+                'kind': f"{dataset.apparatus.kind}" if dataset.apparatus else 'shock tube',
                 'institution': dataset.apparatus.institution if dataset.apparatus else '',
                 'facility': dataset.apparatus.facility if dataset.apparatus else '',
-            },
+            }.items() if v},
             'datapoints': datapoints,
         }
         
         if dataset.reference_volume:
             chemked_dict['reference']['volume'] = dataset.reference_volume
-        
+
+        # For rate coefficient experiments, add reaction and method info
+        if exp_type_str == 'rate coefficient':
+            first_dp = dataset.datapoints.first()
+            if first_dp:
+                try:
+                    rc = first_dp.rate_coefficient
+                    if rc:
+                        if rc.reaction:
+                            chemked_dict['reaction'] = rc.reaction
+                        if rc.method:
+                            chemked_dict['method'] = rc.method
+                        if rc.bulk_gas:
+                            chemked_dict['bulk-gas'] = rc.bulk_gas
+                except first_dp.__class__.rate_coefficient.RelatedObjectDoesNotExist:
+                    pass
+
+            # Fallback: extract reaction from reference_detail if not found
+            if 'reaction' not in chemked_dict and dataset.reference_detail:
+                import re as _re
+                m = _re.search(r'Reaction:\s*(.+)', dataset.reference_detail)
+                if m:
+                    chemked_dict['reaction'] = m.group(1).strip()
+
         return chemked_dict
 
 
@@ -2963,6 +3723,10 @@ class DatasetProcessView(View):
         validate = batch_data.get('validate', True)
         file_author = batch_data.get('file_author', '')
         file_author_orcid = batch_data.get('file_author_orcid', '')
+        contribute_to_github = batch_data.get('contribute_to_github', False)
+        run_pyteck = batch_data.get('run_pyteck', False)
+        github_username = batch_data.get('github_username', '')
+        contribution_description = batch_data.get('contribution_description', '')
         
         total_files = len(temp_files)
         successful_imports = []
@@ -2998,6 +3762,25 @@ class DatasetProcessView(View):
                 if not os.path.exists(temp_path):
                     raise FileNotFoundError(f'Temporary file not found: {temp_path}')
                 
+                # Read file content before processing if we need it for PR creation
+                file_content_for_pr = None
+                pr_filename = original_name
+                if contribute_to_github:
+                    if original_name.lower().endswith('.xml'):
+                        # For XML files, convert to YAML so the PR
+                        # contributes ChemKED YAML to the database repo.
+                        try:
+                            from pyked.batch_convert import convert_file as _conv
+                            chemked_dict = _conv(temp_path)
+                            file_content_for_pr = format_chemked_yaml(chemked_dict).encode('utf-8')
+                        except Exception:
+                            logger.debug("XML→YAML conversion for PR failed; will use raw content")
+                            with open(temp_path, 'rb') as fh:
+                                file_content_for_pr = fh.read()
+                    else:
+                        with open(temp_path, 'rb') as fh:
+                            file_content_for_pr = fh.read()
+
                 result = self._process_single_file(
                     upload_view, temp_path, original_name, 
                     file_format, validate, file_author, file_author_orcid
@@ -3005,6 +3788,13 @@ class DatasetProcessView(View):
                 
                 if result['success']:
                     successful_imports.append(result)
+                    if file_content_for_pr is not None:
+                        result['_content'] = file_content_for_pr
+                        # Use the readable dataset name for the PR filename
+                        ds_name = result.get('dataset_name', '')
+                        if ds_name and original_name.lower().endswith('.xml'):
+                            pr_filename = Path(ds_name).stem + '.yaml'
+                        result['filename'] = pr_filename
                     yield self._sse_event('file_complete', {
                         'filename': original_name,
                         'status': 'success',
@@ -3056,15 +3846,69 @@ class DatasetProcessView(View):
                 'message': f'Completed {i + 1} of {total_files}'
             })
         
+        # Create GitHub PR if requested and there are successful imports
+        pr_result = None
+        if contribute_to_github and successful_imports:
+            yield self._sse_event('progress', {
+                'current': total_files,
+                'total': total_files,
+                'percent': 95,
+                'filename': '',
+                'message': 'Creating GitHub pull request...'
+            })
+            try:
+                pr_result = self._create_contribution_pr_from_batch(
+                    temp_files, successful_imports,
+                    file_author, file_author_orcid,
+                    run_pyteck, contribution_description,
+                    github_username=github_username,
+                )
+                if pr_result:
+                    yield self._sse_event('pr_created', {
+                        'pr_url': pr_result['pr_url'],
+                        'pr_number': pr_result['pr_number'],
+                        'branch': pr_result['branch'],
+                    })
+            except Exception as exc:
+                logger.exception("Failed to create contribution PR during SSE processing")
+                yield self._sse_event('pr_error', {
+                    'error': str(exc),
+                })
+
+        # Create Submission record
+        submission = None
+        if successful_imports:
+            submission = Submission.objects.create(
+                status=Submission.Status.SUCCESS if not failed_imports else Submission.Status.PARTIAL,
+                successful_imports=[
+                    {k: v for k, v in r.items() if k != '_content'}
+                    for r in successful_imports
+                ],
+                failed_imports=failed_imports,
+                skipped_imports=skipped_imports,
+                contributor_name=file_author,
+                contributor_orcid=file_author_orcid,
+                pr_url=pr_result.get('pr_url', '') if pr_result else '',
+                pr_number=pr_result.get('pr_number') if pr_result else None,
+                branch=pr_result.get('branch', '') if pr_result else '',
+            )
+
         # Send completion event
         total_datapoints = sum(r.get('datapoints', 0) for r in successful_imports)
-        yield self._sse_event('complete', {
+        redirect_url = None
+        if submission:
+            redirect_url = reverse('chemked_database:submission-status', kwargs={'pk': submission.pk})
+        completion_data = {
             'successful': len(successful_imports),
             'skipped': len(skipped_imports),
             'failed': len(failed_imports),
             'total_datapoints': total_datapoints,
-            'redirect_url': reverse('chemked_database:dataset-list') if successful_imports else None
-        })
+            'redirect_url': redirect_url,
+        }
+        if pr_result:
+            completion_data['pr_url'] = pr_result['pr_url']
+            completion_data['pr_number'] = pr_result['pr_number']
+        yield self._sse_event('complete', completion_data)
     
     def _process_single_file(self, upload_view, temp_path, original_name, file_format, validate, file_author, file_author_orcid):
         """Process a single file and return result dict."""
@@ -3108,6 +3952,54 @@ class DatasetProcessView(View):
                 'error_kind': formatted['kind']
             }
     
+    def _create_contribution_pr_from_batch(self, temp_files, successful_imports,
+                                            file_author, file_author_orcid,
+                                            run_pyteck=False, contribution_description='',
+                                            github_username=''):
+        """Create a GitHub PR using file content cached from SSE batch processing."""
+        from .github_pr_service import GitHubPRService, GitHubContributionError
+
+        try:
+            gh = GitHubPRService(
+                token=getattr(settings, 'GITHUB_TOKEN', ''),
+                owner=getattr(settings, 'GITHUB_REPO_OWNER', ''),
+                repo=getattr(settings, 'GITHUB_REPO_NAME', 'ChemKED-database'),
+            )
+        except GitHubContributionError as exc:
+            logger.warning("GitHub PR service not configured: %s", exc)
+            return None
+
+        pr_files = []
+        for result in successful_imports:
+            content = result.get('_content')
+            if content is None:
+                continue
+            repo_path = gh.determine_repo_path(result['filename'], content)
+            pr_files.append({'path': repo_path, 'content': content})
+
+        if not pr_files:
+            logger.warning("No file content available for PR creation; skipping.")
+            return None
+
+        file_type = 'chemked'
+        if any(f['path'].lower().endswith('.xml') for f in pr_files):
+            file_type = 'respecth'
+
+        try:
+            return gh.contribute_files(
+                files=pr_files,
+                contributor_name=file_author or 'Anonymous',
+                contributor_orcid=file_author_orcid,
+                file_type=file_type,
+                description=contribution_description,
+                run_pyteck=run_pyteck,
+                github_username=github_username,
+                validation_passed=True,
+            )
+        except GitHubContributionError as exc:
+            logger.exception("Failed to create contribution PR from batch")
+            return None
+
     def _sse_event(self, event_type, data):
         """Format a Server-Sent Event."""
         return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
@@ -3128,3 +4020,135 @@ class ClearWizardView(View):
             del request.session['chemked_wizard']
         messages.info(request, 'Form data cleared.')
         return redirect('chemked_database:dataset-create')
+
+
+# ------------------------------------------------------------------
+# Submission Status
+# ------------------------------------------------------------------
+
+class SubmissionStatusView(DetailView):
+    """Show the status of a dataset upload submission."""
+    model = Submission
+    template_name = 'chemked_database/submission_status.html'
+    context_object_name = 'submission'
+
+
+class SubmissionCheckRunsView(View):
+    """AJAX endpoint: poll GitHub Actions check runs for a submission's PR.
+
+    Returns check-run status **and** annotations (validation messages)
+    so the submission-status page can show the actual CI output inline.
+    """
+
+    def get(self, request, pk):
+        submission = get_object_or_404(Submission, pk=pk)
+        if not submission.pr_number or not submission.branch:
+            return JsonResponse({'check_runs': [], 'status': 'no_pr'})
+
+        import requests as http_requests
+        from .github_pr_service import GitHubContributionError
+
+        token = getattr(settings, 'GITHUB_TOKEN', '') or os.environ.get('GITHUB_TOKEN', '')
+        owner = getattr(settings, 'GITHUB_REPO_OWNER', '') or os.environ.get('GITHUB_REPO_OWNER', '')
+        repo = getattr(settings, 'GITHUB_REPO_NAME', 'ChemKED-database') or os.environ.get('GITHUB_REPO_NAME', 'ChemKED-database')
+
+        if not token or not owner:
+            return JsonResponse({'check_runs': [], 'status': 'not_configured'})
+
+        headers = {
+            'Authorization': f'token {token}',
+            'Accept': 'application/vnd.github+json',
+        }
+        try:
+            # Get HEAD SHA of the branch
+            ref_resp = http_requests.get(
+                f'https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{submission.branch}',
+                headers=headers, timeout=10,
+            )
+            if ref_resp.status_code != 200:
+                return JsonResponse({'check_runs': [], 'status': 'branch_not_found'})
+            head_sha = ref_resp.json()['object']['sha']
+
+            # Get check runs for that SHA
+            checks_resp = http_requests.get(
+                f'https://api.github.com/repos/{owner}/{repo}/commits/{head_sha}/check-runs',
+                headers=headers, timeout=10,
+            )
+            if checks_resp.status_code != 200:
+                return JsonResponse({'check_runs': [], 'status': 'api_error'})
+
+            data = checks_resp.json()
+            runs = []
+            for cr in data.get('check_runs', []):
+                run = {
+                    'id': cr['id'],
+                    'name': cr['name'],
+                    'status': cr['status'],           # queued, in_progress, completed
+                    'conclusion': cr.get('conclusion'),  # success, failure, ...
+                    'html_url': cr.get('html_url', ''),
+                    'started_at': cr.get('started_at', ''),
+                    'completed_at': cr.get('completed_at', ''),
+                    'annotations': [],
+                    'output_title': '',
+                    'output_summary': '',
+                }
+
+                # Include output title/summary if available
+                output = cr.get('output') or {}
+                run['output_title'] = output.get('title') or ''
+                run['output_summary'] = output.get('summary') or ''
+
+                # Fetch annotations (actual validation error messages)
+                ann_count = output.get('annotations_count', 0)
+                if ann_count and cr['status'] == 'completed':
+                    try:
+                        ann_resp = http_requests.get(
+                            f'https://api.github.com/repos/{owner}/{repo}/check-runs/{cr["id"]}/annotations',
+                            headers=headers, timeout=10,
+                        )
+                        if ann_resp.status_code == 200:
+                            for a in ann_resp.json():
+                                run['annotations'].append({
+                                    'level': a.get('annotation_level', ''),   # notice, warning, failure
+                                    'message': a.get('message', ''),
+                                    'title': a.get('title', ''),
+                                    'path': a.get('path', ''),
+                                })
+                    except http_requests.RequestException:
+                        pass  # annotations are best-effort
+
+                runs.append(run)
+
+            # Also fetch workflow run for a link to the full log page
+            workflow_url = ''
+            try:
+                wf_resp = http_requests.get(
+                    f'https://api.github.com/repos/{owner}/{repo}/actions/runs?head_sha={head_sha}',
+                    headers=headers, timeout=10,
+                )
+                if wf_resp.status_code == 200:
+                    wf_runs = wf_resp.json().get('workflow_runs', [])
+                    if wf_runs:
+                        workflow_url = wf_runs[0].get('html_url', '')
+            except http_requests.RequestException:
+                pass
+
+            # Overall status
+            if not runs:
+                overall = 'pending'
+            elif all(r['status'] == 'completed' for r in runs):
+                if all(r['conclusion'] == 'success' for r in runs):
+                    overall = 'success'
+                else:
+                    overall = 'failure'
+            else:
+                overall = 'in_progress'
+
+            return JsonResponse({
+                'check_runs': runs,
+                'status': overall,
+                'workflow_url': workflow_url,
+            })
+        except http_requests.RequestException as exc:
+            logger.warning('GitHub API error checking runs: %s', exc)
+            return JsonResponse({'check_runs': [], 'status': 'api_error'})

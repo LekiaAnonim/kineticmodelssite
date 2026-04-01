@@ -109,7 +109,7 @@ DATABASES = {
         "USER": os.getenv("POSTGRES_USER"),
         "PASSWORD": os.getenv("POSTGRES_PASSWORD"),
         "HOST": os.getenv("DB_HOST"),
-        "PORT": 5432,
+        "PORT": int(os.getenv("DB_PORT", 5432)),
         "OPTIONS": {
             "options": "-c timezone=utc"
         }
@@ -246,6 +246,15 @@ CELERY_BEAT_SCHEDULE = {
 }
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# --------------------------------------------------------------------------
+# GitHub Contribution Integration
+# --------------------------------------------------------------------------
+# These are used by the contribution workflow (chemked_database/github_pr_service.py)
+# to create PRs on the ChemKED-database repository.
+GITHUB_TOKEN = os.getenv('GITHUB_TOKEN', '')
+GITHUB_REPO_OWNER = os.getenv('GITHUB_REPO_OWNER', '')
+GITHUB_REPO_NAME = os.getenv('GITHUB_REPO_NAME', 'ChemKED-database')
 
 # Silence noisy RDKit warnings during imports/tests (e.g., unusual valence warnings)
 try:

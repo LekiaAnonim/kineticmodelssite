@@ -13,7 +13,7 @@ from .models import (
     ExperimentDataset,
     ExperimentDatapoint,
     IgnitionDelayDatapoint,
-    FlameSpeedDatapoint,
+    LaminarBurningVelocityMeasurementDatapoint,
     CommonProperties,
     Composition,
     CompositionSpecies,
@@ -363,15 +363,15 @@ class IgnitionDelayForm(forms.Form):
 IgnitionDelayFormSet = formset_factory(IgnitionDelayForm, extra=1, min_num=1, validate_min=True)
 
 
-class FlameSpeedForm(forms.Form):
-    """Form for flame speed specific data."""
-    laminar_flame_speed = forms.CharField(
+class LaminarBurningVelocityForm(forms.Form):
+    """Form for laminar burning velocity specific data."""
+    laminar_burning_velocity = forms.CharField(
         widget=forms.TextInput(attrs={
             'class': 'form-control',
-            'placeholder': 'Flame speed with units (e.g., 0.35 m/s)'
+            'placeholder': 'Burning velocity with units (e.g., 0.35 m/s)'
         })
     )
-    laminar_flame_speed_uncertainty = forms.FloatField(
+    laminar_burning_velocity_uncertainty = forms.FloatField(
         required=False,
         widget=forms.NumberInput(attrs={
             'class': 'form-control',
@@ -379,14 +379,14 @@ class FlameSpeedForm(forms.Form):
             'step': 'any'
         })
     )
-    laminar_flame_speed_uncertainty_type = forms.ChoiceField(
+    laminar_burning_velocity_uncertainty_type = forms.ChoiceField(
         choices=[('', '-- None --')] + list(UncertaintyType.choices),
         required=False,
         widget=forms.Select(attrs={'class': 'form-select'})
     )
 
 
-FlameSpeedFormSet = formset_factory(FlameSpeedForm, extra=1, min_num=1, validate_min=True)
+LaminarBurningVelocityFormSet = formset_factory(LaminarBurningVelocityForm, extra=1, min_num=1, validate_min=True)
 
 
 # =============================================================================
@@ -443,9 +443,9 @@ class ChemKEDUploadForm(forms.Form):
         required=False,
         widget=forms.TextInput(attrs={
             'class': 'form-control',
-            'placeholder': 'Your name (optional, for ReSpecTh imports)'
+            'placeholder': 'Your name'
         }),
-        help_text='File author to add when importing ReSpecTh files'
+        help_text='File author name for attribution'
     )
     file_author_orcid = forms.CharField(
         max_length=50,
@@ -455,6 +455,38 @@ class ChemKEDUploadForm(forms.Form):
             'placeholder': '0000-0000-0000-0000 (optional)'
         }),
         help_text='ORCID for the file author (optional)'
+    )
+
+    # ---- Contribution / GitHub PR options ----
+    contribute_to_github = forms.BooleanField(
+        initial=False,
+        required=False,
+        widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
+        help_text='Also create a GitHub pull request for community review and CI validation'
+    )
+    run_pyteck = forms.BooleanField(
+        initial=False,
+        required=False,
+        widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
+        help_text='Request PyTeCK simulation validation against a kinetic model in CI'
+    )
+    github_username = forms.CharField(
+        max_length=100,
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'e.g. octocat (optional)'
+        }),
+        help_text='Optional: your GitHub username for direct attribution on the PR'
+    )
+    contribution_description = forms.CharField(
+        required=False,
+        widget=forms.Textarea(attrs={
+            'class': 'form-control',
+            'rows': 2,
+            'placeholder': 'Brief description of this data contribution (optional)'
+        }),
+        help_text='Optional note for the PR description'
     )
 
 
