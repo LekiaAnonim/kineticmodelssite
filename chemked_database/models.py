@@ -55,6 +55,7 @@ class IgnitionTarget(models.TextChoices):
     OHEX = 'OHEX', 'OHEX'
     CO2 = 'CO2', 'CO2'
     N2O = 'N2O', 'N2O'
+    CH4 = 'CH4', 'CH4'
 
 
 class IgnitionType(models.TextChoices):
