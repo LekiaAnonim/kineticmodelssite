@@ -23,6 +23,7 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 
 import requests
@@ -124,11 +125,35 @@ def _extract_fuel_smiles_from_yaml(filepath):
     return None, None
 
 
-def _find_compatible_models(fuel_name, fuel_smiles, fuel_inchi, max_models=3):
+def _formula_atom_count(formula, atom):
+    """Return the count of *atom* (e.g. 'C', 'N') in a molecular formula string.
+
+    Examples::
+
+        _formula_atom_count('C4H9OH', 'C') -> 4
+        _formula_atom_count('NH3',    'N') -> 1
+        _formula_atom_count('H2',     'C') -> 0
+    """
+    if not formula:
+        return 0
+    m = re.search(rf'(?<![A-Z]){atom}(\d*)', formula)
+    if not m:
+        return 0
+    return int(m.group(1)) if m.group(1) else 1
+
+
+def _find_compatible_models(fuel_name, fuel_smiles, fuel_inchi, max_models=10):
     """Find kinetic models compatible with the given fuel species.
 
-    Queries the precomputed FuelModelCompatibility table first.
-    Falls back to name-based search on FuelSpecies if no InChI match.
+    Ranks compatible models by two scores:
+
+    1. **Name score** — model_name contains one of the fuel's name variants.
+    2. **Primary score** — the fuel is the largest molecule (by C count, or N
+       count for nitrogen-only fuels) among all species compatible with that
+       model.  This is the "largest molecule" heuristic: mechanisms are built
+       hierarchically, so the target fuel is always the heaviest species.
+
+    Falls back to alphabetical model name when scores are equal.
     """
     models_found = []
 
@@ -145,15 +170,70 @@ def _find_compatible_models(fuel_name, fuel_smiles, fuel_inchi, max_models=3):
             name_variants__contains=[fuel_name]
         )
 
-    for fuel_obj in fuel_qs[:1]:  # Take the first matching FuelSpecies
-        compat_qs = (
+    for fuel_obj in fuel_qs[:1]:
+        fuel_carbons = _formula_atom_count(fuel_obj.formula or '', 'C')
+        fuel_nitrogens = _formula_atom_count(fuel_obj.formula or '', 'N')
+
+        # All models with this fuel present
+        compat_rows = list(
             FuelModelCompatibility.objects
             .filter(fuel=fuel_obj, is_compatible=True)
             .select_related("kinetic_model")
-            .order_by("-kinetic_model__pk")
         )
-        for compat in compat_qs[:max_models]:
-            models_found.append(compat.kinetic_model)
+        if not compat_rows:
+            break
+
+        # Batch query: for every compatible model get the max C and N count
+        # across ALL its compatible fuels — used to detect whether this fuel
+        # is the primary (heaviest) species in the mechanism.
+        model_pks = [c.kinetic_model_id for c in compat_rows]
+        model_max_c = {}
+        model_max_n = {}
+        for row in (
+            FuelModelCompatibility.objects
+            .filter(kinetic_model_id__in=model_pks, is_compatible=True)
+            .values('kinetic_model_id', 'fuel__formula')
+        ):
+            mid = row['kinetic_model_id']
+            f = row['fuel__formula'] or ''
+            c = _formula_atom_count(f, 'C')
+            n = _formula_atom_count(f, 'N')
+            if c > model_max_c.get(mid, 0):
+                model_max_c[mid] = c
+            if n > model_max_n.get(mid, 0):
+                model_max_n[mid] = n
+
+        fuel_names_lower = {
+            v.lower() for v in ([fuel_name or ''] + list(fuel_obj.name_variants or []))
+            if v
+        }
+
+        scored = []
+        for compat in compat_rows:
+            mid = compat.kinetic_model_id
+            mname = compat.kinetic_model.model_name
+
+            # Score 1: model name contains a fuel name variant
+            name_score = int(any(fn in mname.lower() for fn in fuel_names_lower))
+
+            # Score 2: fuel is the heaviest compatible species in this model
+            max_c = model_max_c.get(mid, 0)
+            max_n = model_max_n.get(mid, 0)
+            if fuel_carbons == 0 and fuel_nitrogens == 0:
+                # H2-like: primary only for mechanisms with no carbon species
+                primary_score = int(max_c == 0)
+            elif fuel_carbons == 0:
+                # Nitrogen-only fuel (e.g. NH3): primary if it has the most N
+                primary_score = int(fuel_nitrogens >= max_n)
+            else:
+                # Carbon-containing fuel: primary if it has the most carbons
+                primary_score = int(fuel_carbons >= max_c)
+
+            scored.append((name_score, primary_score, mname, compat.kinetic_model))
+
+        # Sort: name match → primary fuel match → alphabetical
+        scored.sort(key=lambda x: (-x[0], -x[1], x[2]))
+        models_found = [model for _, _, _, model in scored[:max_models]]
 
     return models_found
 
@@ -298,7 +378,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--max-models",
             type=int,
-            default=3,
+            default=10,
             help="Max number of auto-detected models to simulate against.",
         )
         parser.add_argument(
