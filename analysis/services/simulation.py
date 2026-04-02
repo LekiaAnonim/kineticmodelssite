@@ -606,6 +606,27 @@ def get_dataset_species_map(dataset: ExperimentDataset):
             pass
 
     if composition is None:
+        # 3. Fallback: read species directly from the YAML file.
+        # This handles CI temp datasets that have a file path but no DB composition.
+        file_path = getattr(dataset, 'chemked_file_path', None)
+        if file_path and os.path.isabs(file_path) and os.path.isfile(file_path):
+            import yaml as _yaml
+            with open(file_path) as _f:
+                _data = _yaml.safe_load(_f)
+            _comp = None
+            _cp = _data.get('common-properties', {})
+            if isinstance(_cp, dict):
+                _comp = _cp.get('composition')
+            if _comp is None:
+                _dps = _data.get('datapoints', [])
+                if _dps and isinstance(_dps[0], dict):
+                    _comp = _dps[0].get('composition')
+            if _comp and 'species' in _comp:
+                for _sp in _comp['species']:
+                    _name = _sp.get('species-name', '')
+                    _smiles = _sp.get('SMILES', '') or _sp.get('smiles', '')
+                    if _name:
+                        species_map[_name] = _smiles or _name
         return species_map
 
     for sp in composition.species.all():
