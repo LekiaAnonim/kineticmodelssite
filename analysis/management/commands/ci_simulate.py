@@ -183,9 +183,13 @@ def _post_github_comment(pr_repo, pr_number, body, token):
     return resp
 
 
-def _create_check_run(pr_repo, head_sha, token):
+def _create_check_run(pr_repo, head_sha, token, pr_number=None):
     """Create an in-progress check-run and return its ID."""
     url = f"{GITHUB_API}/repos/{pr_repo}/check-runs"
+    details_url = (
+        f"https://github.com/{pr_repo}/pull/{pr_number}"
+        if pr_number else f"https://github.com/{pr_repo}"
+    )
     resp = requests.post(
         url,
         headers=_gh_headers(token),
@@ -194,6 +198,7 @@ def _create_check_run(pr_repo, head_sha, token):
             "head_sha": head_sha,
             "status": "in_progress",
             "started_at": __import__("datetime").datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "details_url": details_url,
         },
         timeout=30,
     )
@@ -329,7 +334,7 @@ class Command(BaseCommand):
             )
 
         # Create in-progress check-run (visible on GitHub and polled by the web UI)
-        check_run_id = _create_check_run(pr_repo, commit_sha, github_token)
+        check_run_id = _create_check_run(pr_repo, commit_sha, github_token, pr_number=pr_number)
 
         filename = os.path.basename(chemked_path)
         self.stdout.write(self.style.NOTICE(f"Processing: {filename}"))

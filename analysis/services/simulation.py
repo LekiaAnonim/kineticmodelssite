@@ -339,6 +339,10 @@ def get_chemked_dataset_path(
     """
     rel_path = dataset.chemked_file_path if hasattr(dataset, "chemked_file_path") else str(dataset)
 
+    # If the stored path is already absolute and the file exists, return it directly.
+    if os.path.isabs(rel_path) and os.path.isfile(rel_path):
+        return rel_path
+
     if base_dir is None:
         base_dir = (
             getattr(settings, "CHEMKED_DATA_ROOT", None)

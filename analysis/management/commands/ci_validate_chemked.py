@@ -65,13 +65,18 @@ def _api(method, url, token, body=None):
         return None
 
 
-def _create_check_run(pr_repo, commit_sha, token):
+def _create_check_run(pr_repo, commit_sha, token, pr_number=None):
+    details_url = (
+        f"https://github.com/{pr_repo}/pull/{pr_number}"
+        if pr_number else f"https://github.com/{pr_repo}"
+    )
     url = f"{GITHUB_API}/repos/{pr_repo}/check-runs"
     result = _api("POST", url, token, {
         "name": CHECK_RUN_NAME,
         "head_sha": commit_sha,
         "status": "in_progress",
         "started_at": _now(),
+        "details_url": details_url,
     })
     check_run_id = result.get("id") if result else None
     logger.info("Created check-run #%s", check_run_id)
@@ -229,7 +234,7 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(f"No YAML files found in {files_dir}"))
             return
 
-        check_run_id = _create_check_run(pr_repo, commit_sha, github_token)
+        check_run_id = _create_check_run(pr_repo, commit_sha, github_token, pr_number=pr_number)
 
         results = []
         any_failure = False
