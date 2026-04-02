@@ -17,8 +17,15 @@ jobs:
     steps:
       - name: Checkout kineticmodelssite
         uses: actions/checkout@v4
-        with:
-          clean: false
+
+      - name: Restore runner .env
+        run: |
+          ENV_SRC="$HOME/Documents/CoMoChEng/actions-runner/.runner-config/kms.env"
+          if [ -f "$ENV_SRC" ]; then
+            cp "$ENV_SRC" "${{ github.workspace }}/.env"
+          else
+            echo "WARNING: $ENV_SRC not found — DB credentials missing"
+          fi
 
       - name: Decode ChemKED files from payload
         id: decode
@@ -60,12 +67,6 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: LekiaAnonim
           repositories: ChemKED-database
-
-      - name: Debug App token
-        run: |
-          TOKEN="${{ steps.app-token.outputs.token }}"
-          echo "Token length: ${#TOKEN}"
-          echo "Token prefix: ${TOKEN:0:4}"
 
       - name: Run ci_simulate for each file
         env:

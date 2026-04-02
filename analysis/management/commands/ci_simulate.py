@@ -510,7 +510,7 @@ class Command(BaseCommand):
 
 
 def _create_temp_dataset(chemked_path):
-    """Create an ExperimentDataset record for the CI file.
+    """Create (or reuse) an ExperimentDataset record for the CI file.
 
     The dataset is saved to the DB so that ``run_pyteck_simulation()``
     can load it via ``get_chemked_dataset_path()``.
@@ -520,15 +520,12 @@ def _create_temp_dataset(chemked_path):
     with open(chemked_path, "r") as f:
         data = yaml.safe_load(f)
 
-    filename = os.path.basename(chemked_path)
-    short_name = os.path.splitext(filename)[0]
     exp_type = data.get("experiment-type", "ignition delay")
+    abs_path = os.path.abspath(chemked_path)
 
-    dataset = ExperimentDataset.objects.create(
-        dataset_name=f"CI: {short_name}",
-        short_name=short_name,
-        experiment_type=exp_type,
-        chemked_file_path=os.path.abspath(chemked_path),
+    dataset, _ = ExperimentDataset.objects.get_or_create(
+        chemked_file_path=abs_path,
+        defaults={"experiment_type": exp_type},
     )
     return dataset
 
