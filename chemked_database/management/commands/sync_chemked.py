@@ -252,13 +252,34 @@ class Command(BaseCommand):
         )
         parser.add_argument("--limit", type=int, default=None, help="Limit number of files")
         parser.add_argument("--dry-run", action="store_true", help="Parse without writing DB")
+        parser.add_argument(
+            "--files",
+            nargs="+",
+            default=None,
+            metavar="FILE",
+            help=(
+                "Repo-relative paths of specific files to import "
+                "(e.g. methane/Smith_2020/file.yaml). "
+                "When omitted all YAML files under --path are scanned."
+            ),
+        )
 
     def handle(self, *args, **options):
         base_path = options["path"]
         if not base_path:
             raise ValueError("Provide --path or set CHEMKED_DATABASE_PATH in settings.")
 
-        yaml_files = sorted(Path(base_path).rglob("*.yaml"))
+        if options["files"]:
+            yaml_files = []
+            for rel in options["files"]:
+                p = Path(base_path) / rel
+                if p.is_file():
+                    yaml_files.append(p)
+                else:
+                    self.stderr.write(f"File not found, skipping: {p}")
+        else:
+            yaml_files = sorted(Path(base_path).rglob("*.yaml"))
+
         limit = options["limit"]
         if limit:
             yaml_files = yaml_files[:limit]

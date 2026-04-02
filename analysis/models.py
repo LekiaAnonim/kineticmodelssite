@@ -51,7 +51,9 @@ class SimulationRun(models.Model):
     )
     dataset = models.ForeignKey(
         'chemked_database.ExperimentDataset',
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='simulation_runs'
     )
 

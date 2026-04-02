@@ -21,6 +21,7 @@ Optional flags::
 
 import json
 import logging
+import math
 import os
 import tempfile
 
@@ -445,19 +446,40 @@ class Command(BaseCommand):
                 if success and results_dict:
                     parsed = parse_pyteck_results(results_dict)
                     error_func = parsed.get("average_error_function")
-                    for ds in parsed.get("datasets", []):
-                        num_datapoints += len(ds.get("datapoints", []))
+                    dev_func = parsed.get("average_deviation_function")
 
-                    SimulationResult.objects.create(
-                        simulation_run=run,
-                        average_error_function=error_func,
-                        average_deviation_function=parsed.get("average_deviation_function"),
-                        results_json=results_dict,
-                        num_datapoints=num_datapoints,
-                        num_successful=num_datapoints,
+                    # Guard: PyTeCK returns -Infinity when τ_sim → 0 (model out of range).
+                    # PostgreSQL JSON rejects non-finite floats, so catch this before
+                    # hitting the DB and surface a clear failure message instead.
+                    non_finite = (
+                        (error_func is not None and not math.isfinite(error_func))
+                        or (dev_func is not None and not math.isfinite(dev_func))
                     )
-                    run.spec_keys_snapshot = results_dict.get("spec_keys", {})
-                    run.save(update_fields=["spec_keys_snapshot"])
+                    if non_finite:
+                        success = False
+                        message = (
+                            "Simulation produced a non-finite result "
+                            f"(error={error_func}, deviation={dev_func}). "
+                            "The model is likely outside its valid range for these conditions "
+                            "(e.g. predicted instantaneous or no ignition)."
+                        )
+                        run.status = SimulationStatus.FAILED
+                        run.error_message = message
+                        run.save(update_fields=["status", "error_message"])
+                    else:
+                        for ds in parsed.get("datasets", []):
+                            num_datapoints += len(ds.get("datapoints", []))
+
+                        SimulationResult.objects.create(
+                            simulation_run=run,
+                            average_error_function=error_func,
+                            average_deviation_function=dev_func,
+                            results_json=results_dict,
+                            num_datapoints=num_datapoints,
+                            num_successful=num_datapoints,
+                        )
+                        run.spec_keys_snapshot = results_dict.get("spec_keys", {})
+                        run.save(update_fields=["spec_keys_snapshot"])
 
                 results_table.append({
                     "model_name": model.model_name,
@@ -488,6 +510,12 @@ class Command(BaseCommand):
                     "error_function": None,
                     "num_datapoints": 0,
                 })
+
+        # Remove the temp ExperimentDataset stub — real records are created by
+        # sync_chemked only after the PR is merged. SimulationRun rows survive
+        # because dataset is SET_NULL on delete.
+        if temp_dataset and temp_dataset.pk:
+            temp_dataset.delete()
 
         # Build markdown comment and check-run output
         comment_body = _build_comment(filename, results_table)
