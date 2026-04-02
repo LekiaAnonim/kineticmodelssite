@@ -64,8 +64,8 @@ class IgnitionType(models.TextChoices):
     HALF_MAX = '1/2 max', '1/2 max'
     MIN = 'min', 'min'
     DDT_MAX_EXTRAPOLATED = 'd/dt max extrapolated', 'd/dt max extrapolated'
+    DDT_MIN_EXTRAPOLATED = 'd/dt min extrapolated', 'd/dt min extrapolated'
     RELATIVE_CONCENTRATION = 'relative concentration', 'Relative Concentration'
-    BASELINE_MIN_INTERCEPT_FROM_DDT = 'baseline min intercept from d/dt', 'Baseline Min Intercept from d/dt'
     RELATIVE_INCREASE = 'relative increase', 'Relative Increase'
 
 
