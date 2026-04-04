@@ -5,6 +5,7 @@ Views for browsing and exploring experimental combustion data.
 Designed for combustion research community and scientists.
 """
 
+import html as html_mod
 import os
 import re
 import tempfile
@@ -2385,6 +2386,7 @@ class DatasetUploadView(FormView):
             
             # Build preview info
             ref = data.reference
+            _ue = html_mod.unescape  # XML entities like &amp; → &
             preview_info = {
                 'dataset_name': suggested_name,
                 'original_filename': original_filename,
@@ -2393,10 +2395,10 @@ class DatasetUploadView(FormView):
                 'file_author': file_author or data.file_author or '',
                 'datapoints_count': len(data.datapoints),
                 'reference_doi': ref.doi if ref else '',
-                'reference_journal': ref.journal if ref else '',
+                'reference_journal': _ue(ref.journal) if ref else '',
                 'reference_year': ref.year if ref else '',
-                'reference_authors': ', '.join([a.name for a in ref.authors]) if ref and ref.authors else '',
-                'reaction': ' / '.join(rxn.preferred_key for rxn in data.reactions) if data.reactions else '',
+                'reference_authors': _ue(', '.join([a.name for a in ref.authors])) if ref and ref.authors else '',
+                'reaction': _ue(' / '.join(rxn.preferred_key for rxn in data.reactions)) if data.reactions else '',
                 'experiment_type': data.experiment_type or data.file_type,
                 'validation_error': validation_error,
                 'can_confirm': validation_error is None,
@@ -2407,7 +2409,57 @@ class DatasetUploadView(FormView):
                 'contribution_description': contribution_description,
                 'file_author_orcid': file_author_orcid,
             }
-            
+
+            # --- Duplicate detection against ChemKED-database repo --------
+            # Generate the YAML that would be contributed so we can compare.
+            try:
+                yaml_content = format_chemked_yaml(chemked_dict)
+                yaml_filename = os.path.splitext(original_filename)[0] + '.yaml'
+
+                from .github_pr_service import GitHubPRService, GitHubContributionError
+                gh = GitHubPRService(
+                    token=getattr(settings, 'GITHUB_TOKEN', ''),
+                    owner=getattr(settings, 'GITHUB_REPO_OWNER', ''),
+                    repo=getattr(settings, 'GITHUB_REPO_NAME', 'ChemKED-database'),
+                )
+                dup = gh.check_for_duplicates(yaml_filename, yaml_content)
+                if dup:
+                    import difflib
+                    existing_lines = dup['existing_content'].splitlines(keepends=True)
+                    new_lines = yaml_content.splitlines(keepends=True)
+                    raw_diff = list(difflib.unified_diff(
+                        existing_lines, new_lines,
+                        fromfile=dup['path'],
+                        tofile=yaml_filename,
+                        lineterm='',
+                    ))
+                    # Pre-classify lines for easy template rendering:
+                    # each entry is {'text': str, 'kind': str}
+                    classified = []
+                    for line in raw_diff:
+                        if line.startswith('@@'):
+                            kind = 'hunk'
+                        elif line.startswith('+++') or line.startswith('---'):
+                            kind = 'header'
+                        elif line.startswith('+'):
+                            kind = 'add'
+                        elif line.startswith('-'):
+                            kind = 'del'
+                        else:
+                            kind = 'ctx'
+                        classified.append({'text': line, 'kind': kind})
+
+                    preview_info['duplicate_match'] = {
+                        'match_type': dup['match_type'],
+                        'path': dup['path'],
+                        'similarity': round(dup['similarity'] * 100),
+                        'diff_lines': classified,
+                        'has_diff': any(d['kind'] in ('add', 'del') for d in classified),
+                    }
+            except (GitHubContributionError, Exception) as exc:
+                # Non-fatal: detection failing shouldn't block the preview
+                logger.debug("Duplicate detection skipped: %s", exc)
+
             # Store in session for preview
             self.request.session['respecth_preview'] = preview_info
             
