@@ -203,7 +203,56 @@
                         </div>
                     </div>
                     {% endif %}
-                    
+
+                    {% if preview_data.duplicate_match %}
+                    <div class="mb-4">
+                        <div class="alert {% if preview_data.duplicate_match.match_type == 'exact' or not preview_data.duplicate_match.has_diff %}alert-warning{% else %}alert-info{% endif %} d-flex align-items-start py-2" role="alert">
+                            <i class="bi {% if preview_data.duplicate_match.match_type == 'exact' or not preview_data.duplicate_match.has_diff %}bi-exclamation-triangle{% else %}bi-files{% endif %} me-2 mt-1"></i>
+                            <div>
+                                {% if preview_data.duplicate_match.match_type == 'exact' or not preview_data.duplicate_match.has_diff %}
+                                <strong>Identical file already in repository</strong>
+                                <div class="small">
+                                    Your file is byte-identical to
+                                    <code>{{ preview_data.duplicate_match.path }}</code>.
+                                    Submitting will create a PR with no changes.
+                                </div>
+                                {% elif preview_data.duplicate_match.match_type == 'filename' %}
+                                <strong>Existing file with same name</strong>
+                                <div class="small">
+                                    A file named <code>{{ preview_data.duplicate_match.path }}</code>
+                                    already exists in the repository. Your submission will update it — review the diff below.
+                                </div>
+                                {% else %}
+                                <strong>Similar dataset detected ({{ preview_data.duplicate_match.similarity }}% match)</strong>
+                                <div class="small">
+                                    Your data matches <code>{{ preview_data.duplicate_match.path }}</code>
+                                    in the repository (same reference DOI and experiment). Your submission will update it — review the diff below.
+                                </div>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        {% if preview_data.duplicate_match.has_diff %}
+                        <div class="card border-secondary mb-2">
+                            <div class="card-header bg-secondary text-white py-2 d-flex justify-content-between align-items-center">
+                                <span class="small fw-bold">
+                                    <i class="bi bi-file-diff me-1"></i>
+                                    Diff against <code class="text-white">{{ preview_data.duplicate_match.path }}</code>
+                                </span>
+                                <button type="button" class="btn btn-sm btn-outline-light" data-bs-toggle="collapse" data-bs-target="#diff-panel" aria-expanded="true">
+                                    <i class="bi bi-chevron-contract"></i>
+                                </button>
+                            </div>
+                            <div id="diff-panel" class="collapse show">
+                                <div class="card-body p-0">
+                                    <pre class="mb-0 p-3" style="font-size: 0.78rem; max-height: 400px; overflow: auto; background: #f8f9fa;">{% for d in preview_data.duplicate_match.diff_lines %}{% if d.kind == 'add' %}<span style="background:#d4edda;display:block">{{ d.text }}</span>{% elif d.kind == 'del' %}<span style="background:#f8d7da;display:block">{{ d.text }}</span>{% elif d.kind == 'hunk' %}<span style="background:#cce5ff;color:#004085;display:block">{{ d.text }}</span>{% elif d.kind == 'header' %}<span style="color:#6c757d;display:block;font-weight:bold">{{ d.text }}</span>{% else %}<span style="display:block">{{ d.text }}</span>{% endif %}{% endfor %}</pre>
+                                </div>
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+
                     <div class="d-flex gap-2">
                         <button type="submit" name="confirm_import" class="btn btn-success" {% if preview_data.validation_error %}disabled{% endif %}>
                             <i class="bi bi-check-circle me-1"></i>Confirm Import
@@ -388,8 +437,7 @@
                     </div>
                     <div class="form-text mt-2">
                         <i class="bi bi-info-circle me-1"></i>
-                        Single ReSpecTh XML files will show a preview step before importing.
-                        Multiple files are imported directly.
+                        All uploads show a preview step with duplicate detection before importing.
                     </div>
                 </form>
             </div>
