@@ -1202,22 +1202,30 @@ class DatasetUploadView(FormView):
         
         pr_result = None
         try:
-            from pyked.batch_convert import convert_file
             from .chemked_adapter import ChemKEDDictAdapter
-            chemked_dict = convert_file(temp_file_path, original_filename=original_filename)
+
+            if file_type == 'yaml':
+                # YAML files: load directly as ChemKED dict
+                with open(temp_file_path, 'r') as fh:
+                    chemked_dict = yaml.safe_load(fh)
+            else:
+                # XML files: convert via batch_convert
+                from pyked.batch_convert import convert_file
+                chemked_dict = convert_file(temp_file_path, original_filename=original_filename)
+
             data = ChemKEDDictAdapter(chemked_dict)
             
-            # Check for duplicate based on file_doi
+            # Warn about potential duplicates but proceed — the GitHub PR
+            # will show a diff for maintainers to review.
             if data.file_doi:
                 existing = ExperimentDataset.objects.filter(file_doi=data.file_doi).first()
                 if existing:
-                    formatted = self._format_import_error(
-                        f'Dataset with DOI "{data.file_doi}" already exists as '
-                        f'"{existing.chemked_file_path}" (ID: {existing.pk}). '
-                        'Skipping duplicate upload.'
+                    messages.info(
+                        request,
+                        f'Note: A dataset with DOI "{data.file_doi}" already exists '
+                        f'as "{existing.chemked_file_path}". The contribution PR will '
+                        'show any differences for review.'
                     )
-                    messages.warning(request, formatted['message'])
-                    return redirect('chemked_database:dataset-upload')
             
             # Import with the unified ChemKED dict importer
             dataset = self._import_from_chemked_dict(chemked_dict, original_filename, file_author, custom_name=dataset_name)
@@ -1305,7 +1313,7 @@ class DatasetUploadView(FormView):
                 )
             return self.form_invalid(form)
         
-        # Single-file upload: use the preview flow (for XML) or direct import (for YAML).
+        # Single-file upload: always shows preview first (both XML and YAML).
         # The JS upload handler already follows redirects via xhr.responseURL.
         if len(data_files) == 1:
             return self._process_single_file(
@@ -1595,7 +1603,7 @@ class DatasetUploadView(FormView):
     def _process_single_file(self, data_file, file_format, validate, file_author, file_author_orcid, form,
                              contribute_to_github=False, run_pyteck=False,
                              github_username='', contribution_description=''):
-        """Process a single file upload (supports preview for XML)."""
+        """Process a single file upload — always shows preview first."""
         # Determine file format
         filename = data_file.name.lower()
         if file_format == 'auto':
@@ -1625,53 +1633,15 @@ class DatasetUploadView(FormView):
                 )
                 return result
             else:
-                # Parse ChemKED YAML
-                try:
-                    from pyked import chemked
-                    ck = chemked.ChemKED(yaml_file=temp_path, skip_validation=not validate)
-                    file_type_label = "ChemKED YAML"
-                    
-                    # Import into database
-                    dataset = self._import_chemked(ck, data_file.name)
-                    
-                    messages.success(
-                        self.request,
-                        f'Successfully imported {file_type_label} "{data_file.name}" with {dataset.datapoints.count()} datapoints.'
-                    )
-
-                    # Create GitHub PR if requested
-                    if contribute_to_github:
-                        pr_result = self._create_contribution_pr(
-                            [data_file],
-                            [{'filename': data_file.name, 'dataset_name': dataset.chemked_file_path}],
-                            file_author, file_author_orcid,
-                            run_pyteck, contribution_description,
-                            github_username=github_username,
-                        )
-                        if pr_result:
-                            messages.success(
-                                self.request,
-                                f'GitHub PR #{pr_result["pr_number"]} created: {pr_result["pr_url"]}'
-                            )
-
-                    submission = Submission.objects.create(
-                        status=Submission.Status.SUCCESS,
-                        successful_imports=[{
-                            'filename': data_file.name,
-                            'dataset_id': dataset.pk,
-                            'dataset_name': dataset.chemked_file_path,
-                            'datapoints': dataset.datapoints.count(),
-                        }],
-                        contributor_name=file_author,
-                        contributor_orcid=file_author_orcid,
-                        pr_url=pr_result.get('pr_url', '') if pr_result else '',
-                        pr_number=pr_result.get('pr_number') if pr_result else None,
-                        branch=pr_result.get('branch', '') if pr_result else '',
-                    )
-                    return redirect('chemked_database:submission-status', pk=submission.pk)
-                except ImportError:
-                    messages.error(self.request, 'PyKED is not installed. Cannot import YAML files.')
-                    return self.form_invalid(form)
+                # ChemKED YAML — show preview before importing
+                return self._preview_yaml(
+                    temp_path, data_file.name, validate,
+                    file_author, file_author_orcid,
+                    contribute_to_github=contribute_to_github,
+                    run_pyteck=run_pyteck,
+                    github_username=github_username,
+                    contribution_description=contribution_description,
+                )
                     
         except ValueError as e:
             error_msg = str(e)
@@ -2240,7 +2210,119 @@ class DatasetUploadView(FormView):
                 'Please contact the database maintainer to add support.'
             )
         return ExperimentType.IGNITION_DELAY
-    
+
+    def _preview_yaml(self, temp_path, original_filename, validate,
+                      file_author, file_author_orcid,
+                      contribute_to_github=False, run_pyteck=False,
+                      github_username='', contribution_description=''):
+        """Show a preview for ChemKED YAML files before importing.
+
+        Parses the YAML to extract metadata, runs duplicate detection,
+        and stores state in the session so the confirm step can
+        proceed identically to the ReSpecTh preview flow.
+        """
+        try:
+            with open(temp_path, 'r') as fh:
+                raw_content = fh.read()
+            data = yaml.safe_load(raw_content)
+            if not isinstance(data, dict):
+                raise ValueError('File does not contain a valid YAML mapping')
+
+            # Extract metadata for preview display
+            ref = data.get('reference', {}) or {}
+            exp_type = data.get('experiment-type', '')
+            apparatus = data.get('apparatus', {}) or {}
+            dps = data.get('datapoints', []) or []
+
+            # Try to build a readable suggested name
+            reaction_str = data.get('reaction', '')
+            ref_authors = ref.get('authors', [])
+            ref_authors_str = ', '.join(a.get('name', '') for a in ref_authors) if ref_authors else ''
+
+            suggested_name = os.path.splitext(original_filename)[0]
+            # Attempt same naming logic as XML path
+            try:
+                from .chemked_adapter import ChemKEDDictAdapter
+                adapter = ChemKEDDictAdapter(data)
+                suggested_name = self._generate_readable_name(adapter, original_filename, 'experiment')
+            except Exception:
+                pass
+
+            preview_info = {
+                'dataset_name': suggested_name,
+                'original_filename': original_filename,
+                'temp_file_path': temp_path,
+                'file_type': 'yaml',
+                'file_author': file_author or '',
+                'datapoints_count': len(dps),
+                'reference_doi': ref.get('doi', ''),
+                'reference_journal': ref.get('journal', ''),
+                'reference_year': ref.get('year', ''),
+                'reference_authors': ref_authors_str,
+                'reaction': reaction_str,
+                'experiment_type': exp_type,
+                'validation_error': None,
+                'can_confirm': True,
+                'contribute_to_github': contribute_to_github,
+                'run_pyteck': run_pyteck,
+                'github_username': github_username,
+                'contribution_description': contribution_description,
+                'file_author_orcid': file_author_orcid,
+            }
+
+            # --- Duplicate detection against ChemKED-database repo --------
+            try:
+                from .github_pr_service import GitHubPRService, GitHubContributionError
+                gh = GitHubPRService(
+                    token=getattr(settings, 'GITHUB_TOKEN', ''),
+                    owner=getattr(settings, 'GITHUB_REPO_OWNER', ''),
+                    repo=getattr(settings, 'GITHUB_REPO_NAME', 'ChemKED-database'),
+                )
+                yaml_filename = os.path.splitext(original_filename)[0] + '.yaml'
+                dup = gh.check_for_duplicates(yaml_filename, raw_content)
+                if dup:
+                    import difflib
+                    existing_lines = dup['existing_content'].splitlines(keepends=True)
+                    new_lines = raw_content.splitlines(keepends=True)
+                    raw_diff = list(difflib.unified_diff(
+                        existing_lines, new_lines,
+                        fromfile=dup['path'],
+                        tofile=yaml_filename,
+                        lineterm='',
+                    ))
+                    classified = []
+                    for line in raw_diff:
+                        if line.startswith('@@'):
+                            kind = 'hunk'
+                        elif line.startswith('+++') or line.startswith('---'):
+                            kind = 'header'
+                        elif line.startswith('+'):
+                            kind = 'add'
+                        elif line.startswith('-'):
+                            kind = 'del'
+                        else:
+                            kind = 'ctx'
+                        classified.append({'text': line, 'kind': kind})
+                    preview_info['duplicate_match'] = {
+                        'match_type': dup['match_type'],
+                        'path': dup['path'],
+                        'similarity': round(dup['similarity'] * 100),
+                        'diff_lines': classified,
+                        'has_diff': any(d['kind'] in ('add', 'del') for d in classified),
+                    }
+            except Exception as exc:
+                logger.debug("Duplicate detection skipped: %s", exc)
+
+            self.request.session['respecth_preview'] = preview_info
+            return redirect(f"{self.request.path}?preview=1")
+
+        except Exception as e:
+            logger.exception("Error parsing ChemKED YAML file")
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            messages.error(self.request, f'Error parsing YAML file: {e}')
+            return self.form_invalid(self.get_form())
+
     def _import_respecth_xml(self, temp_path, original_filename, file_author, file_author_orcid,
                               contribute_to_github=False, run_pyteck=False,
                               github_username='', contribution_description=''):
