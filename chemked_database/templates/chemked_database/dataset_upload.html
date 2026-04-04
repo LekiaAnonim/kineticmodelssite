@@ -517,6 +517,33 @@ datapoints:
         </div>
     </div>
 </div>
+
+<!-- Batch Preview (populated by JavaScript) -->
+<div id="batch-preview" class="row" style="display: none;">
+    <div class="col-lg-10">
+        <div class="data-section border-primary">
+            <div class="section-header bg-primary text-white">
+                <h6 class="mb-0"><i class="bi bi-eye me-2"></i>Batch Preview</h6>
+            </div>
+            <div class="section-body">
+                <div class="alert alert-info py-2 mb-3">
+                    <i class="bi bi-info-circle me-2"></i>
+                    Review the files below before importing. Duplicate detection results are shown for each file.
+                </div>
+                <div id="batch-preview-files"></div>
+                <div class="d-flex gap-2 mt-3">
+                    <button type="button" id="batch-confirm-btn" class="btn btn-success">
+                        <i class="bi bi-check-circle me-1"></i>Confirm &amp; Process All
+                    </button>
+                    <button type="button" id="batch-cancel-btn" class="btn btn-outline-secondary">
+                        <i class="bi bi-x-circle me-1"></i>Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
 {% endif %}
 {% endblock %}
 
@@ -713,6 +740,241 @@ document.addEventListener('DOMContentLoaded', function() {
         resetUI();
         statusText.textContent = 'Upload cancelled';
     }
+
+    // --- Batch preview rendering ------------------------------------------
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function renderDiffBlock(diffLines, collapseId, path, truncated, totalLines) {
+        let diffContent = '';
+        diffLines.forEach(function(line) {
+            const escaped = escapeHtml(line.text);
+            if (line.kind === 'add') {
+                diffContent += `<span style="background:#d4edda;display:block">${escaped}</span>`;
+            } else if (line.kind === 'del') {
+                diffContent += `<span style="background:#f8d7da;display:block">${escaped}</span>`;
+            } else if (line.kind === 'hunk') {
+                diffContent += `<span style="background:#cce5ff;color:#004085;display:block">${escaped}</span>`;
+            } else if (line.kind === 'header') {
+                diffContent += `<span style="color:#6c757d;display:block;font-weight:bold">${escaped}</span>`;
+            } else {
+                diffContent += `<span style="display:block">${escaped}</span>`;
+            }
+        });
+        let truncNote = '';
+        if (truncated) {
+            truncNote = `<div class="text-center small text-muted py-1 border-top">`
+                + `Showing ${diffLines.length} of ${totalLines} lines. Full diff available in the PR.</div>`;
+        }
+        return `<div class="card border-secondary mb-1">
+            <div class="card-header bg-secondary text-white py-1 d-flex justify-content-between align-items-center small">
+                <span><i class="bi bi-file-diff me-1"></i>Diff against <code class="text-white">${escapeHtml(path)}</code></span>
+                <button type="button" class="btn btn-sm btn-outline-light py-0" data-bs-toggle="collapse" data-bs-target="#${collapseId}">
+                    <i class="bi bi-chevron-contract"></i>
+                </button>
+            </div>
+            <div id="${collapseId}" class="collapse">
+                <div class="card-body p-0">
+                    <pre class="mb-0 p-2" style="font-size:0.75rem;max-height:300px;overflow:auto;background:#f8f9fa;">${diffContent}</pre>
+                    ${truncNote}
+                </div>
+            </div>
+        </div>`;
+    }
+
+    function renderFileCard(file, idx) {
+        const d = file.duplicate;
+        let badge, dupHtml = '';
+
+        if (!d) {
+            badge = '<span class="badge bg-success ms-2">New</span>';
+        } else if (d.match_type === 'exact') {
+        if (!d) {
+            badge = '<span class="badge bg-success ms-2">New</span>';
+        } else if (d.match_type === 'exact' || !d.has_diff) {
+            badge = '<span class="badge bg-warning text-dark ms-2">Identical</span>';
+        } else if (d.match_type === 'filename') {
+            badge = '<span class="badge bg-info text-dark ms-2">Name match</span>';
+        } else {
+            badge = `<span class="badge bg-info text-dark ms-2">${d.similarity}% similar</span>`;
+        }
+
+        if (d) {
+            let msg = '';
+            if (d.match_type === 'exact' || !d.has_diff) {
+                msg = `Byte-identical to <code>${escapeHtml(d.path)}</code>. A PR will show no changes.`;
+            } else if (d.match_type === 'filename') {
+                msg = `Matches existing <code>${escapeHtml(d.path)}</code>. Your submission will update it &mdash; see diff below.`;
+            } else {
+                msg = `Similar to <code>${escapeHtml(d.path)}</code> (${d.similarity}% match) &mdash; see diff below.`;
+            }
+            dupHtml = `<div class="alert alert-warning py-2 mb-2 small"><i class="bi bi-files me-1"></i>${msg}</div>`;
+
+            if (d.has_diff && d.diff_lines && d.diff_lines.length > 0) {
+                dupHtml += renderDiffBlock(d.diff_lines, `batch-diff-${idx}`, d.path, d.diff_truncated, d.diff_total_lines);
+            }
+        }
+
+        const typeIcon = file.type === 'xml' ? 'bi-filetype-xml' : 'bi-filetype-yml';
+        const card = document.createElement('div');
+        card.className = 'card mb-2';
+        card.innerHTML = `
+            <div class="card-header py-2 d-flex align-items-center">
+                <i class="bi ${typeIcon} me-2"></i>
+                <strong class="small">${escapeHtml(file.filename)}</strong>
+                ${badge}
+                <span class="badge bg-secondary ms-auto">${file.type.toUpperCase()}</span>
+            </div>
+            ${dupHtml ? '<div class="card-body py-2">' + dupHtml + '</div>' : ''}
+        `;
+        return card;
+    }
+
+    function renderBatchPreview(previewFiles, sseUrl, totalFiles, detectionSkipped) {
+        // Hide upload form and progress UI
+        const formSection = document.querySelector('.col-lg-8 > .data-section');
+        const sidebarSection = document.querySelector('.col-lg-4');
+        if (formSection) formSection.style.display = 'none';
+        if (sidebarSection) sidebarSection.style.display = 'none';
+        progressContainer.classList.remove('active');
+
+        const container = document.getElementById('batch-preview-files');
+        container.innerHTML = '';
+
+        // Partition files: duplicates with diffs (need review), identical, and new
+        const dupFiles = previewFiles.filter(f => f.duplicate);
+        const identicalFiles = dupFiles.filter(f => f.duplicate.match_type === 'exact' || !f.duplicate.has_diff);
+        const changedFiles = dupFiles.filter(f => f.duplicate.match_type !== 'exact' && f.duplicate.has_diff);
+        const newFiles = previewFiles.filter(f => !f.duplicate);
+
+        // ---- Summary bar ----
+        const summary = document.createElement('div');
+        summary.className = 'mb-3';
+        let summaryParts = [`<strong>${previewFiles.length}</strong> file(s) uploaded`];
+        if (newFiles.length) summaryParts.push(`<span class="badge bg-success">${newFiles.length} new</span>`);
+        if (changedFiles.length) summaryParts.push(`<span class="badge bg-info text-dark">${changedFiles.length} changed</span>`);
+        if (identicalFiles.length) summaryParts.push(`<span class="badge bg-warning text-dark">${identicalFiles.length} identical</span>`);
+        summary.innerHTML = `<div class="d-flex align-items-center gap-2 flex-wrap small">${summaryParts.join(' ')}</div>`;
+        container.appendChild(summary);
+
+        if (detectionSkipped) {
+            const notice = document.createElement('div');
+            notice.className = 'alert alert-info py-2 small';
+            notice.innerHTML = '<i class="bi bi-info-circle me-1"></i>Duplicate detection was skipped for this batch because it exceeds 50 files. '
+                + 'Duplicates will still be detected during GitHub PR creation.';
+            container.appendChild(notice);
+        }
+
+        // ---- Section: Files with diffs (always show, these need review) ----
+        if (changedFiles.length > 0) {
+            const heading = document.createElement('h6');
+            heading.className = 'text-info mt-3 mb-2 small fw-bold';
+            heading.innerHTML = `<i class="bi bi-file-diff me-1"></i>Files with changes (${changedFiles.length})`;
+            container.appendChild(heading);
+            changedFiles.forEach(function(file) {
+                const idx = previewFiles.indexOf(file);
+                container.appendChild(renderFileCard(file, idx));
+            });
+        }
+
+        // ---- Section: Identical files (collapsed table) ----
+        if (identicalFiles.length > 0) {
+            const heading = document.createElement('h6');
+            heading.className = 'text-warning mt-3 mb-2 small fw-bold';
+            heading.innerHTML = `<i class="bi bi-files me-1"></i>Identical to repository (${identicalFiles.length})`;
+            container.appendChild(heading);
+
+            if (identicalFiles.length <= 10) {
+                identicalFiles.forEach(function(file) {
+                    const idx = previewFiles.indexOf(file);
+                    container.appendChild(renderFileCard(file, idx));
+                });
+            } else {
+                // Compact table for many identical files
+                const table = document.createElement('div');
+                table.className = 'card mb-2';
+                let rows = identicalFiles.slice(0, 20).map(f =>
+                    `<tr><td class="small py-1"><code>${escapeHtml(f.filename)}</code></td>`
+                    + `<td class="small py-1 text-muted">&rarr; ${escapeHtml(f.duplicate.path)}</td></tr>`
+                ).join('');
+                let moreRow = '';
+                if (identicalFiles.length > 20) {
+                    moreRow = `<tr><td colspan="2" class="small py-1 text-muted text-center">... and ${identicalFiles.length - 20} more</td></tr>`;
+                }
+                table.innerHTML = `<div class="card-body p-0"><table class="table table-sm mb-0"><tbody>${rows}${moreRow}</tbody></table></div>`;
+                container.appendChild(table);
+            }
+        }
+
+        // ---- Section: New files (paginated) ----
+        if (newFiles.length > 0) {
+            const heading = document.createElement('h6');
+            heading.className = 'text-success mt-3 mb-2 small fw-bold';
+            heading.innerHTML = `<i class="bi bi-file-earmark-plus me-1"></i>New files (${newFiles.length})`;
+            container.appendChild(heading);
+
+            const PAGE_SIZE = 25;
+            const listContainer = document.createElement('div');
+            let shown = 0;
+
+            function showMoreNew() {
+                const batch = newFiles.slice(shown, shown + PAGE_SIZE);
+                batch.forEach(function(file) {
+                    const item = document.createElement('div');
+                    item.className = 'd-flex align-items-center py-1 border-bottom small';
+                    const typeIcon = file.type === 'xml' ? 'bi-filetype-xml' : 'bi-filetype-yml';
+                    item.innerHTML = `<i class="bi ${typeIcon} me-2 text-muted"></i><span>${escapeHtml(file.filename)}</span>`
+                        + `<span class="badge bg-secondary ms-auto">${file.type.toUpperCase()}</span>`;
+                    listContainer.appendChild(item);
+                });
+                shown += batch.length;
+
+                // Remove old "show more" button if present
+                const oldBtn = listContainer.querySelector('.batch-show-more');
+                if (oldBtn) oldBtn.remove();
+
+                if (shown < newFiles.length) {
+                    const moreBtn = document.createElement('button');
+                    moreBtn.type = 'button';
+                    moreBtn.className = 'btn btn-sm btn-outline-primary mt-2 batch-show-more';
+                    moreBtn.innerHTML = `<i class="bi bi-chevron-down me-1"></i>Show more (${newFiles.length - shown} remaining)`;
+                    moreBtn.onclick = showMoreNew;
+                    listContainer.appendChild(moreBtn);
+                }
+            }
+            showMoreNew();
+            container.appendChild(listContainer);
+        }
+
+        // Show the batch preview section
+        const batchPreview = document.getElementById('batch-preview');
+        batchPreview.style.display = '';
+
+        // Wire up confirm & cancel buttons
+        const confirmBtn = document.getElementById('batch-confirm-btn');
+        const cancelBtn = document.getElementById('batch-cancel-btn');
+
+        confirmBtn.onclick = function() {
+            batchPreview.style.display = 'none';
+            if (formSection) formSection.style.display = '';
+            if (sidebarSection) sidebarSection.style.display = '';
+            progressContainer.classList.add('active');
+            setProgress(50, `Processing ${totalFiles} file(s)...`, true);
+            connectSSE(sseUrl, totalFiles);
+        };
+
+        cancelBtn.onclick = function() {
+            batchPreview.style.display = 'none';
+            if (formSection) formSection.style.display = '';
+            if (sidebarSection) sidebarSection.style.display = '';
+            resetUI();
+            statusText.textContent = 'Upload cancelled. Files were not processed.';
+        };
+    }
+    // --- End batch preview ------------------------------------------------
     
     // SSE event source for processing progress
     let eventSource = null;
@@ -934,9 +1196,14 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 // Check if we got a batch_id for SSE processing
                 if (response.batch_id && response.sse_url) {
-                    // Connect to SSE for real-time processing progress
-                    setProgress(50, `Processing ${response.total_files} file(s)...`, true);
-                    connectSSE(response.sse_url, response.total_files);
+                    // Show batch preview before processing
+                    if (response.preview_files && response.preview_files.length > 0) {
+                        renderBatchPreview(response.preview_files, response.sse_url, response.total_files, response.detection_skipped || false);
+                    } else {
+                        // No preview data — start processing immediately
+                        setProgress(50, `Processing ${response.total_files} file(s)...`, true);
+                        connectSSE(response.sse_url, response.total_files);
+                    }
                 } else if (response.success === false && response.messages) {
                     // Error during upload preparation
                     progressBar.classList.remove('processing');
