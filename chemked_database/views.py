@@ -1443,6 +1443,89 @@ class DatasetUploadView(FormView):
                     }]
                 }, status=500)
         
+        # Run duplicate detection on each file for batch preview.
+        # Cap detection at 50 files to avoid hammering the GitHub API;
+        # files beyond the cap are still processed but skip detection.
+        MAX_DETECT = 50
+        MAX_DIFF_LINES = 120  # Truncate large diffs in the JSON payload
+
+        preview_files = []
+        gh = None
+        if len(temp_files) <= MAX_DETECT:
+            try:
+                from .github_pr_service import GitHubPRService
+                gh = GitHubPRService(
+                    token=getattr(settings, 'GITHUB_TOKEN', ''),
+                    owner=getattr(settings, 'GITHUB_REPO_OWNER', ''),
+                    repo=getattr(settings, 'GITHUB_REPO_NAME', 'ChemKED-database'),
+                )
+            except Exception:
+                pass
+
+        detection_skipped = len(temp_files) > MAX_DETECT
+
+        for tf in temp_files:
+            is_xml = tf['original_name'].lower().endswith('.xml')
+            file_info = {
+                'filename': tf['original_name'],
+                'type': 'xml' if is_xml else 'yaml',
+                'duplicate': None,
+            }
+
+            if gh:
+                try:
+                    with open(tf['temp_path'], 'r') as fh:
+                        raw_content = fh.read()
+
+                    if is_xml:
+                        from pyked.batch_convert import convert_file as _conv
+                        chemked_dict = _conv(tf['temp_path'], original_filename=tf['original_name'])
+                        check_content = format_chemked_yaml(chemked_dict)
+                        check_filename = os.path.splitext(tf['original_name'])[0] + '.yaml'
+                    else:
+                        check_content = raw_content
+                        check_filename = tf['original_name']
+
+                    dup = gh.check_for_duplicates(check_filename, check_content)
+                    if dup:
+                        import difflib
+                        existing_lines = dup['existing_content'].splitlines(keepends=True)
+                        new_lines = check_content.splitlines(keepends=True)
+                        raw_diff = list(difflib.unified_diff(
+                            existing_lines, new_lines,
+                            fromfile=dup['path'],
+                            tofile=check_filename,
+                            lineterm='',
+                        ))
+                        classified = []
+                        for line in raw_diff:
+                            if line.startswith('@@'):
+                                kind = 'hunk'
+                            elif line.startswith('+++') or line.startswith('---'):
+                                kind = 'header'
+                            elif line.startswith('+'):
+                                kind = 'add'
+                            elif line.startswith('-'):
+                                kind = 'del'
+                            else:
+                                kind = 'ctx'
+                            classified.append({'text': line, 'kind': kind})
+
+                        truncated = len(classified) > MAX_DIFF_LINES
+                        file_info['duplicate'] = {
+                            'match_type': dup['match_type'],
+                            'path': dup['path'],
+                            'similarity': round(dup['similarity'] * 100),
+                            'diff_lines': classified[:MAX_DIFF_LINES],
+                            'has_diff': any(d['kind'] in ('add', 'del') for d in classified),
+                            'diff_truncated': truncated,
+                            'diff_total_lines': len(classified),
+                        }
+                except Exception as exc:
+                    logger.debug("Batch detection for %s failed: %s", tf['original_name'], exc)
+
+            preview_files.append(file_info)
+
         # Store batch data in session
         batch_key = f'upload_batch_{batch_id}'
         self.request.session[batch_key] = {
@@ -1458,12 +1541,14 @@ class DatasetUploadView(FormView):
         }
         self.request.session.modified = True
         
-        # Return batch_id for SSE connection
+        # Return batch_id and preview data for client-side review
         return JsonResponse({
             'success': True,
             'batch_id': batch_id,
             'total_files': len(temp_files),
-            'sse_url': reverse('chemked_database:dataset-process') + f'?batch_id={batch_id}'
+            'sse_url': reverse('chemked_database:dataset-process') + f'?batch_id={batch_id}',
+            'preview_files': preview_files,
+            'detection_skipped': detection_skipped,
         })
     
     def _process_file_batch(self, data_file, file_format, validate, file_author, file_author_orcid):
@@ -1534,18 +1619,17 @@ class DatasetUploadView(FormView):
         chemked_dict = convert_file(temp_path, original_filename=original_filename)
         data = ChemKEDDictAdapter(chemked_dict)
         
-        # Check for duplicate based on file_doi
+        # Log duplicate info but proceed — the GitHub PR will show
+        # any differences for the maintainer to review.
         if data.file_doi:
             existing = ExperimentDataset.objects.filter(file_doi=data.file_doi).first()
             if existing:
-                raise ValueError(
-                    f'Dataset with DOI "{data.file_doi}" already exists as "{existing.chemked_file_path}" (ID: {existing.pk}). '
-                    'Skipping duplicate upload.'
+                log.info(
+                    'Dataset with DOI "%s" already exists as "%s" (ID: %s). '
+                    'Proceeding — PR will show diff for review.',
+                    data.file_doi, existing.chemked_file_path, existing.pk,
                 )
-        
-        # Also check by reference DOI + similar composition (fallback for files without file_doi)
-        if not data.file_doi and data.reference and data.reference.doi:
-            # Check if we already have a dataset with the same reference DOI and similar datapoint count
+        elif data.reference and data.reference.doi:
             similar = ExperimentDataset.objects.filter(
                 reference__doi=data.reference.doi
             )
@@ -1555,10 +1639,11 @@ class DatasetUploadView(FormView):
                 )
             existing = similar.first()
             if existing:
-                raise ValueError(
-                    f'Possible duplicate: Dataset with reference DOI "{data.reference.doi}" '
-                    f'and {len(data.datapoints)} datapoints already exists as "{existing.chemked_file_path}" (ID: {existing.pk}). '
-                    'Skipping duplicate upload.'
+                log.info(
+                    'Possible duplicate: reference DOI "%s" with %d datapoints '
+                    'matches "%s" (ID: %s). Proceeding — PR will show diff for review.',
+                    data.reference.doi, len(data.datapoints),
+                    existing.chemked_file_path, existing.pk,
                 )
         
         return self._import_from_chemked_dict(chemked_dict, original_filename, file_author)
