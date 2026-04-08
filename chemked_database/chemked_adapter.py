@@ -85,7 +85,7 @@ class _Reaction:
 @dataclass
 class _Apparatus:
     kind: str = ''
-    mode: str = ''
+    mode: List[str] = field(default_factory=list)
     institution: str = ''
     facility: str = ''
 
@@ -230,9 +230,12 @@ class ChemKEDDictAdapter:
         app = self._d.get('apparatus')
         if not app:
             return None
+        raw_mode = app.get('mode', [])
+        if isinstance(raw_mode, str):
+            raw_mode = [raw_mode] if raw_mode else []
         return _Apparatus(
             kind=app.get('kind', ''),
-            mode=app.get('mode', ''),
+            mode=raw_mode,
             institution=app.get('institution', ''),
             facility=app.get('facility', ''),
         )
