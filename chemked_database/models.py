@@ -252,6 +252,7 @@ class Apparatus(models.Model):
         max_length=100,
         choices=ApparatusMode.choices,
         blank=True,
+        db_column='operating_mode',
         help_text="Operating mode (e.g., 'reflected shock', 'premixed')"
     )
     institution = models.CharField(max_length=255, blank=True)
