@@ -7,7 +7,6 @@
 postgres/
 
 # IDE settings
-.vscode/settings.json
 .pydevproject
 .settings/*
 
@@ -30,3 +29,7 @@ media/
 *kineticmodelssite/chemked_database/results
 */ipynb
 *kineticmodelssite/analysis/ipynb
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore

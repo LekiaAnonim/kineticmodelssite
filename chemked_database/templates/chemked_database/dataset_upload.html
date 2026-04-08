@@ -791,9 +791,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
         if (!d) {
             badge = '<span class="badge bg-success ms-2">New</span>';
-        } else if (d.match_type === 'exact') {
-        if (!d) {
-            badge = '<span class="badge bg-success ms-2">New</span>';
         } else if (d.match_type === 'exact' || !d.has_diff) {
             badge = '<span class="badge bg-warning text-dark ms-2">Identical</span>';
         } else if (d.match_type === 'filename') {
