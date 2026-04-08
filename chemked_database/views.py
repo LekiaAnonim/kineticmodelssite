@@ -773,19 +773,31 @@ class DatasetCreateWizardView(TemplateView):
         file_meta = data.get('file_metadata', {})
         ref_data = data.get('reference', {})
         
-        dataset = ExperimentDataset.objects.create(
-            chemked_file_path=f"user_created/{self.request.user.username if self.request.user.is_authenticated else 'anonymous'}/{ref_data.get('doi', 'no-doi')}",
-            file_version=file_meta.get('file_version', 0),
-            chemked_version=file_meta.get('chemked_version', '0.4.1'),
-            experiment_type=exp_data.get('experiment_type', ExperimentType.IGNITION_DELAY),
-            apparatus=apparatus,
-            reference_doi=ref_data.get('doi', ''),
-            reference_journal=ref_data.get('journal', ''),
-            reference_year=ref_data.get('year'),
-            reference_volume=ref_data.get('volume'),
-            reference_pages=ref_data.get('pages', ''),
-            reference_detail=ref_data.get('detail', ''),
+        # Create or update dataset
+        wizard_path = f"user_created/{self.request.user.username if self.request.user.is_authenticated else 'anonymous'}/{ref_data.get('doi', 'no-doi')}"
+        dataset, created = ExperimentDataset.objects.update_or_create(
+            chemked_file_path=wizard_path,
+            defaults=dict(
+                file_version=file_meta.get('file_version', 0),
+                chemked_version=file_meta.get('chemked_version', '0.4.1'),
+                experiment_type=exp_data.get('experiment_type', ExperimentType.IGNITION_DELAY),
+                apparatus=apparatus,
+                reference_doi=ref_data.get('doi', ''),
+                reference_journal=ref_data.get('journal', ''),
+                reference_year=ref_data.get('year'),
+                reference_volume=ref_data.get('volume'),
+                reference_pages=ref_data.get('pages', ''),
+                reference_detail=ref_data.get('detail', ''),
+            ),
         )
+        
+        # If updating, clear old related objects so they get re-created
+        if not created:
+            dataset.datapoints.all().delete()
+            dataset.file_authors.clear()
+            dataset.reference_authors.clear()
+            if hasattr(dataset, 'common_properties') and dataset.common_properties:
+                dataset.common_properties.delete()
         
         # Add file authors
         for author_data in data.get('file_authors', []):
@@ -1109,6 +1121,90 @@ def format_chemked_yaml(chemked_dict):
     buf = StringIO()
     yaml_dump(d, buf)
     return buf.getvalue()
+
+
+def _sort_keys(obj):
+    """Recursively sort dict keys so both sides of a diff share the same order."""
+    if isinstance(obj, dict):
+        return {k: _sort_keys(v) for k, v in sorted(obj.items())}
+    elif isinstance(obj, list):
+        return [_sort_keys(item) for item in obj]
+    return obj
+
+
+def _normalize_yaml(content):
+    """Parse and re-serialize YAML to get consistent formatting for diffing.
+
+    Dict keys are sorted so that key-order differences between files do not
+    cause false diff lines.  Returns the normalized string, or the original
+    content if parsing fails.
+    """
+    try:
+        parsed = yaml.safe_load(content)
+        if isinstance(parsed, dict):
+            return format_chemked_yaml(_sort_keys(parsed))
+    except Exception:
+        pass
+    return content
+
+
+def _compute_diff(existing_content, new_content, from_path, to_path, max_lines=None):
+    """Compute a classified diff between two YAML strings.
+
+    Both sides are normalized through ``format_chemked_yaml`` (with sorted
+    keys) so that formatting-only differences are eliminated and only
+    semantic changes appear in the diff.
+
+    Uses ``SequenceMatcher(autojunk=False)`` so that frequently-repeated
+    YAML lines (``species:``, ``amount:``, etc.) are not treated as junk
+    and incorrectly shown as changed.
+
+    Returns ``(classified, truncated, total_lines)`` where *classified* is a
+    list of ``{'text': str, 'kind': str}`` dicts, *truncated* indicates
+    whether the list was capped, and *total_lines* is the count before
+    truncation.
+    """
+    from difflib import SequenceMatcher
+
+    norm_existing = _normalize_yaml(existing_content)
+    norm_new = _normalize_yaml(new_content)
+
+    old_lines = norm_existing.splitlines()
+    new_lines = norm_new.splitlines()
+
+    sm = SequenceMatcher(None, old_lines, new_lines, autojunk=False)
+
+    classified = [
+        {'text': f'--- {from_path}', 'kind': 'header'},
+        {'text': f'+++ {to_path}', 'kind': 'header'},
+    ]
+    for group in sm.get_grouped_opcodes(n=3):
+        i1 = group[0][1]
+        i2 = group[-1][2]
+        j1 = group[0][3]
+        j2 = group[-1][4]
+        classified.append({
+            'text': f'@@ -{i1 + 1},{i2 - i1} +{j1 + 1},{j2 - j1} @@',
+            'kind': 'hunk',
+        })
+        for tag, si1, si2, sj1, sj2 in group:
+            if tag == 'equal':
+                for line in old_lines[si1:si2]:
+                    classified.append({'text': ' ' + line, 'kind': 'ctx'})
+            if tag in ('replace', 'delete'):
+                for line in old_lines[si1:si2]:
+                    classified.append({'text': '-' + line, 'kind': 'del'})
+            if tag in ('replace', 'insert'):
+                for line in new_lines[sj1:sj2]:
+                    classified.append({'text': '+' + line, 'kind': 'add'})
+
+    total_lines = len(classified)
+    truncated = False
+    if max_lines and total_lines > max_lines:
+        truncated = True
+        classified = classified[:max_lines]
+
+    return classified, truncated, total_lines
 
 
 class DatasetUploadView(FormView):
@@ -1488,38 +1584,20 @@ class DatasetUploadView(FormView):
 
                     dup = gh.check_for_duplicates(check_filename, check_content)
                     if dup:
-                        import difflib
-                        existing_lines = dup['existing_content'].splitlines(keepends=True)
-                        new_lines = check_content.splitlines(keepends=True)
-                        raw_diff = list(difflib.unified_diff(
-                            existing_lines, new_lines,
-                            fromfile=dup['path'],
-                            tofile=check_filename,
-                            lineterm='',
-                        ))
-                        classified = []
-                        for line in raw_diff:
-                            if line.startswith('@@'):
-                                kind = 'hunk'
-                            elif line.startswith('+++') or line.startswith('---'):
-                                kind = 'header'
-                            elif line.startswith('+'):
-                                kind = 'add'
-                            elif line.startswith('-'):
-                                kind = 'del'
-                            else:
-                                kind = 'ctx'
-                            classified.append({'text': line, 'kind': kind})
+                        classified, truncated, total_lines = _compute_diff(
+                            dup['existing_content'], check_content,
+                            dup['path'], check_filename,
+                            max_lines=MAX_DIFF_LINES,
+                        )
 
-                        truncated = len(classified) > MAX_DIFF_LINES
                         file_info['duplicate'] = {
                             'match_type': dup['match_type'],
                             'path': dup['path'],
                             'similarity': round(dup['similarity'] * 100),
-                            'diff_lines': classified[:MAX_DIFF_LINES],
+                            'diff_lines': classified,
                             'has_diff': any(d['kind'] in ('add', 'del') for d in classified),
                             'diff_truncated': truncated,
-                            'diff_total_lines': len(classified),
+                            'diff_total_lines': total_lines,
                         }
                 except Exception as exc:
                     logger.debug("Batch detection for %s failed: %s", tf['original_name'], exc)
@@ -2367,28 +2445,10 @@ class DatasetUploadView(FormView):
                 yaml_filename = os.path.splitext(original_filename)[0] + '.yaml'
                 dup = gh.check_for_duplicates(yaml_filename, raw_content)
                 if dup:
-                    import difflib
-                    existing_lines = dup['existing_content'].splitlines(keepends=True)
-                    new_lines = raw_content.splitlines(keepends=True)
-                    raw_diff = list(difflib.unified_diff(
-                        existing_lines, new_lines,
-                        fromfile=dup['path'],
-                        tofile=yaml_filename,
-                        lineterm='',
-                    ))
-                    classified = []
-                    for line in raw_diff:
-                        if line.startswith('@@'):
-                            kind = 'hunk'
-                        elif line.startswith('+++') or line.startswith('---'):
-                            kind = 'header'
-                        elif line.startswith('+'):
-                            kind = 'add'
-                        elif line.startswith('-'):
-                            kind = 'del'
-                        else:
-                            kind = 'ctx'
-                        classified.append({'text': line, 'kind': kind})
+                    classified, _, _ = _compute_diff(
+                        dup['existing_content'], raw_content,
+                        dup['path'], yaml_filename,
+                    )
                     preview_info['duplicate_match'] = {
                         'match_type': dup['match_type'],
                         'path': dup['path'],
@@ -2509,30 +2569,10 @@ class DatasetUploadView(FormView):
                 )
                 dup = gh.check_for_duplicates(yaml_filename, yaml_content)
                 if dup:
-                    import difflib
-                    existing_lines = dup['existing_content'].splitlines(keepends=True)
-                    new_lines = yaml_content.splitlines(keepends=True)
-                    raw_diff = list(difflib.unified_diff(
-                        existing_lines, new_lines,
-                        fromfile=dup['path'],
-                        tofile=yaml_filename,
-                        lineterm='',
-                    ))
-                    # Pre-classify lines for easy template rendering:
-                    # each entry is {'text': str, 'kind': str}
-                    classified = []
-                    for line in raw_diff:
-                        if line.startswith('@@'):
-                            kind = 'hunk'
-                        elif line.startswith('+++') or line.startswith('---'):
-                            kind = 'header'
-                        elif line.startswith('+'):
-                            kind = 'add'
-                        elif line.startswith('-'):
-                            kind = 'del'
-                        else:
-                            kind = 'ctx'
-                        classified.append({'text': line, 'kind': kind})
+                    classified, _, _ = _compute_diff(
+                        dup['existing_content'], yaml_content,
+                        dup['path'], yaml_filename,
+                    )
 
                     preview_info['duplicate_match'] = {
                         'match_type': dup['match_type'],
@@ -2620,11 +2660,6 @@ class DatasetUploadView(FormView):
         # Generate dataset name
         if custom_name:
             readable_name = custom_name
-            base_name = readable_name
-            counter = 1
-            while ExperimentDataset.objects.filter(chemked_file_path=readable_name).exists():
-                readable_name = f"{base_name}_{counter}"
-                counter += 1
         else:
             readable_name = self._generate_readable_name(data, original_filename, file_type)
         
@@ -2678,30 +2713,40 @@ class DatasetUploadView(FormView):
             except (ValueError, TypeError):
                 pass
         
-        # Create dataset
-        dataset = ExperimentDataset.objects.create(
+        # Create or update dataset (allow re-upload of existing files)
+        dataset, created = ExperimentDataset.objects.update_or_create(
             chemked_file_path=readable_name,
-            experiment_type=exp_type,
-            apparatus=apparatus,
-            chemked_version='0.4.1',
-            file_version=0,
-            reference_doi=ref_doi or '',
-            reference_journal=ref_journal or '',
-            reference_year=ref_year,
-            reference_volume=ref_volume,
-            reference_pages=ref_pages or '',
-            reference_detail=ref_detail or '',
-            reference_title=ref_title or '',
-            reference_table=ref_table or '',
-            reference_figure=ref_figure or '',
-            reference_location=ref_location or '',
-            file_doi=data.file_doi or '',
-            respecth_version=data.respecth_version or '',
-            first_publication_date=first_pub_date,
-            last_modification_date=last_mod_date,
-            method=data.method or '',
-            comments=data.comments or [],
+            defaults=dict(
+                experiment_type=exp_type,
+                apparatus=apparatus,
+                chemked_version='0.4.1',
+                file_version=0,
+                reference_doi=ref_doi or '',
+                reference_journal=ref_journal or '',
+                reference_year=ref_year,
+                reference_volume=ref_volume,
+                reference_pages=ref_pages or '',
+                reference_detail=ref_detail or '',
+                reference_title=ref_title or '',
+                reference_table=ref_table or '',
+                reference_figure=ref_figure or '',
+                reference_location=ref_location or '',
+                file_doi=data.file_doi or '',
+                respecth_version=data.respecth_version or '',
+                first_publication_date=first_pub_date,
+                last_modification_date=last_mod_date,
+                method=data.method or '',
+                comments=data.comments or [],
+            ),
         )
+        
+        # If updating, clear old related objects so they get re-created
+        if not created:
+            dataset.datapoints.all().delete()
+            dataset.file_authors.clear()
+            dataset.reference_authors.clear()
+            if hasattr(dataset, 'common_properties') and dataset.common_properties:
+                dataset.common_properties.delete()
         
         # Add authors
         if ref and ref.authors:
@@ -3283,20 +3328,30 @@ class DatasetUploadView(FormView):
             facility=ck.apparatus.facility or '',
         )
         
-        # Create dataset
-        dataset = ExperimentDataset.objects.create(
+        # Create or update dataset (allow re-upload of existing files)
+        dataset, created = ExperimentDataset.objects.update_or_create(
             chemked_file_path=original_filename,
-            file_version=ck.file_version or 0,
-            chemked_version=ck.chemked_version or '0.4.1',
-            experiment_type=ck.experiment_type or ExperimentType.IGNITION_DELAY,
-            apparatus=apparatus,
-            reference_doi=ck.reference.doi or '',
-            reference_journal=ck.reference.journal or '',
-            reference_year=ck.reference.year,
-            reference_volume=ck.reference.volume,
-            reference_pages=ck.reference.pages or '',
-            reference_detail=ck.reference.detail or '',
+            defaults=dict(
+                file_version=ck.file_version or 0,
+                chemked_version=ck.chemked_version or '0.4.1',
+                experiment_type=ck.experiment_type or ExperimentType.IGNITION_DELAY,
+                apparatus=apparatus,
+                reference_doi=ck.reference.doi or '',
+                reference_journal=ck.reference.journal or '',
+                reference_year=ck.reference.year,
+                reference_volume=ck.reference.volume,
+                reference_pages=ck.reference.pages or '',
+                reference_detail=ck.reference.detail or '',
+            ),
         )
+        
+        # If updating, clear old related objects so they get re-created
+        if not created:
+            dataset.datapoints.all().delete()
+            dataset.file_authors.clear()
+            dataset.reference_authors.clear()
+            if hasattr(dataset, 'common_properties') and dataset.common_properties:
+                dataset.common_properties.delete()
         
         # Add file authors
         for author in ck.file_authors or []:
