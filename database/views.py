@@ -157,7 +157,7 @@ class SpeciesDetail(DetailView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         species = self.get_object()
-        structures = Structure.objects.filter(isomer__species=species)
+        structures = Structure.objects.filter(isomer__species=species).select_related("isomer")
         reactions = Reaction.objects.filter(species=species).order_by("id")
 
         names_models = defaultdict(list)
@@ -171,7 +171,6 @@ class SpeciesDetail(DetailView):
         context["names_models"] = sorted(list(names_models.items()), key=lambda x: -len(x[1]))
         context["adjlists"] = structures.values_list("adjacency_list", flat=True)
         context["smiles"] = structures.values_list("smiles", flat=True)
-        context["isomer_inchis"] = species.isomers.values_list("inchi", flat=True)
         context["thermo_list"] = Thermo.objects.filter(species=species)
         context["transport_list"] = Transport.objects.filter(species=species)
         context["structures"] = structures

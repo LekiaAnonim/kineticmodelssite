@@ -39,9 +39,15 @@
                         </div>
                         <div class="flex-grow-1 p-2">
                             <table class="table table-sm table-borderless mb-0">
-                                {% if structure.smiles %}
-                                <tr><td class="text-muted small" style="width:80px;">SMILES</td><td><code class="small">{{ structure.smiles }}</code></td></tr>
+                                {% if structure.isomer.inchi %}
+                                <tr><td class="text-muted small" style="width:80px;">InChI</td><td><code class="small text-break">{{ structure.isomer.inchi }}</code>
+                                    <button class="btn btn-sm btn-link p-0 ms-1 copy-btn" data-copy="{{ structure.isomer.inchi }}"><i class="bi bi-clipboard"></i></button>
+                                </td></tr>
                                 {% endif %}
+                                {% if structure.smiles %}
+                                <tr><td class="text-muted small">SMILES</td><td><code class="small">{{ structure.smiles }}</code></td></tr>
+                                {% endif %}
+                                <tr><td class="text-muted small">Multiplicity</td><td class="small">{{ structure.multiplicity }}</td></tr>
                                 {% if structure.adjacency_list %}
                                 <tr><td class="text-muted small">Adj. List</td><td><details class="small"><summary class="text-primary">View</summary><pre class="mb-0 small">{{ structure.adjacency_list }}</pre></details></td></tr>
                                 {% endif %}
@@ -49,32 +55,6 @@
                         </div>
                     </div>
                     {% endfor %}
-                </div>
-            </div>
-        </div>
-        {% endif %}
-
-        <!-- Identifiers -->
-        {% if isomer_inchis %}
-        <div class="data-section">
-            <div class="section-header" data-bs-toggle="collapse" data-bs-target="#inchiSection">
-                <h6 class="mb-0"><i class="bi bi-fingerprint me-2"></i>Isomer InChIs ({{ isomer_inchis|length }})</h6>
-                <i class="bi bi-chevron-down"></i>
-            </div>
-            <div class="collapse show" id="inchiSection">
-                <div class="section-body p-0">
-                    <table class="table table-sm mb-0">
-                        <tbody>
-                            {% for inchi in isomer_inchis %}
-                            <tr>
-                                <td><code class="small text-break">{{ inchi }}</code></td>
-                                <td style="width: 40px;" class="text-end">
-                                    <button class="btn btn-sm btn-link p-0 copy-btn" data-copy="{{ inchi }}"><i class="bi bi-clipboard"></i></button>
-                                </td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
                 </div>
             </div>
         </div>
