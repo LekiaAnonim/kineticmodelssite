@@ -155,10 +155,26 @@ def get_or_create_species(kinetic_model, name, molecules, models):
         multiplicity = molecule.multiplicity
         isomer, _ = models.Isomer.objects.get_or_create(inchi=augmented_inchi, formula=formula_obj)
         isomers.append(isomer)
-        models.Structure.objects.get_or_create(
-            adjacency_list=adjacency_list,
-            defaults={"smiles": smiles, "multiplicity": multiplicity, "isomer": isomer},
+
+        # Deduplicate by molecular graph isomorphism, not just adjacency
+        # list text.  Different atom numberings produce different text but
+        # represent the same molecule.
+        existing = models.Structure.objects.filter(
+            isomer=isomer, multiplicity=multiplicity,
         )
+        match = None
+        for candidate in existing:
+            try:
+                if candidate.to_rmg().is_isomorphic(molecule):
+                    match = candidate
+                    break
+            except Exception:
+                continue
+        if match is None:
+            models.Structure.objects.get_or_create(
+                adjacency_list=adjacency_list,
+                defaults={"smiles": smiles, "multiplicity": multiplicity, "isomer": isomer},
+            )
 
     species_hash = get_species_hash(isomers)
     species, species_created = models.Species.objects.get_or_create(hash=species_hash)
