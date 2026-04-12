@@ -355,7 +355,7 @@ class DrawStructure(View):
         return response
 
 
-class RegistrationView(FormView):
+class RegistrationView(LoginRequiredMixin, FormView):
     template_name = "database/register.html"
     form_class = RegistrationForm
     success_url = "/"
