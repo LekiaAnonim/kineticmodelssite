@@ -147,3 +147,21 @@ class KineticModelSerializer(NestedModelSerializer):
             "thermo",
             "transport",
         ]
+
+
+class AuthorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.Author
+        fields = "__all__"
+
+
+class SourceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.Source
+        fields = "__all__"
+
+
+class StructureSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.Structure
+        fields = "__all__"

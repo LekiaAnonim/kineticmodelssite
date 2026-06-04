@@ -64,6 +64,7 @@ INSTALLED_APPS = [
     "crispy_bootstrap4",
     "rest_framework",
     "rest_framework.authtoken",
+    "drf_spectacular",
     'mathfilters',
     'django_celery_results',
 ]
@@ -165,14 +166,48 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.TokenAuthentication",
     ],
+    # Public read access by default. Write endpoints tighten this explicitly:
+    # data viewsets require IsAdminUser to write, and the contribution endpoints
+    # require IsAuthenticated.
     "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.IsAdminUser",
+        "rest_framework.permissions.IsAuthenticatedOrReadOnly",
     ],
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
         "rest_framework.throttling.UserRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {"anon": "100/day", "user": "1000/day"},
+}
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Prometheus Kinetic Models API",
+    "DESCRIPTION": (
+        "FAIR REST API for the Prometheus combustion-kinetics cyberinfrastructure: "
+        "canonical species, isomers, formulae, reactions, thermochemistry, transport, "
+        "kinetics, and kinetic models. Read access is public; contributing data requires "
+        "authentication."
+    ),
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "SERVE_PERMISSIONS": ["rest_framework.permissions.AllowAny"],
+    "COMPONENT_SPLIT_REQUEST": True,
+    "ENUM_NAME_OVERRIDES": {
+        "MappingMethodEnum": "analysis.models.MappingMethod",
+        "UncertaintyTypeEnum": "chemked_database.models.UncertaintyType",
+        "PropertySourceTypeEnum": "chemked_database.models.PropertySourceType",
+        "EvaluatedStandardDeviationMethodEnum": "chemked_database.models.EvaluatedStandardDeviationMethod",
+    },
+    "TAGS": [
+        {"name": "species", "description": "Canonical species, isomers, formulae, and structures."},
+        {"name": "reactions", "description": "Reactions and their rate coefficients."},
+        {"name": "models", "description": "Kinetic models and their assembled components."},
+        {"name": "thermo-transport", "description": "Thermochemistry and transport properties."},
+        {"name": "bibliography", "description": "Literature sources and authors."},
+        {"name": "experimental-data", "description": "ChemKED experimental datasets and datapoints (read-only)."},
+        {"name": "analysis", "description": "Simulation runs, results, and model-vs-data agreement (read-only)."},
+        {"name": "contribute", "description": "Authenticated data-contribution endpoints."},
+    ],
 }
 
 TESTING = len(sys.argv) > 1 and sys.argv[1] == "test"

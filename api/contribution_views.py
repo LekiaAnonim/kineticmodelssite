@@ -18,6 +18,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from drf_spectacular.utils import OpenApiResponse, extend_schema
+
 logger = logging.getLogger(__name__)
 
 ORCID_PATTERN = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
@@ -63,6 +65,12 @@ class ContributeFilesView(APIView):
     parser_classes = [MultiPartParser]
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        tags=["contribute"],
+        summary="Upload ChemKED/Chemkin files and open a contribution PR",
+        request=ContributionSerializer,
+        responses={201: OpenApiResponse(description="Contribution PR created")},
+    )
     def post(self, request):
         ser = ContributionSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
@@ -215,6 +223,11 @@ class ContributionStatusView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        tags=["contribute"],
+        summary="Check the CI validation status of a contribution PR",
+        responses={200: OpenApiResponse(description="PR check-run statuses")},
+    )
     def get(self, request, pr_number):
         try:
             from .github_pr_service import GitHubPRService

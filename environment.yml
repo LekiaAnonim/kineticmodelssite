@@ -379,6 +379,7 @@ dependencies:
       - djangorestframework==3.15.1
       - docstring-parser==0.17.0
       - docutils==0.21.2
+      - drf-spectacular==0.29.0
       - drf-writable-nested==0.7.2
       - filelock==3.19.1
       - flake8==6.1.0
@@ -422,7 +423,7 @@ dependencies:
       - pynacl==1.6.0
       - pyteck==0.2.4
       - python-dotenv==1.1.1
-      - pyyaml==3.13
+      - pyyaml==6.0.3
       - rdkit-pypi==2022.9.5
       - snowballstemmer==3.0.1
       - sphinx==7.4.7
