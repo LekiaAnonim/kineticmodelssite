@@ -1,4 +1,4 @@
-from drf_spectacular.utils import extend_schema, extend_schema_view
+from drf_spectacular.utils import OpenApiExample, extend_schema, extend_schema_view
 from rest_framework import viewsets
 from rest_framework.permissions import IsAdminUser, BasePermission, SAFE_METHODS
 
@@ -37,7 +37,16 @@ class IsomerViewSet(PermissionsViewSet):
 
 @extend_schema(tags=["species"])
 @extend_schema_view(
-    list=extend_schema(summary="List canonical species"),
+    list=extend_schema(
+        summary="List canonical species",
+        examples=[
+            OpenApiExample(
+                "Methane",
+                value={"id": 1, "prime_id": "s00000123", "cas_number": "74-82-8", "isomers": [12]},
+                response_only=True,
+            )
+        ],
+    ),
     retrieve=extend_schema(summary="Retrieve a canonical species by ID"),
 )
 class SpeciesViewSet(PermissionsViewSet):

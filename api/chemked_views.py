@@ -11,7 +11,7 @@ bare IDs. Parent back-references (e.g. a datapoint's ``dataset``) are kept as ID
 to avoid circular and oversized payloads.
 """
 
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiExample, extend_schema, extend_schema_view
 from rest_framework import serializers, viewsets
 from rest_framework.permissions import AllowAny
 
@@ -231,6 +231,25 @@ class CompositionSpeciesViewSet(ReadOnlyViewSet):
 
 
 @extend_schema(tags=["experimental-data"])
+@extend_schema_view(
+    list=extend_schema(
+        summary="List ignition-delay datapoints",
+        examples=[
+            OpenApiExample(
+                "Shock-tube ignition delay",
+                value={
+                    "id": 1,
+                    "datapoint": 42,
+                    "ignition_target": "OH*",
+                    "ignition_type": "max",
+                    "ignition_delay": 0.00042,
+                    "ignition_delay_quantity": {"value": 0.00042, "units": "s", "uncertainty": 3e-05},
+                },
+                response_only=True,
+            )
+        ],
+    ),
+)
 class IgnitionDelayViewSet(ReadOnlyViewSet):
     queryset = models.IgnitionDelayDatapoint.objects.all()
     serializer_class = IgnitionDelayDatapointSerializer

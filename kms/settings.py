@@ -195,6 +195,34 @@ SPECTACULAR_SETTINGS = {
         "authentication."
     ),
     "VERSION": "1.0.0",
+    # NOTE: replace the production server URL and (optionally) add a LICENSE for
+    # your deployment. The first SERVERS entry is used as the base URL in the
+    # generated code samples and as the Swagger "Servers" default.
+    "SERVERS": [
+        {"url": "https://prometheus.example.org", "description": "Production (replace with your deployed domain)"},
+        {"url": "http://localhost:8000", "description": "Local development"},
+    ],
+    "CONTACT": {
+        "name": "Prometheus Cyberinfrastructure",
+        "url": "https://github.com/LekiaAnonim/kineticmodelssite",
+    },
+    "EXTERNAL_DOCS": {
+        "description": "Platform & API documentation",
+        "url": "https://prometheus.example.org/docs/",
+    },
+    "POSTPROCESSING_HOOKS": [
+        # Keep the default enum hook, then append multi-language code samples.
+        "drf_spectacular.hooks.postprocess_schema_enums",
+        "api.schema_hooks.add_code_samples",
+    ],
+    "SWAGGER_UI_SETTINGS": {
+        "persistAuthorization": True,
+        "deepLinking": True,
+        "displayRequestDuration": True,
+        "filter": True,
+        "tryItOutEnabled": True,
+        "requestSnippetsEnabled": True,
+    },
     "SERVE_INCLUDE_SCHEMA": False,
     "SERVE_PERMISSIONS": ["rest_framework.permissions.AllowAny"],
     # Self-host the Swagger UI and ReDoc assets via drf-spectacular-sidecar
