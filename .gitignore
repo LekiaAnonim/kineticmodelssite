@@ -5,6 +5,12 @@
 # macOS Finder metadata
 .DS_Store
 
+# Generated API artifacts (built from the OpenAPI schema)
+/schema.yaml
+/clients/
+# Built documentation site (MkDocs)
+/docs_site/
+
 # SQLite database files
 *.sqlite3
 postgres/
