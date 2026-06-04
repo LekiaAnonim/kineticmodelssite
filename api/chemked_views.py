@@ -16,6 +16,7 @@ from rest_framework import serializers, viewsets
 from rest_framework.permissions import AllowAny
 
 from chemked_database import models
+from api import filters
 
 
 class ReadOnlyViewSet(viewsets.ReadOnlyModelViewSet):
@@ -182,69 +183,102 @@ class BurnerStabilizedFlameDatapointSerializer(serializers.ModelSerializer):
 class ExperimentDatasetViewSet(ReadOnlyViewSet):
     queryset = models.ExperimentDataset.objects.all()
     serializer_class = ExperimentDatasetSerializer
+    filterset_class = filters.ExperimentDatasetFilter
+    search_fields = ["reference_doi", "reference_journal", "file_doi", "experiment_type"]
+    ordering_fields = ["reference_year", "created_at", "id"]
 
 
 @extend_schema(tags=["experimental-data"])
 class ExperimentDatapointViewSet(ReadOnlyViewSet):
     queryset = models.ExperimentDatapoint.objects.all()
     serializer_class = ExperimentDatapointSerializer
+    filterset_class = filters.ExperimentDatapointFilter
+    ordering_fields = ["temperature", "pressure", "equivalence_ratio", "id"]
 
 
 @extend_schema(tags=["experimental-data"])
 class ApparatusViewSet(ReadOnlyViewSet):
     queryset = models.Apparatus.objects.all()
     serializer_class = ApparatusSerializer
+    filterset_fields = ["kind", "mode", "institution", "facility"]
+    search_fields = ["institution", "facility"]
+    ordering_fields = ["id"]
 
 
 @extend_schema(tags=["experimental-data"])
 class CommonPropertiesViewSet(ReadOnlyViewSet):
     queryset = models.CommonProperties.objects.all()
     serializer_class = CommonPropertiesSerializer
+    filterset_class = filters.CommonPropertiesFilter
+    ordering_fields = ["temperature", "pressure", "id"]
 
 
 @extend_schema(tags=["experimental-data"])
 class CompositionViewSet(ReadOnlyViewSet):
     queryset = models.Composition.objects.all()
     serializer_class = CompositionSerializer
+    filterset_fields = ["kind"]
+    ordering_fields = ["id"]
+
+
+@extend_schema(tags=["experimental-data"])
+class CompositionSpeciesViewSet(ReadOnlyViewSet):
+    queryset = models.CompositionSpecies.objects.all()
+    serializer_class = CompositionSpeciesSerializer
+    filterset_class = filters.CompositionSpeciesFilter
+    search_fields = ["species_name", "chem_name", "cas", "inchi", "smiles"]
+    ordering_fields = ["amount", "id"]
 
 
 @extend_schema(tags=["experimental-data"])
 class IgnitionDelayViewSet(ReadOnlyViewSet):
     queryset = models.IgnitionDelayDatapoint.objects.all()
     serializer_class = IgnitionDelayDatapointSerializer
+    filterset_class = filters.IgnitionDelayFilter
+    ordering_fields = ["ignition_delay", "id"]
 
 
 @extend_schema(tags=["experimental-data"])
 class LaminarBurningVelocityViewSet(ReadOnlyViewSet):
     queryset = models.LaminarBurningVelocityMeasurementDatapoint.objects.all()
     serializer_class = LaminarBurningVelocityDatapointSerializer
+    filterset_class = filters.LaminarBurningVelocityFilter
+    ordering_fields = ["laminar_burning_velocity", "id"]
 
 
 @extend_schema(tags=["experimental-data"])
 class RateCoefficientViewSet(ReadOnlyViewSet):
     queryset = models.RateCoefficientDatapoint.objects.all()
     serializer_class = RateCoefficientDatapointSerializer
+    filterset_fields = ["measurement_type", "reaction_order"]
+    search_fields = ["reaction", "method"]
+    ordering_fields = ["id"]
 
 
 @extend_schema(tags=["experimental-data"])
 class ConcentrationTimeProfileViewSet(ReadOnlyViewSet):
     queryset = models.ConcentrationTimeProfileMeasurementDatapoint.objects.all()
     serializer_class = ConcentrationTimeProfileDatapointSerializer
+    filterset_fields = ["timeshift_type"]
+    ordering_fields = ["id"]
 
 
 @extend_schema(tags=["experimental-data"])
 class JetStirredReactorViewSet(ReadOnlyViewSet):
     queryset = models.JetStirredReactorMeasurementDatapoint.objects.all()
     serializer_class = JetStirredReactorDatapointSerializer
+    ordering_fields = ["environment_temperature", "id"]
 
 
 @extend_schema(tags=["experimental-data"])
 class OutletConcentrationViewSet(ReadOnlyViewSet):
     queryset = models.OutletConcentrationMeasurementDatapoint.objects.all()
     serializer_class = OutletConcentrationDatapointSerializer
+    ordering_fields = ["residence_time", "id"]
 
 
 @extend_schema(tags=["experimental-data"])
 class BurnerStabilizedFlameViewSet(ReadOnlyViewSet):
     queryset = models.BurnerStabilizedFlameSpeciationMeasurementDatapoint.objects.all()
     serializer_class = BurnerStabilizedFlameDatapointSerializer
+    ordering_fields = ["distance", "id"]

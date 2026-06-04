@@ -11,6 +11,7 @@ from rest_framework import serializers, viewsets
 from rest_framework.permissions import AllowAny
 
 from analysis import models
+from api import filters
 
 
 class ReadOnlyViewSet(viewsets.ReadOnlyModelViewSet):
@@ -78,45 +79,60 @@ class FuelModelCompatibilitySerializer(serializers.ModelSerializer):
 class SimulationRunViewSet(ReadOnlyViewSet):
     queryset = models.SimulationRun.objects.all()
     serializer_class = SimulationRunSerializer
+    filterset_class = filters.SimulationRunFilter
+    search_fields = ["kinetic_model__model_name", "dataset__reference_doi"]
+    ordering_fields = ["created_at", "id"]
 
 
 @extend_schema(tags=["analysis"])
 class SimulationResultViewSet(ReadOnlyViewSet):
     queryset = models.SimulationResult.objects.all()
     serializer_class = SimulationResultSerializer
+    filterset_fields = ["simulation_run"]
+    ordering_fields = ["average_error_function", "id"]
 
 
 @extend_schema(tags=["analysis"])
 class DatapointResultViewSet(ReadOnlyViewSet):
     queryset = models.DatapointResult.objects.all()
     serializer_class = DatapointResultSerializer
+    filterset_class = filters.DatapointResultFilter
+    ordering_fields = ["error_value", "temperature", "id"]
 
 
 @extend_schema(tags=["analysis"])
 class SpeciesMappingViewSet(ReadOnlyViewSet):
     queryset = models.SpeciesMapping.objects.all()
     serializer_class = SpeciesMappingSerializer
+    filterset_fields = ["kinetic_model", "dataset"]
+    ordering_fields = ["id"]
 
 
 @extend_schema(tags=["analysis"])
 class ModelDatasetCoverageViewSet(ReadOnlyViewSet):
     queryset = models.ModelDatasetCoverage.objects.all()
     serializer_class = ModelDatasetCoverageSerializer
+    filterset_class = filters.ModelDatasetCoverageFilter
+    ordering_fields = ["latest_error_function", "last_evaluated_at", "id"]
 
 
 @extend_schema(tags=["analysis"])
 class FuelGroupViewSet(ReadOnlyViewSet):
     queryset = models.FuelGroup.objects.all()
     serializer_class = FuelGroupSerializer
+    ordering_fields = ["id"]
 
 
 @extend_schema(tags=["analysis"])
 class FuelSpeciesViewSet(ReadOnlyViewSet):
     queryset = models.FuelSpecies.objects.all()
     serializer_class = FuelSpeciesSerializer
+    ordering_fields = ["id"]
 
 
 @extend_schema(tags=["analysis"])
 class FuelModelCompatibilityViewSet(ReadOnlyViewSet):
     queryset = models.FuelModelCompatibility.objects.all()
     serializer_class = FuelModelCompatibilitySerializer
+    filterset_fields = ["fuel", "kinetic_model"]
+    ordering_fields = ["id"]

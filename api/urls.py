@@ -26,6 +26,7 @@ router.register(r"experiment-datapoint", chemked_views.ExperimentDatapointViewSe
 router.register(r"apparatus", chemked_views.ApparatusViewSet, basename="api-apparatus")
 router.register(r"common-properties", chemked_views.CommonPropertiesViewSet, basename="api-common-properties")
 router.register(r"composition", chemked_views.CompositionViewSet, basename="api-composition")
+router.register(r"composition-species", chemked_views.CompositionSpeciesViewSet, basename="api-composition-species")
 router.register(r"ignition-delay", chemked_views.IgnitionDelayViewSet, basename="api-ignition-delay")
 router.register(r"laminar-burning-velocity", chemked_views.LaminarBurningVelocityViewSet, basename="api-laminar-burning-velocity")
 router.register(r"rate-coefficient", chemked_views.RateCoefficientViewSet, basename="api-rate-coefficient")
