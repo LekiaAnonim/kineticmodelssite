@@ -14,6 +14,11 @@ from .models import (
     ExperimentDatapoint,
     IgnitionDelayDatapoint,
     LaminarBurningVelocityMeasurementDatapoint,
+    RateCoefficientDatapoint,
+    ConcentrationTimeProfileMeasurementDatapoint,
+    JetStirredReactorMeasurementDatapoint,
+    OutletConcentrationMeasurementDatapoint,
+    BurnerStabilizedFlameSpeciationMeasurementDatapoint,
     CommonProperties,
     Composition,
     CompositionSpecies,
@@ -21,11 +26,14 @@ from .models import (
     FileAuthor,
     ReferenceAuthor,
     ApparatusKind,
+    ApparatusMode,
     ExperimentType,
     CompositionKind,
     IgnitionTarget,
     IgnitionType,
     UncertaintyType,
+    MeasurementType,
+    TimeShiftType,
 )
 
 
@@ -160,10 +168,15 @@ class ExperimentForm(forms.Form):
     experiment_type = forms.ChoiceField(
         choices=ExperimentType.choices,
         initial=ExperimentType.IGNITION_DELAY,
-        widget=forms.Select(attrs={'class': 'form-select'})
+        widget=forms.Select(attrs={'class': 'form-select', 'id': 'id_experiment_type'})
     )
     apparatus_kind = forms.ChoiceField(
         choices=ApparatusKind.choices,
+        widget=forms.Select(attrs={'class': 'form-select'})
+    )
+    apparatus_mode = forms.ChoiceField(
+        choices=[('', '-- Select --')] + list(ApparatusMode.choices),
+        required=False,
         widget=forms.Select(attrs={'class': 'form-select'})
     )
     apparatus_institution = forms.CharField(
@@ -249,12 +262,20 @@ class CommonPropertiesForm(forms.Form):
         initial=CompositionKind.MOLE_FRACTION,
         widget=forms.Select(attrs={'class': 'form-select'})
     )
-    # Common pressure (optional - if same for all datapoints)
-    common_pressure = forms.CharField(
+    # Pressure (optional - if same for all datapoints)
+    pressure = forms.CharField(
         required=False,
         widget=forms.TextInput(attrs={
             'class': 'form-control',
-            'placeholder': 'Common pressure with units (e.g., 1.5 bar) - leave empty if varies'
+            'placeholder': 'Pressure with units (e.g., 1.5 bar) - leave empty if varies'
+        })
+    )
+    # Temperature (optional - if same for all datapoints)
+    temperature = forms.CharField(
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Temperature with units (e.g., 298 K) - leave empty if varies'
         })
     )
     # Pressure rise rate (for shock tubes)
@@ -263,6 +284,39 @@ class CommonPropertiesForm(forms.Form):
         widget=forms.TextInput(attrs={
             'class': 'form-control',
             'placeholder': 'Pressure rise rate (e.g., 0.03 1/ms) - optional'
+        })
+    )
+    # Equivalence ratio (common for all datapoints)
+    equivalence_ratio = forms.FloatField(
+        required=False,
+        widget=forms.NumberInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Equivalence ratio (e.g., 1.0)',
+            'step': 'any'
+        })
+    )
+    # Reactor volume (JSR, flow reactors)
+    reactor_volume = forms.CharField(
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Reactor volume with units (e.g., 85 cm3)'
+        })
+    )
+    # Residence time (JSR, outlet concentration, flow reactors)
+    residence_time = forms.CharField(
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Residence time with units (e.g., 2.0 s)'
+        })
+    )
+    # Flow rate (BSFS experiments)
+    flow_rate = forms.CharField(
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Mass flow rate with units (e.g., 0.04 kg m-2 s-1)'
         })
     )
 
@@ -387,6 +441,193 @@ class LaminarBurningVelocityForm(forms.Form):
 
 
 LaminarBurningVelocityFormSet = formset_factory(LaminarBurningVelocityForm, extra=1, min_num=1, validate_min=True)
+
+
+class RateCoefficientForm(forms.Form):
+    """Form for rate coefficient specific data."""
+    measurement_type = forms.ChoiceField(
+        choices=MeasurementType.choices,
+        initial=MeasurementType.RATE_COEFFICIENT,
+        widget=forms.Select(attrs={'class': 'form-select'})
+    )
+    rate_coefficient = forms.CharField(
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Rate coefficient with units (e.g., 1.2e10 cm3 mol-1 s-1)'
+        })
+    )
+    rate_coefficient_uncertainty = forms.FloatField(
+        required=False,
+        widget=forms.NumberInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Uncertainty value',
+            'step': 'any'
+        })
+    )
+    rate_coefficient_uncertainty_type = forms.ChoiceField(
+        choices=[('', '-- None --')] + list(UncertaintyType.choices),
+        required=False,
+        widget=forms.Select(attrs={'class': 'form-select'})
+    )
+    reaction = forms.CharField(
+        max_length=500,
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Reaction equation (e.g., NO2 + HO2 = HNO2 + O2)'
+        })
+    )
+    reaction_order = forms.IntegerField(
+        required=False,
+        widget=forms.NumberInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Overall reaction order'
+        })
+    )
+    bulk_gas = forms.CharField(
+        max_length=50,
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Bulk gas (e.g., N2, Ar)'
+        })
+    )
+    method = forms.CharField(
+        max_length=255,
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Method (e.g., ab initio CBS-QB3)'
+        })
+    )
+
+
+RateCoefficientFormSet = formset_factory(RateCoefficientForm, extra=1, min_num=1, validate_min=True)
+
+
+class JetStirredReactorForm(forms.Form):
+    """Form for jet stirred reactor specific data per datapoint."""
+    environment_temperature = forms.CharField(
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Environment temperature with units (e.g., 900 K)'
+        })
+    )
+
+
+JetStirredReactorFormSet = formset_factory(JetStirredReactorForm, extra=1, min_num=1, validate_min=True)
+
+
+class OutletConcentrationForm(forms.Form):
+    """Form for outlet concentration measurement specific data per datapoint."""
+    residence_time = forms.CharField(
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Per-datapoint residence time with units (e.g., 2.0 s)'
+        })
+    )
+    volumetric_flow = forms.CharField(
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Volumetric flow at reference state with units (e.g., 1.5e-5 m3/s)'
+        })
+    )
+
+
+OutletConcentrationFormSet = formset_factory(OutletConcentrationForm, extra=1, min_num=1, validate_min=True)
+
+
+class ConcentrationTimeProfileForm(forms.Form):
+    """Form for concentration time profile measurement specific data per datapoint."""
+    tracked_species_name = forms.CharField(
+        max_length=255,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Tracked species name (e.g., OH)'
+        })
+    )
+    quantity_units = forms.CharField(
+        max_length=50,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Concentration units (e.g., ppm, mole fraction)'
+        })
+    )
+    time_units = forms.CharField(
+        max_length=20,
+        initial='s',
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Time units (e.g., s, ms, us)'
+        })
+    )
+    values_text = forms.CharField(
+        widget=forms.Textarea(attrs={
+            'class': 'form-control',
+            'rows': 5,
+            'placeholder': 'Time-value pairs, one per line:\ntime1, value1\ntime2, value2\n...'
+        }),
+        help_text='Enter time-value pairs separated by commas, one pair per line'
+    )
+    uncertainty_type = forms.ChoiceField(
+        choices=[('', '-- None --')] + list(UncertaintyType.choices),
+        required=False,
+        widget=forms.Select(attrs={'class': 'form-select'})
+    )
+    uncertainty_value = forms.FloatField(
+        required=False,
+        widget=forms.NumberInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Uncertainty value',
+            'step': 'any'
+        })
+    )
+    timeshift_target = forms.CharField(
+        max_length=255,
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Time shift reference species (optional)'
+        })
+    )
+    timeshift_type = forms.ChoiceField(
+        choices=[('', '-- None --')] + list(TimeShiftType.choices),
+        required=False,
+        widget=forms.Select(attrs={'class': 'form-select'})
+    )
+    timeshift_amount = forms.CharField(
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Time shift amount with units (e.g., 10 us)'
+        })
+    )
+
+
+ConcentrationTimeProfileFormSet = formset_factory(ConcentrationTimeProfileForm, extra=1, min_num=1, validate_min=True)
+
+
+class BurnerStabilizedFlameSpeciationForm(forms.Form):
+    """Form for burner stabilized flame speciation measurement specific data per datapoint."""
+    distance = forms.CharField(
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Distance from burner with units (e.g., 5.0 mm)'
+        })
+    )
+    flow_rate = forms.CharField(
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Mass flow rate with units (e.g., 0.04 kg m-2 s-1)'
+        })
+    )
+
+
+BurnerStabilizedFlameSpeciationFormSet = formset_factory(BurnerStabilizedFlameSpeciationForm, extra=1, min_num=1, validate_min=True)
 
 
 # =============================================================================

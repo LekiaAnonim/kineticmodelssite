@@ -33,7 +33,7 @@ VALUE_UNIT_RE = re.compile(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*(.*)$")
 COMPOSITION_KINDS = {"mass fraction", "mole fraction", "mole percent"}
 
 
-def parse_value_unit(raw: Any) -> Tuple[Optional[float], str, Dict[str, Any]]:
+def parse_value_unit(raw: Any):
     """
     Parse PyKED value-unit schema (list or string) into value + units + uncertainty.
     Returns: (value, units, extra_fields)
@@ -45,10 +45,23 @@ def parse_value_unit(raw: Any) -> Tuple[Optional[float], str, Dict[str, Any]]:
     units = ""
     extra: Dict[str, Any] = {}
 
+    def parse_uncertainty(value):
+        if value is None:
+            return None, None
+        if isinstance(value, (int, float)):
+            return float(value), None
+        if isinstance(value, str):
+            match = VALUE_UNIT_RE.match(value)
+            if match:
+                return float(match.group(1)), value
+            return None, value
+        return None, None
+
     if isinstance(raw, list):
         if not raw:
             return None, "", {}
         value_part = raw[0]
+        metadata = None
         if isinstance(value_part, (int, float)):
             value = float(value_part)
         elif isinstance(value_part, str):
@@ -58,33 +71,34 @@ def parse_value_unit(raw: Any) -> Tuple[Optional[float], str, Dict[str, Any]]:
                 units = match.group(2).strip()
             else:
                 extra["value_text"] = value_part
-        if len(raw) > 1 and isinstance(raw[1], dict):
-            uncertainty_raw = raw[1].get("uncertainty")
-            upper_raw = raw[1].get("upper-uncertainty")
-            lower_raw = raw[1].get("lower-uncertainty")
+        elif isinstance(value_part, dict):
+            metadata = value_part
 
-            def parse_uncertainty(value):
-                if value is None:
-                    return None, None
-                if isinstance(value, (int, float)):
-                    return float(value), None
-                if isinstance(value, str):
-                    match = VALUE_UNIT_RE.match(value)
-                    if match:
-                        return float(match.group(1)), value
-                    return None, value
-                return None, None
+        if metadata is None and len(raw) > 1 and isinstance(raw[1], dict):
+            metadata = raw[1]
+
+        if metadata is not None:
+            uncertainty_raw = metadata.get("uncertainty")
+            upper_raw = metadata.get("upper-uncertainty")
+            lower_raw = metadata.get("lower-uncertainty")
+            esd_raw = metadata.get("evaluated-standard-deviation")
 
             uncertainty_value, uncertainty_text = parse_uncertainty(uncertainty_raw)
             upper_value, upper_text = parse_uncertainty(upper_raw)
             lower_value, lower_text = parse_uncertainty(lower_raw)
+            esd_value, esd_text = parse_uncertainty(esd_raw)
 
             extra.update({
-                "uncertainty_type": raw[1].get("uncertainty-type", ""),
+                "uncertainty_type": metadata.get("uncertainty-type", ""),
                 "uncertainty": uncertainty_value,
                 "upper_uncertainty": upper_value,
                 "lower_uncertainty": lower_value,
-                "uncertainty_text": uncertainty_text or upper_text or lower_text or "",
+                "uncertainty_text": uncertainty_text or upper_text or lower_text or esd_text or "",
+                "sourcetype": metadata.get("sourcetype", ""),
+                "evaluated_standard_deviation": esd_value,
+                "evaluated_standard_deviation_type": metadata.get("evaluated-standard-deviation-type", ""),
+                "evaluated_standard_deviation_sourcetype": metadata.get("evaluated-standard-deviation-sourcetype", ""),
+                "evaluated_standard_deviation_method": metadata.get("evaluated-standard-deviation-method", ""),
             })
         return value, units, extra
 
@@ -103,7 +117,7 @@ def parse_value_unit(raw: Any) -> Tuple[Optional[float], str, Dict[str, Any]]:
     return None, units, extra
 
 
-def create_value_with_unit(raw: Any) -> Optional[ValueWithUnit]:
+def create_value_with_unit(raw: Any):
     value, units, extra = parse_value_unit(raw)
     if value is None and not extra.get("value_text"):
         return None
@@ -116,6 +130,11 @@ def create_value_with_unit(raw: Any) -> Optional[ValueWithUnit]:
         uncertainty_text=extra.get("uncertainty_text", ""),
         upper_uncertainty=extra.get("upper_uncertainty"),
         lower_uncertainty=extra.get("lower_uncertainty"),
+        sourcetype=extra.get("sourcetype", ""),
+        evaluated_standard_deviation=extra.get("evaluated_standard_deviation"),
+        evaluated_standard_deviation_type=extra.get("evaluated_standard_deviation_type", ""),
+        evaluated_standard_deviation_sourcetype=extra.get("evaluated_standard_deviation_sourcetype", ""),
+        evaluated_standard_deviation_method=extra.get("evaluated_standard_deviation_method", ""),
     )
 
 
@@ -123,11 +142,11 @@ def create_composition(
     composition_data: Optional[Dict[str, Any]],
     reporter: Optional[Callable[[str], None]] = None,
     context: str = "composition",
-) -> Optional[Composition]:
+):
     if not composition_data:
         return None
 
-    def report(message: str) -> None:
+    def report(message: str):
         if reporter:
             reporter(message)
 
@@ -181,11 +200,19 @@ def create_composition(
 
         if amount_list:
             amount_value = float(amount_list[0])
+        amount_esd = None
+        amount_esd_type = ""
+        amount_esd_sourcetype = ""
+        amount_esd_method = ""
         if len(amount_list) > 1 and isinstance(amount_list[1], dict):
             amount_uncertainty_type = amount_list[1].get("uncertainty-type", "")
             amount_uncertainty = amount_list[1].get("uncertainty")
             amount_upper = amount_list[1].get("upper-uncertainty")
             amount_lower = amount_list[1].get("lower-uncertainty")
+            amount_esd = amount_list[1].get("evaluated-standard-deviation")
+            amount_esd_type = amount_list[1].get("evaluated-standard-deviation-type", "")
+            amount_esd_sourcetype = amount_list[1].get("evaluated-standard-deviation-sourcetype", "")
+            amount_esd_method = amount_list[1].get("evaluated-standard-deviation-method", "")
 
         inchi_value = species.get("InChI", "")
         smiles_value = species.get("SMILES", "")
@@ -209,6 +236,10 @@ def create_composition(
             amount_uncertainty_type=amount_uncertainty_type,
             amount_upper_uncertainty=amount_upper,
             amount_lower_uncertainty=amount_lower,
+            amount_evaluated_standard_deviation=amount_esd,
+            amount_evaluated_standard_deviation_type=amount_esd_type,
+            amount_evaluated_standard_deviation_sourcetype=amount_esd_sourcetype,
+            amount_evaluated_standard_deviation_method=amount_esd_method,
         )
 
         thermo = species.get("thermo") or {}
@@ -316,6 +347,18 @@ class Command(BaseCommand):
                     institution=apparatus_data.get("institution", ""),
                     facility=apparatus_data.get("facility", ""),
                 )
+                mode_raw = apparatus_data.get("mode", [])
+                if mode_raw:
+                    if isinstance(mode_raw, list):
+                        mode_str = ", ".join(
+                            m.replace("-", " ") if isinstance(m, str) else str(m)
+                            for m in mode_raw
+                        )
+                    else:
+                        mode_str = str(mode_raw).replace("-", " ")
+                    if apparatus.mode != mode_str:
+                        apparatus.mode = mode_str
+                        apparatus.save(update_fields=["mode"])
                 dataset.apparatus = apparatus
 
             dataset.file_version = data.get("file-version", dataset.file_version)
@@ -334,6 +377,7 @@ class Command(BaseCommand):
             dataset.reference_volume = (data.get("reference") or {}).get("volume")
             dataset.reference_pages = (data.get("reference") or {}).get("pages", "")
             dataset.reference_detail = (data.get("reference") or {}).get("detail", "")
+            dataset.comments = data.get("comments", [])
             dataset.save()
 
             dataset.file_authors.clear()
@@ -361,10 +405,11 @@ class Command(BaseCommand):
                     context=f"{rel_path} common-properties",
                 )
                 ignition_type = common_props.get("ignition-type") or {}
-                if not ignition_type or not ignition_type.get("target") or not ignition_type.get("type"):
-                    self.stderr.write(
-                        f"{rel_path} common-properties: ignition-type is required by schema"
-                    )
+                if experiment_type == ExperimentType.IGNITION_DELAY:
+                    if not ignition_type or not ignition_type.get("target") or not ignition_type.get("type"):
+                        self.stderr.write(
+                            f"{rel_path} common-properties: ignition-type is required by schema"
+                        )
                 common_obj.ignition_target = ignition_type.get("target", "")
                 common_obj.ignition_type = ignition_type.get("type", "")
 
@@ -377,6 +422,35 @@ class Command(BaseCommand):
                 pressure_rise_quantity = create_value_with_unit(pressure_rise_raw)
                 common_obj.pressure_rise_quantity = pressure_rise_quantity
                 common_obj.pressure_rise = pressure_rise_quantity.value if pressure_rise_quantity else None
+
+                temperature_raw = common_props.get("temperature")
+                temperature_quantity = create_value_with_unit(temperature_raw)
+                common_obj.temperature_quantity = temperature_quantity
+                common_obj.temperature = temperature_quantity.value if temperature_quantity else None
+
+                equiv_raw = common_props.get("equivalence-ratio")
+                equiv_quantity = create_value_with_unit(equiv_raw)
+                common_obj.equivalence_ratio_quantity = equiv_quantity
+                common_obj.equivalence_ratio = equiv_quantity.value if equiv_quantity else None
+
+                reactor_vol_raw = common_props.get("reactor-volume")
+                reactor_vol_quantity = create_value_with_unit(reactor_vol_raw)
+                common_obj.reactor_volume_quantity = reactor_vol_quantity
+                if reactor_vol_quantity:
+                    common_obj.reactor_volume = reactor_vol_quantity.value
+                    common_obj.reactor_volume_units = reactor_vol_quantity.units
+
+                residence_time_raw = common_props.get("residence-time")
+                residence_time_quantity = create_value_with_unit(residence_time_raw)
+                common_obj.residence_time_quantity = residence_time_quantity
+                if residence_time_quantity:
+                    common_obj.residence_time = residence_time_quantity.value
+                    common_obj.residence_time_units = residence_time_quantity.units
+
+                flow_rate_raw = common_props.get("flow-rate")
+                flow_rate_quantity = create_value_with_unit(flow_rate_raw)
+                common_obj.flow_rate_quantity = flow_rate_quantity
+                common_obj.flow_rate = flow_rate_quantity.value if flow_rate_quantity else None
 
                 common_obj.save()
 
@@ -400,11 +474,21 @@ class Command(BaseCommand):
                         )
                         continue
 
-                if not temperature_quantity or not pressure_quantity:
+                if not temperature_quantity and not pressure_quantity:
                     self.stderr.write(
-                        f"Skipping datapoint in {rel_path}: missing temperature/pressure"
+                        f"Skipping datapoint in {rel_path}: missing both temperature and pressure"
                     )
                     continue
+
+                # Parse per-datapoint equivalence ratio
+                equiv_raw = datapoint_data.get("equivalence-ratio")
+                equiv_quantity = create_value_with_unit(equiv_raw) if equiv_raw is not None else None
+                equiv_value = equiv_quantity.value if equiv_quantity else (
+                    float(equiv_raw) if isinstance(equiv_raw, (int, float)) else None
+                )
+
+                # Parse per-datapoint residence time
+                res_quantity = create_value_with_unit(datapoint_data.get("residence-time"))
 
                 datapoint = ExperimentDatapoint.objects.create(
                     dataset=dataset,
@@ -412,7 +496,10 @@ class Command(BaseCommand):
                     pressure=pressure_quantity.value if pressure_quantity else 0.0,
                     temperature_quantity=temperature_quantity,
                     pressure_quantity=pressure_quantity,
-                    equivalence_ratio=datapoint_data.get("equivalence-ratio"),
+                    equivalence_ratio=equiv_value,
+                    equivalence_ratio_quantity=equiv_quantity,
+                    residence_time=res_quantity.value if res_quantity else None,
+                    residence_time_units=res_quantity.units if res_quantity else 's',
                     composition=create_composition(
                         datapoint_data.get("composition"),
                         reporter=self.stderr.write,
@@ -420,6 +507,7 @@ class Command(BaseCommand):
                     ),
                 )
 
+                # --- Experiment-type-specific extensions ---
                 if dataset.experiment_type == ExperimentType.IGNITION_DELAY:
                     ignition_payload = {
                         "ignition_delay": None,
@@ -440,6 +528,60 @@ class Command(BaseCommand):
                     if ignition_payload["pressure_rise_quantity"]:
                         ignition_payload["pressure_rise"] = ignition_payload["pressure_rise_quantity"].value
                     create_experiment_extension(datapoint, dataset.experiment_type, ignition_payload)
+
+                elif dataset.experiment_type == ExperimentType.LAMINAR_BURNING_VELOCITY:
+                    lbv_quantity = create_value_with_unit(datapoint_data.get("laminar-burning-velocity"))
+                    lbv_payload = {
+                        "laminar_burning_velocity": lbv_quantity.value if lbv_quantity else None,
+                        "laminar_burning_velocity_quantity": lbv_quantity,
+                    }
+                    pr_quantity = create_value_with_unit(pressure_rise_raw)
+                    if pr_quantity:
+                        lbv_payload["pressure_rise"] = pr_quantity.value
+                        lbv_payload["pressure_rise_quantity"] = pr_quantity
+                    create_experiment_extension(datapoint, dataset.experiment_type, lbv_payload)
+
+                elif dataset.experiment_type == ExperimentType.JSR_MEASUREMENT:
+                    measured_comp = create_composition(
+                        datapoint_data.get("measured-composition"),
+                        reporter=self.stderr.write,
+                        context=f"{rel_path} JSR measured-composition",
+                    )
+                    jsr_payload = {"measured_composition": measured_comp}
+                    create_experiment_extension(datapoint, dataset.experiment_type, jsr_payload)
+
+                elif dataset.experiment_type == ExperimentType.OUTLET_CONCENTRATION:
+                    measured_comp = create_composition(
+                        datapoint_data.get("measured-composition"),
+                        reporter=self.stderr.write,
+                        context=f"{rel_path} outlet measured-composition",
+                    )
+                    ocm_payload = {"measured_composition": measured_comp}
+                    ocm_res_quantity = create_value_with_unit(datapoint_data.get("residence-time"))
+                    if ocm_res_quantity:
+                        ocm_payload["residence_time"] = ocm_res_quantity.value
+                        ocm_payload["residence_time_quantity"] = ocm_res_quantity
+                    create_experiment_extension(datapoint, dataset.experiment_type, ocm_payload)
+
+                elif dataset.experiment_type == ExperimentType.BSFS_MEASUREMENT:
+                    measured_comp = create_composition(
+                        datapoint_data.get("measured-composition"),
+                        reporter=self.stderr.write,
+                        context=f"{rel_path} BSFS measured-composition",
+                    )
+                    distance_quantity = create_value_with_unit(datapoint_data.get("distance"))
+                    flow_rate_quantity = create_value_with_unit(datapoint_data.get("flow-rate"))
+                    bsfs_payload = {
+                        "measured_composition": measured_comp,
+                        "distance": distance_quantity.value if distance_quantity else None,
+                        "distance_quantity": distance_quantity,
+                        "flow_rate": flow_rate_quantity.value if flow_rate_quantity else None,
+                        "flow_rate_quantity": flow_rate_quantity,
+                    }
+                    create_experiment_extension(datapoint, dataset.experiment_type, bsfs_payload)
+
+                elif dataset.experiment_type == ExperimentType.CONCENTRATION_TIME_PROFILE:
+                    create_experiment_extension(datapoint, dataset.experiment_type, {})
 
                 rcm_data = datapoint_data.get("rcm-data") or {}
                 if rcm_data:

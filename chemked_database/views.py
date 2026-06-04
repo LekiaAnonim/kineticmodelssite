@@ -27,6 +27,8 @@ from django.views import View
 from django.views.generic import TemplateView, DetailView, ListView, FormView
 from django.views.generic.edit import CreateView
 from django_filters.views import FilterView
+from .github_pr_service import verify_orcid, OrcidVerificationError
+import requests as http_requests
 
 from .models import (
     ExperimentDataset,
@@ -36,8 +38,12 @@ from .models import (
     CompositionSpecies,
     IgnitionDelayDatapoint,
     LaminarBurningVelocityMeasurementDatapoint,
-    MeasurementType,
     RateCoefficientDatapoint,
+    ConcentrationTimeProfileMeasurementDatapoint,
+    JetStirredReactorMeasurementDatapoint,
+    OutletConcentrationMeasurementDatapoint,
+    BurnerStabilizedFlameSpeciationMeasurementDatapoint,
+    MeasurementType,
     Apparatus,
     FileAuthor,
     ReferenceAuthor,
@@ -60,6 +66,11 @@ from .forms import (
     DatapointFormSet,
     IgnitionDelayFormSet,
     LaminarBurningVelocityFormSet,
+    RateCoefficientFormSet,
+    JetStirredReactorFormSet,
+    OutletConcentrationFormSet,
+    ConcentrationTimeProfileFormSet,
+    BurnerStabilizedFlameSpeciationFormSet,
     ChemKEDUploadForm,
     ExportOptionsForm,
 )
@@ -99,7 +110,6 @@ def verify_orcid_view(request):
     GET /chemked/verify-orcid/?orcid=0000-0000-0000-000X
     Returns JSON: {verified, name, orcid, error}
     """
-    from .github_pr_service import verify_orcid, OrcidVerificationError
 
     orcid = request.GET.get('orcid', '').strip()
     if not orcid:
@@ -118,8 +128,6 @@ def verify_github_username_view(request):
     GET /chemked/verify-github/?username=octocat
     Returns JSON: {valid, username, name, avatar_url, error}
     """
-    import re
-    import requests as http_requests
 
     username = request.GET.get('username', '').strip().lstrip('@')
     if not username:
@@ -619,6 +627,30 @@ class DatasetCreateWizardView(TemplateView):
             initial=session_data.get('ignition_delays', []),
             prefix='ignition_delays'
         )
+        context['lbv_formset'] = LaminarBurningVelocityFormSet(
+            initial=session_data.get('lbv_data', []),
+            prefix='lbv'
+        )
+        context['rate_coefficient_formset'] = RateCoefficientFormSet(
+            initial=session_data.get('rate_coefficients', []),
+            prefix='rate_coefficients'
+        )
+        context['jsr_formset'] = JetStirredReactorFormSet(
+            initial=session_data.get('jsr_data', []),
+            prefix='jsr'
+        )
+        context['outlet_concentration_formset'] = OutletConcentrationFormSet(
+            initial=session_data.get('outlet_concentration_data', []),
+            prefix='outlet_conc'
+        )
+        context['ctp_formset'] = ConcentrationTimeProfileFormSet(
+            initial=session_data.get('ctp_data', []),
+            prefix='ctp'
+        )
+        context['bsfs_formset'] = BurnerStabilizedFlameSpeciationFormSet(
+            initial=session_data.get('bsfs_data', []),
+            prefix='bsfs'
+        )
         
         # Active tab (default to first)
         context['active_tab'] = self.request.GET.get('tab', 'metadata')
@@ -640,6 +672,12 @@ class DatasetCreateWizardView(TemplateView):
         composition_species_formset = CompositionSpeciesFormSet(request.POST, prefix='species')
         datapoint_formset = DatapointFormSet(request.POST, prefix='datapoints')
         ignition_delay_formset = IgnitionDelayFormSet(request.POST, prefix='ignition_delays')
+        lbv_formset = LaminarBurningVelocityFormSet(request.POST, prefix='lbv')
+        rate_coefficient_formset = RateCoefficientFormSet(request.POST, prefix='rate_coefficients')
+        jsr_formset = JetStirredReactorFormSet(request.POST, prefix='jsr')
+        outlet_concentration_formset = OutletConcentrationFormSet(request.POST, prefix='outlet_conc')
+        ctp_formset = ConcentrationTimeProfileFormSet(request.POST, prefix='ctp')
+        bsfs_formset = BurnerStabilizedFlameSpeciationFormSet(request.POST, prefix='bsfs')
         
         # Collect data into session
         wizard_data = {
@@ -653,6 +691,12 @@ class DatasetCreateWizardView(TemplateView):
             'composition_species': [f.cleaned_data for f in composition_species_formset if f.is_valid() and f.cleaned_data],
             'datapoints': [f.cleaned_data for f in datapoint_formset if f.is_valid() and f.cleaned_data],
             'ignition_delays': [f.cleaned_data for f in ignition_delay_formset if f.is_valid() and f.cleaned_data],
+            'lbv_data': [f.cleaned_data for f in lbv_formset if f.is_valid() and f.cleaned_data],
+            'rate_coefficients': [f.cleaned_data for f in rate_coefficient_formset if f.is_valid() and f.cleaned_data],
+            'jsr_data': [f.cleaned_data for f in jsr_formset if f.is_valid() and f.cleaned_data],
+            'outlet_concentration_data': [f.cleaned_data for f in outlet_concentration_formset if f.is_valid() and f.cleaned_data],
+            'ctp_data': [f.cleaned_data for f in ctp_formset if f.is_valid() and f.cleaned_data],
+            'bsfs_data': [f.cleaned_data for f in bsfs_formset if f.is_valid() and f.cleaned_data],
         }
         request.session['chemked_wizard'] = wizard_data
         
@@ -680,6 +724,18 @@ class DatasetCreateWizardView(TemplateView):
             experiment_type = experiment_form.cleaned_data.get('experiment_type', '')
             if experiment_type == ExperimentType.IGNITION_DELAY:
                 all_valid = all_valid and ignition_delay_formset.is_valid()
+            elif experiment_type == ExperimentType.LAMINAR_BURNING_VELOCITY:
+                all_valid = all_valid and lbv_formset.is_valid()
+            elif experiment_type == ExperimentType.RATE_COEFFICIENT:
+                all_valid = all_valid and rate_coefficient_formset.is_valid()
+            elif experiment_type == ExperimentType.JSR_MEASUREMENT:
+                all_valid = all_valid and jsr_formset.is_valid()
+            elif experiment_type == ExperimentType.OUTLET_CONCENTRATION:
+                all_valid = all_valid and outlet_concentration_formset.is_valid()
+            elif experiment_type == ExperimentType.CONCENTRATION_TIME_PROFILE:
+                all_valid = all_valid and ctp_formset.is_valid()
+            elif experiment_type == ExperimentType.BSFS_MEASUREMENT:
+                all_valid = all_valid and bsfs_formset.is_valid()
             
             if all_valid:
                 try:
@@ -707,6 +763,12 @@ class DatasetCreateWizardView(TemplateView):
             'composition_species_formset': composition_species_formset,
             'datapoint_formset': datapoint_formset,
             'ignition_delay_formset': ignition_delay_formset,
+            'lbv_formset': lbv_formset,
+            'rate_coefficient_formset': rate_coefficient_formset,
+            'jsr_formset': jsr_formset,
+            'outlet_concentration_formset': outlet_concentration_formset,
+            'ctp_formset': ctp_formset,
+            'bsfs_formset': bsfs_formset,
         })
         return self.render_to_response(context)
     
@@ -841,29 +903,115 @@ class DatasetCreateWizardView(TemplateView):
         
         # Create common properties
         ignition_data = data.get('ignition_info', {})
-        common_pressure = None
-        common_pressure_quantity = None
-        if common_props_data.get('common_pressure'):
-            val, unit = self._parse_value_with_unit(common_props_data['common_pressure'])
+        pressure = None
+        pressure_quantity = None
+        if common_props_data.get('pressure'):
+            val, unit = self._parse_value_with_unit(common_props_data['pressure'])
             if val is not None:
                 si_val, si_unit = self._convert_to_si(val, unit)
-                common_pressure = si_val
-                common_pressure_quantity = ValueWithUnit.objects.create(
+                pressure = si_val
+                pressure_quantity = ValueWithUnit.objects.create(
                     value=val, units=unit
                 )
+        
+        temperature = None
+        temperature_quantity = None
+        if common_props_data.get('temperature'):
+            val, unit = self._parse_value_with_unit(common_props_data['temperature'])
+            if val is not None:
+                si_val, si_unit = self._convert_to_si(val, unit)
+                temperature = si_val
+                temperature_quantity = ValueWithUnit.objects.create(
+                    value=val, units=unit
+                )
+        
+        pressure_rise = None
+        pressure_rise_quantity = None
+        if common_props_data.get('pressure_rise'):
+            val, unit = self._parse_value_with_unit(common_props_data['pressure_rise'])
+            if val is not None:
+                si_val, si_unit = self._convert_to_si(val, unit)
+                pressure_rise = si_val
+                pressure_rise_quantity = ValueWithUnit.objects.create(
+                    value=val, units=unit
+                )
+        
+        reactor_volume = None
+        reactor_volume_quantity = None
+        reactor_volume_units = 'm3'
+        if common_props_data.get('reactor_volume'):
+            val, unit = self._parse_value_with_unit(common_props_data['reactor_volume'])
+            if val is not None:
+                si_val, si_unit = self._convert_to_si(val, unit)
+                reactor_volume = si_val
+                reactor_volume_units = si_unit
+                reactor_volume_quantity = ValueWithUnit.objects.create(
+                    value=val, units=unit
+                )
+        
+        residence_time = None
+        residence_time_quantity = None
+        residence_time_units = 's'
+        if common_props_data.get('residence_time'):
+            val, unit = self._parse_value_with_unit(common_props_data['residence_time'])
+            if val is not None:
+                si_val, si_unit = self._convert_to_si(val, unit)
+                residence_time = si_val
+                residence_time_units = si_unit
+                residence_time_quantity = ValueWithUnit.objects.create(
+                    value=val, units=unit
+                )
+        
+        flow_rate = None
+        flow_rate_quantity = None
+        if common_props_data.get('flow_rate'):
+            val, unit = self._parse_value_with_unit(common_props_data['flow_rate'])
+            if val is not None:
+                si_val, si_unit = self._convert_to_si(val, unit)
+                flow_rate = si_val
+                flow_rate_quantity = ValueWithUnit.objects.create(
+                    value=val, units=unit
+                )
+        
+        equivalence_ratio = _unwrap_equiv(common_props_data.get('equivalence_ratio'))
+        equivalence_ratio_quantity = None
+        if equivalence_ratio is not None:
+            equivalence_ratio_quantity = ValueWithUnit.objects.create(
+                value=equivalence_ratio, units='dimensionless'
+            )
         
         common_properties = CommonProperties.objects.create(
             dataset=dataset,
             composition=common_composition,
             ignition_target=_normalize_ignition_target(ignition_data.get('ignition_target', '')),
             ignition_type=ignition_data.get('ignition_type', ''),
-            pressure=common_pressure,
-            pressure_quantity=common_pressure_quantity,
+            pressure=pressure,
+            pressure_quantity=pressure_quantity,
+            pressure_rise=pressure_rise,
+            pressure_rise_quantity=pressure_rise_quantity,
+            temperature=temperature,
+            temperature_quantity=temperature_quantity,
+            reactor_volume=reactor_volume,
+            reactor_volume_units=reactor_volume_units,
+            reactor_volume_quantity=reactor_volume_quantity,
+            residence_time=residence_time,
+            residence_time_units=residence_time_units,
+            residence_time_quantity=residence_time_quantity,
+            flow_rate=flow_rate,
+            flow_rate_quantity=flow_rate_quantity,
+            equivalence_ratio=equivalence_ratio,
+            equivalence_ratio_quantity=equivalence_ratio_quantity,
         )
         
         # Create datapoints
         datapoints_data = data.get('datapoints', [])
         ignition_delays_data = data.get('ignition_delays', [])
+        lbv_data = data.get('lbv_data', [])
+        rate_coefficients_data = data.get('rate_coefficients', [])
+        jsr_data = data.get('jsr_data', [])
+        outlet_concentration_data = data.get('outlet_concentration_data', [])
+        ctp_data = data.get('ctp_data', [])
+        bsfs_data = data.get('bsfs_data', [])
         
         for idx, dp_data in enumerate(datapoints_data):
             # Parse temperature
@@ -897,12 +1045,8 @@ class DatasetCreateWizardView(TemplateView):
                 dataset=dataset,
                 temperature=si_temp or 0,
                 temperature_quantity=temp_quantity,
-                temperature_uncertainty=dp_data.get('temperature_uncertainty'),
-                temperature_uncertainty_type=dp_data.get('temperature_uncertainty_type', ''),
                 pressure=si_press or 0,
                 pressure_quantity=press_quantity,
-                pressure_uncertainty=dp_data.get('pressure_uncertainty'),
-                pressure_uncertainty_type=dp_data.get('pressure_uncertainty_type', ''),
                 equivalence_ratio=_unwrap_equiv(dp_data.get('equivalence_ratio')),
                 composition=common_composition,  # Use common composition
             )
@@ -928,10 +1072,173 @@ class DatasetCreateWizardView(TemplateView):
                     datapoint=datapoint,
                     ignition_delay=si_ign,
                     ignition_delay_quantity=ign_quantity,
-                    ignition_delay_uncertainty=ign_data.get('ignition_delay_uncertainty'),
-                    ignition_delay_uncertainty_type=ign_data.get('ignition_delay_uncertainty_type', ''),
                     ignition_target=_normalize_ignition_target(ign_data.get('ignition_target_override', '')),
                     ignition_type=ign_data.get('ignition_type_override', ''),
+                )
+            
+            elif dataset.experiment_type == ExperimentType.LAMINAR_BURNING_VELOCITY and idx < len(lbv_data):
+                lbv = lbv_data[idx]
+                
+                lbv_val, lbv_unit = self._parse_value_with_unit(lbv.get('laminar_burning_velocity', ''))
+                si_lbv, _ = self._convert_to_si(lbv_val, lbv_unit) if lbv_val else (None, None)
+                
+                lbv_quantity = None
+                if lbv_val is not None:
+                    lbv_quantity = ValueWithUnit.objects.create(
+                        value=lbv_val,
+                        units=lbv_unit,
+                        uncertainty_type=lbv.get('laminar_burning_velocity_uncertainty_type', ''),
+                        uncertainty=lbv.get('laminar_burning_velocity_uncertainty'),
+                    )
+                
+                LaminarBurningVelocityMeasurementDatapoint.objects.create(
+                    datapoint=datapoint,
+                    laminar_burning_velocity=si_lbv,
+                    laminar_burning_velocity_quantity=lbv_quantity,
+                )
+            
+            elif dataset.experiment_type == ExperimentType.RATE_COEFFICIENT and idx < len(rate_coefficients_data):
+                rc_data = rate_coefficients_data[idx]
+                
+                rc_val, rc_unit = self._parse_value_with_unit(rc_data.get('rate_coefficient', ''))
+                
+                rc_quantity = None
+                if rc_val is not None:
+                    rc_quantity = ValueWithUnit.objects.create(
+                        value=rc_val,
+                        units=rc_unit,
+                        uncertainty_type=rc_data.get('rate_coefficient_uncertainty_type', ''),
+                        uncertainty=rc_data.get('rate_coefficient_uncertainty'),
+                    )
+                
+                RateCoefficientDatapoint.objects.create(
+                    datapoint=datapoint,
+                    measurement_type=rc_data.get('measurement_type', MeasurementType.RATE_COEFFICIENT),
+                    rate_coefficient=rc_val,
+                    rate_coefficient_units=rc_unit or 'cm3 mol-1 s-1',
+                    rate_coefficient_quantity=rc_quantity,
+                    reaction=rc_data.get('reaction', ''),
+                    reaction_order=rc_data.get('reaction_order'),
+                    bulk_gas=rc_data.get('bulk_gas', ''),
+                    method=rc_data.get('method', ''),
+                )
+            
+            elif dataset.experiment_type == ExperimentType.JSR_MEASUREMENT and idx < len(jsr_data):
+                jsr = jsr_data[idx]
+                
+                env_temp = None
+                env_temp_quantity = None
+                if jsr.get('environment_temperature'):
+                    env_val, env_unit = self._parse_value_with_unit(jsr['environment_temperature'])
+                    if env_val is not None:
+                        env_temp, _ = self._convert_to_si(env_val, env_unit)
+                        env_temp_quantity = ValueWithUnit.objects.create(
+                            value=env_val, units=env_unit
+                        )
+                
+                JetStirredReactorMeasurementDatapoint.objects.create(
+                    datapoint=datapoint,
+                    environment_temperature=env_temp,
+                    environment_temperature_quantity=env_temp_quantity,
+                )
+            
+            elif dataset.experiment_type == ExperimentType.OUTLET_CONCENTRATION and idx < len(outlet_concentration_data):
+                oc_data = outlet_concentration_data[idx]
+                
+                oc_res_time = None
+                oc_res_time_quantity = None
+                if oc_data.get('residence_time'):
+                    rt_val, rt_unit = self._parse_value_with_unit(oc_data['residence_time'])
+                    if rt_val is not None:
+                        oc_res_time, _ = self._convert_to_si(rt_val, rt_unit)
+                        oc_res_time_quantity = ValueWithUnit.objects.create(
+                            value=rt_val, units=rt_unit
+                        )
+                
+                oc_vol_flow = None
+                oc_vol_flow_quantity = None
+                if oc_data.get('volumetric_flow'):
+                    vf_val, vf_unit = self._parse_value_with_unit(oc_data['volumetric_flow'])
+                    if vf_val is not None:
+                        oc_vol_flow, _ = self._convert_to_si(vf_val, vf_unit)
+                        oc_vol_flow_quantity = ValueWithUnit.objects.create(
+                            value=vf_val, units=vf_unit
+                        )
+                
+                OutletConcentrationMeasurementDatapoint.objects.create(
+                    datapoint=datapoint,
+                    residence_time=oc_res_time,
+                    residence_time_quantity=oc_res_time_quantity,
+                    volumetric_flow_in_reference_state=oc_vol_flow,
+                    volumetric_flow_quantity=oc_vol_flow_quantity,
+                )
+            
+            elif dataset.experiment_type == ExperimentType.CONCENTRATION_TIME_PROFILE and idx < len(ctp_data):
+                ctp = ctp_data[idx]
+                
+                # Parse values_text into list of [time, value] pairs
+                values = []
+                values_text = ctp.get('values_text', '')
+                for line in values_text.strip().splitlines():
+                    parts = [p.strip() for p in line.split(',')]
+                    if len(parts) >= 2:
+                        try:
+                            values.append([float(parts[0]), float(parts[1])])
+                        except ValueError:
+                            continue
+                
+                timeshift_amount_val = None
+                timeshift_amount_quantity = None
+                if ctp.get('timeshift_amount'):
+                    ts_val, ts_unit = self._parse_value_with_unit(ctp['timeshift_amount'])
+                    if ts_val is not None:
+                        timeshift_amount_val = ts_val
+                        timeshift_amount_quantity = ValueWithUnit.objects.create(
+                            value=ts_val, units=ts_unit
+                        )
+                
+                ConcentrationTimeProfileMeasurementDatapoint.objects.create(
+                    datapoint=datapoint,
+                    time_units=ctp.get('time_units', 's'),
+                    quantity_units=ctp.get('quantity_units', ''),
+                    values=values,
+                    uncertainty_type=ctp.get('uncertainty_type', ''),
+                    uncertainty_value=ctp.get('uncertainty_value'),
+                    timeshift_target=ctp.get('timeshift_target', ''),
+                    timeshift_type=ctp.get('timeshift_type', ''),
+                    timeshift_amount=timeshift_amount_val,
+                    timeshift_amount_quantity=timeshift_amount_quantity,
+                )
+            
+            elif dataset.experiment_type == ExperimentType.BSFS_MEASUREMENT and idx < len(bsfs_data):
+                bsfs = bsfs_data[idx]
+                
+                dist_val = None
+                dist_quantity = None
+                if bsfs.get('distance'):
+                    d_val, d_unit = self._parse_value_with_unit(bsfs['distance'])
+                    if d_val is not None:
+                        dist_val, _ = self._convert_to_si(d_val, d_unit)
+                        dist_quantity = ValueWithUnit.objects.create(
+                            value=d_val, units=d_unit
+                        )
+                
+                bsfs_flow_rate = None
+                bsfs_flow_rate_quantity = None
+                if bsfs.get('flow_rate'):
+                    fr_val, fr_unit = self._parse_value_with_unit(bsfs['flow_rate'])
+                    if fr_val is not None:
+                        bsfs_flow_rate, _ = self._convert_to_si(fr_val, fr_unit)
+                        bsfs_flow_rate_quantity = ValueWithUnit.objects.create(
+                            value=fr_val, units=fr_unit
+                        )
+                
+                BurnerStabilizedFlameSpeciationMeasurementDatapoint.objects.create(
+                    datapoint=datapoint,
+                    distance=dist_val,
+                    distance_quantity=dist_quantity,
+                    flow_rate=bsfs_flow_rate,
+                    flow_rate_quantity=bsfs_flow_rate_quantity,
                 )
         
         return dataset
@@ -980,6 +1287,14 @@ class DatasetCreateWizardView(TemplateView):
         species_data = data.get('composition_species', [])
         datapoints_data = data.get('datapoints', [])
         ignition_delays = data.get('ignition_delays', [])
+        lbv_data = data.get('lbv_data', [])
+        rate_coefficients = data.get('rate_coefficients', [])
+        jsr_data = data.get('jsr_data', [])
+        outlet_concentration_data = data.get('outlet_concentration_data', [])
+        ctp_data = data.get('ctp_data', [])
+        bsfs_data = data.get('bsfs_data', [])
+        
+        experiment_type = exp_data.get('experiment_type', 'ignition delay')
         
         # File authors
         file_authors = []
@@ -1011,12 +1326,33 @@ class DatasetCreateWizardView(TemplateView):
                 species_entry['InChI'] = sp['inchi']
             composition['species'].append(species_entry)
         
-        # Build ignition type
+        # Build ignition type (for ignition delay only)
         ignition_type = {}
         if ignition_info.get('ignition_target'):
             ignition_type['target'] = ignition_info['ignition_target']
         if ignition_info.get('ignition_type'):
             ignition_type['type'] = ignition_info['ignition_type']
+        
+        # Build common-properties
+        common_properties_dict = {
+            'composition': composition,
+        }
+        if ignition_type:
+            common_properties_dict['ignition-type'] = ignition_type
+        if common_props.get('pressure'):
+            common_properties_dict['pressure'] = [common_props['pressure']]
+        if common_props.get('temperature'):
+            common_properties_dict['temperature'] = [common_props['temperature']]
+        if common_props.get('pressure_rise'):
+            common_properties_dict['pressure-rise'] = [common_props['pressure_rise']]
+        if common_props.get('equivalence_ratio'):
+            common_properties_dict['equivalence-ratio'] = common_props['equivalence_ratio']
+        if common_props.get('reactor_volume'):
+            common_properties_dict['reactor-volume'] = [common_props['reactor_volume']]
+        if common_props.get('residence_time'):
+            common_properties_dict['residence-time'] = [common_props['residence_time']]
+        if common_props.get('flow_rate'):
+            common_properties_dict['flow-rate'] = [common_props['flow_rate']]
         
         # Build datapoints
         datapoints = []
@@ -1052,8 +1388,8 @@ class DatasetCreateWizardView(TemplateView):
             if ignition_type:
                 dp_dict['ignition-type'] = ignition_type
             
-            # Ignition delay (if applicable)
-            if idx < len(ignition_delays):
+            # Experiment-type-specific fields
+            if experiment_type == ExperimentType.IGNITION_DELAY and idx < len(ignition_delays):
                 ign = ignition_delays[idx]
                 if ign.get('ignition_delay'):
                     dp_dict['ignition-delay'] = [ign['ignition_delay']]
@@ -1063,7 +1399,74 @@ class DatasetCreateWizardView(TemplateView):
                             'uncertainty': ign['ignition_delay_uncertainty']
                         })
             
+            elif experiment_type == ExperimentType.LAMINAR_BURNING_VELOCITY and idx < len(lbv_data):
+                lbv = lbv_data[idx]
+                if lbv.get('laminar_burning_velocity'):
+                    dp_dict['laminar-burning-velocity'] = [lbv['laminar_burning_velocity']]
+                    if lbv.get('laminar_burning_velocity_uncertainty') and lbv.get('laminar_burning_velocity_uncertainty_type'):
+                        dp_dict['laminar-burning-velocity'].append({
+                            'uncertainty-type': lbv['laminar_burning_velocity_uncertainty_type'],
+                            'uncertainty': lbv['laminar_burning_velocity_uncertainty']
+                        })
+            
+            elif experiment_type == ExperimentType.RATE_COEFFICIENT and idx < len(rate_coefficients):
+                rc = rate_coefficients[idx]
+                if rc.get('rate_coefficient'):
+                    dp_dict['rate-coefficient'] = [rc['rate_coefficient']]
+                    if rc.get('rate_coefficient_uncertainty') and rc.get('rate_coefficient_uncertainty_type'):
+                        dp_dict['rate-coefficient'].append({
+                            'uncertainty-type': rc['rate_coefficient_uncertainty_type'],
+                            'uncertainty': rc['rate_coefficient_uncertainty']
+                        })
+                if rc.get('reaction'):
+                    dp_dict['reaction'] = rc['reaction']
+                if rc.get('reaction_order'):
+                    dp_dict['reaction-order'] = rc['reaction_order']
+                if rc.get('bulk_gas'):
+                    dp_dict['bulk-gas'] = rc['bulk_gas']
+                if rc.get('method'):
+                    dp_dict['method'] = rc['method']
+            
+            elif experiment_type == ExperimentType.JSR_MEASUREMENT and idx < len(jsr_data):
+                jsr = jsr_data[idx]
+                if jsr.get('environment_temperature'):
+                    dp_dict['environment-temperature'] = [jsr['environment_temperature']]
+            
+            elif experiment_type == ExperimentType.OUTLET_CONCENTRATION and idx < len(outlet_concentration_data):
+                oc = outlet_concentration_data[idx]
+                if oc.get('residence_time'):
+                    dp_dict['residence-time'] = [oc['residence_time']]
+                if oc.get('volumetric_flow'):
+                    dp_dict['volumetric-flow-in-reference-state'] = [oc['volumetric_flow']]
+            
+            elif experiment_type == ExperimentType.CONCENTRATION_TIME_PROFILE and idx < len(ctp_data):
+                ctp = ctp_data[idx]
+                if ctp.get('tracked_species_name'):
+                    dp_dict['tracked-species'] = ctp['tracked_species_name']
+                if ctp.get('quantity_units'):
+                    dp_dict['quantity-units'] = ctp['quantity_units']
+                if ctp.get('time_units'):
+                    dp_dict['time-units'] = ctp['time_units']
+            
+            elif experiment_type == ExperimentType.BSFS_MEASUREMENT and idx < len(bsfs_data):
+                bsfs = bsfs_data[idx]
+                if bsfs.get('distance'):
+                    dp_dict['distance'] = [bsfs['distance']]
+                if bsfs.get('flow_rate'):
+                    dp_dict['flow-rate'] = [bsfs['flow_rate']]
+            
             datapoints.append(dp_dict)
+        
+        # Build apparatus dict
+        apparatus_dict = {
+            'kind': exp_data.get('apparatus_kind', 'shock tube'),
+        }
+        if exp_data.get('apparatus_mode'):
+            apparatus_dict['mode'] = exp_data['apparatus_mode']
+        if exp_data.get('apparatus_institution'):
+            apparatus_dict['institution'] = exp_data['apparatus_institution']
+        if exp_data.get('apparatus_facility'):
+            apparatus_dict['facility'] = exp_data['apparatus_facility']
         
         # Build final dictionary
         chemked_dict = {
@@ -1079,16 +1482,9 @@ class DatasetCreateWizardView(TemplateView):
                 'pages': ref_data.get('pages', ''),
                 'detail': ref_data.get('detail', ''),
             },
-            'experiment-type': exp_data.get('experiment_type', 'ignition delay'),
-            'apparatus': {
-                'kind': exp_data.get('apparatus_kind', 'shock tube'),
-                'institution': exp_data.get('apparatus_institution', ''),
-                'facility': exp_data.get('apparatus_facility', ''),
-            },
-            'common-properties': {
-                'composition': composition,
-                'ignition-type': ignition_type,
-            },
+            'experiment-type': experiment_type,
+            'apparatus': apparatus_dict,
+            'common-properties': common_properties_dict,
             'datapoints': datapoints,
         }
         
@@ -1097,13 +1493,6 @@ class DatasetCreateWizardView(TemplateView):
             del chemked_dict['reference']['volume']
         
         return chemked_dict
-
-
-# ── ChemKED YAML formatting ─────────────────────────────────────────────
-# Reuse the yaml_dump() and _OrderedDumper from batch_convert which already
-# preserves dict insertion order and writes the ``---`` / ``...`` markers.
-# convert_file() builds dicts with keys in standard ChemKED order, so no
-# explicit re-ordering is needed.
 
 
 def format_chemked_yaml(chemked_dict):
@@ -2788,6 +3177,61 @@ class DatasetUploadView(FormView):
     def _import_experiment_datapoints(self, raw, dataset, data, _parse_chemked_value):
         """Import datapoints for experiment files from ChemKED dict."""
         common = raw.get('common-properties') or {}
+
+        def _extract_meta_value(value):
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                match = re.match(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", value)
+                return float(match.group(1)) if match else None
+            return None
+
+        def _normalize_quantity_meta(meta):
+            if not meta:
+                return {}
+
+            return {
+                'uncertainty_type': meta.get('uncertainty-type', ''),
+                'uncertainty': _extract_meta_value(meta.get('uncertainty')),
+                'upper_uncertainty': _extract_meta_value(meta.get('upper-uncertainty')),
+                'lower_uncertainty': _extract_meta_value(meta.get('lower-uncertainty')),
+                'evaluated_standard_deviation': _extract_meta_value(meta.get('evaluated-standard-deviation')),
+                'evaluated_standard_deviation_type': meta.get('evaluated-standard-deviation-type', ''),
+                'evaluated_standard_deviation_sourcetype': meta.get('evaluated-standard-deviation-sourcetype', ''),
+                'evaluated_standard_deviation_method': meta.get('evaluated-standard-deviation-method', ''),
+            }
+
+        def _merge_uncertainty_meta(meta, uncertainty, upper, lower, unc_type):
+            merged = dict(meta or {})
+            if uncertainty is not None and 'uncertainty' not in merged:
+                merged['uncertainty'] = uncertainty
+            if upper is not None and 'upper-uncertainty' not in merged:
+                merged['upper-uncertainty'] = upper
+            if lower is not None and 'lower-uncertainty' not in merged:
+                merged['lower-uncertainty'] = lower
+            if unc_type and 'uncertainty-type' not in merged:
+                merged['uncertainty-type'] = unc_type
+            return merged
+
+        def _create_quantity(value, units, meta=None):
+            normalized = _normalize_quantity_meta(meta)
+            if value is None and not normalized:
+                return None
+
+            return ValueWithUnit.objects.create(
+                value=value,
+                units=units or '',
+                uncertainty_type=normalized.get('uncertainty_type', ''),
+                uncertainty=normalized.get('uncertainty'),
+                upper_uncertainty=normalized.get('upper_uncertainty'),
+                lower_uncertainty=normalized.get('lower_uncertainty'),
+                evaluated_standard_deviation=normalized.get('evaluated_standard_deviation'),
+                evaluated_standard_deviation_type=normalized.get('evaluated_standard_deviation_type', ''),
+                evaluated_standard_deviation_sourcetype=normalized.get('evaluated_standard_deviation_sourcetype', ''),
+                evaluated_standard_deviation_method=normalized.get('evaluated_standard_deviation_method', ''),
+            )
         
         # Import initial composition
         common_composition = self._import_composition_from_chemked(common.get('composition'))
@@ -2798,6 +3242,7 @@ class DatasetUploadView(FormView):
         common_equiv_ratio = None
         common_volume = None
         common_residence_time = None
+        common_quantities = {}
         
         for key in ('pressure', 'temperature', 'equivalence-ratio', 'reactor-volume',
                      'residence-time', 'volume'):
@@ -2807,6 +3252,7 @@ class DatasetUploadView(FormView):
             val, units, _unc = _parse_chemked_value(val_raw)
             if val is None:
                 continue
+            common_quantities[key] = _create_quantity(val, units, _unc)
             if key == 'pressure':
                 common_pressure = self._convert_to_si(val, units, 'pressure')
             elif key == 'temperature':
@@ -2853,12 +3299,18 @@ class DatasetUploadView(FormView):
             CommonProperties.objects.create(
                 dataset=dataset,
                 pressure=common_pressure,
+                pressure_quantity=common_quantities.get('pressure'),
                 composition=common_composition,
                 equivalence_ratio=common_equiv_ratio,
+                equivalence_ratio_quantity=common_quantities.get('equivalence-ratio'),
                 reactor_volume=common_volume,
-                reactor_volume_units='m3' if common_volume else '',
+                reactor_volume_units=(common_quantities.get('reactor-volume') or common_quantities.get('volume')).units if (common_quantities.get('reactor-volume') or common_quantities.get('volume')) else ('m3' if common_volume else ''),
+                reactor_volume_quantity=common_quantities.get('reactor-volume') or common_quantities.get('volume'),
                 residence_time=common_residence_time,
-                residence_time_units='s' if common_residence_time else '',
+                residence_time_units=common_quantities.get('residence-time').units if common_quantities.get('residence-time') else ('s' if common_residence_time else ''),
+                residence_time_quantity=common_quantities.get('residence-time'),
+                temperature=common_temperature,
+                temperature_quantity=common_quantities.get('temperature'),
             )
         
         # Build composition uncertainty/ESD maps from common composition species
@@ -2943,20 +3395,25 @@ class DatasetUploadView(FormView):
             # Resolve uncertainties
             temp_unc, temp_upper, temp_lower, temp_unc_type = _resolve_unc(dp_uncertainties, 'temperature')
             press_unc, press_upper, press_lower, press_unc_type = _resolve_unc(dp_uncertainties, 'pressure')
+            temp_quantity = _create_quantity(
+                temp_val,
+                temp_units,
+                _merge_uncertainty_meta(temp_unc_dict, temp_unc, temp_upper, temp_lower, temp_unc_type),
+            )
+            pressure_quantity = _create_quantity(
+                pres_val,
+                pres_units,
+                _merge_uncertainty_meta(pres_unc_dict, press_unc, press_upper, press_lower, press_unc_type),
+            )
             
             datapoint = ExperimentDatapoint.objects.create(
                 dataset=dataset,
                 temperature=temp_si,
+                temperature_quantity=temp_quantity,
                 pressure=pres_si,
-                temperature_uncertainty=temp_unc,
-                temperature_upper_uncertainty=temp_upper,
-                temperature_lower_uncertainty=temp_lower,
-                temperature_uncertainty_type=temp_unc_type,
-                pressure_uncertainty=press_unc,
-                pressure_upper_uncertainty=press_upper,
-                pressure_lower_uncertainty=press_lower,
-                pressure_uncertainty_type=press_unc_type,
+                pressure_quantity=pressure_quantity,
                 equivalence_ratio=equiv_val or common_equiv_ratio,
+                equivalence_ratio_quantity=_create_quantity(equiv_val, _eu, _eunc),
                 residence_time=res_si,
                 residence_time_units='s' if res_si else '',
             )
@@ -2965,26 +3422,30 @@ class DatasetUploadView(FormView):
             if ign_val is not None:
                 ign_si = self._convert_to_si(ign_val, ign_units, 'time')
                 ign_unc, ign_upper, ign_lower, ign_unc_type = _resolve_unc(dp_uncertainties, 'ignition delay')
+                ign_quantity = _create_quantity(
+                    ign_val,
+                    ign_units,
+                    _merge_uncertainty_meta(ign_unc_dict, ign_unc, ign_upper, ign_lower, ign_unc_type),
+                )
                 IgnitionDelayDatapoint.objects.create(
                     datapoint=datapoint,
                     ignition_delay=ign_si,
-                    ignition_delay_uncertainty=ign_unc,
-                    ignition_delay_upper_uncertainty=ign_upper,
-                    ignition_delay_lower_uncertainty=ign_lower,
-                    ignition_delay_uncertainty_type=ign_unc_type,
+                    ignition_delay_quantity=ign_quantity,
                 )
             
             # Laminar burning velocity
             if lbv_val is not None:
                 lbv_si = self._convert_to_si(lbv_val, lbv_units, 'velocity')
                 lbv_unc, lbv_upper, lbv_lower, lbv_unc_type = _resolve_unc(dp_uncertainties, 'laminar burning velocity')
+                lbv_quantity = _create_quantity(
+                    lbv_val,
+                    lbv_units,
+                    _merge_uncertainty_meta(lbv_unc_dict, lbv_unc, lbv_upper, lbv_lower, lbv_unc_type),
+                )
                 LaminarBurningVelocityMeasurementDatapoint.objects.create(
                     datapoint=datapoint,
                     laminar_burning_velocity=lbv_si,
-                    laminar_burning_velocity_uncertainty=lbv_unc,
-                    laminar_burning_velocity_upper_uncertainty=lbv_upper,
-                    laminar_burning_velocity_lower_uncertainty=lbv_lower,
-                    laminar_burning_velocity_uncertainty_type=lbv_unc_type,
+                    laminar_burning_velocity_quantity=lbv_quantity,
                 )
             
             # Per-datapoint composition (measured species concentrations)
@@ -3140,14 +3601,7 @@ class DatasetUploadView(FormView):
                 measurement_type=measurement_type,
                 rate_coefficient=meas_val,
                 rate_coefficient_units=meas_units,
-                rate_coefficient_uncertainty=rc_uncertainty,
-                rate_coefficient_uncertainty_type=rc_unc_type,
-                rate_coefficient_upper_uncertainty=rc_upper,
-                rate_coefficient_lower_uncertainty=rc_lower,
                 rate_coefficient_quantity=rc_vu,
-                evaluated_standard_deviation=eff_esd,
-                evaluated_standard_deviation_type=eff_esd_type,
-                evaluated_standard_deviation_sourcetype=eff_esd_sourcetype,
                 reaction=reaction_str,
                 reaction_order=reaction_order,
                 bulk_gas=bulk_gas,
@@ -3679,54 +4133,64 @@ class DatasetExportView(View):
         
         # Build datapoints
         datapoints = []
+
+        def _serialize_quantity(quantity, fallback_value=None, fallback_units=None):
+            if quantity and (quantity.value is not None or quantity.value_text):
+                raw_value = quantity.value if quantity.value is not None else quantity.value_text
+                unit_part = f" {quantity.units}" if quantity.units else ""
+                serialized = [f"{raw_value}{unit_part}".strip()]
+            elif fallback_value is not None:
+                unit_part = f" {fallback_units}" if fallback_units else ""
+                serialized = [f"{fallback_value}{unit_part}".strip()]
+            else:
+                return None
+
+            metadata = {}
+
+            if quantity:
+                if quantity.uncertainty_type:
+                    metadata['uncertainty-type'] = quantity.uncertainty_type
+                if quantity.uncertainty is not None:
+                    metadata['uncertainty'] = quantity.uncertainty
+                if quantity.upper_uncertainty is not None:
+                    metadata['upper-uncertainty'] = quantity.upper_uncertainty
+                if quantity.lower_uncertainty is not None:
+                    metadata['lower-uncertainty'] = quantity.lower_uncertainty
+                if quantity.evaluated_standard_deviation is not None:
+                    metadata['evaluated-standard-deviation'] = quantity.evaluated_standard_deviation
+                if quantity.evaluated_standard_deviation_type:
+                    metadata['evaluated-standard-deviation-type'] = quantity.evaluated_standard_deviation_type
+                if quantity.evaluated_standard_deviation_sourcetype:
+                    metadata['evaluated-standard-deviation-sourcetype'] = quantity.evaluated_standard_deviation_sourcetype
+                if quantity.evaluated_standard_deviation_method:
+                    metadata['evaluated-standard-deviation-method'] = quantity.evaluated_standard_deviation_method
+
+            if metadata:
+                serialized.append(metadata)
+
+            return serialized
+
         for dp in dataset.datapoints.all():
             dp_dict = {}
             
             # Temperature
-            if dp.temperature_quantity:
-                dp_dict['temperature'] = [f"{dp.temperature_quantity.value} {dp.temperature_quantity.units}"]
-            else:
-                dp_dict['temperature'] = [f"{dp.temperature} kelvin"]
-            
-            # Temperature uncertainty
-            if dp.temperature_uncertainty is not None:
-                dp_dict['temperature-uncertainty'] = {
-                    'type': dp.temperature_uncertainty_type or 'absolute',
-                    'value': dp.temperature_uncertainty,
-                }
-            if dp.temperature_upper_uncertainty is not None:
-                dp_dict['temperature-upper-uncertainty'] = {
-                    'type': dp.temperature_uncertainty_type or 'absolute',
-                    'value': dp.temperature_upper_uncertainty,
-                }
-            if dp.temperature_lower_uncertainty is not None:
-                dp_dict['temperature-lower-uncertainty'] = {
-                    'type': dp.temperature_uncertainty_type or 'absolute',
-                    'value': dp.temperature_lower_uncertainty,
-                }
+            temp_entry = _serialize_quantity(
+                dp.temperature_quantity,
+                fallback_value=dp.temperature,
+                fallback_units='kelvin',
+            )
+            if temp_entry:
+                dp_dict['temperature'] = temp_entry
             
             # Pressure (omit placeholder 0.0)
-            if dp.pressure_quantity and float(dp.pressure_quantity.value) != 0.0:
-                dp_dict['pressure'] = [f"{dp.pressure_quantity.value} {dp.pressure_quantity.units}"]
-            elif not dp.pressure_quantity and dp.pressure and dp.pressure != 0.0:
-                dp_dict['pressure'] = [f"{dp.pressure} pascal"]
-            
-            # Pressure uncertainty
-            if dp.pressure_uncertainty is not None:
-                dp_dict['pressure-uncertainty'] = {
-                    'type': dp.pressure_uncertainty_type or 'absolute',
-                    'value': dp.pressure_uncertainty,
-                }
-            if dp.pressure_upper_uncertainty is not None:
-                dp_dict['pressure-upper-uncertainty'] = {
-                    'type': dp.pressure_uncertainty_type or 'absolute',
-                    'value': dp.pressure_upper_uncertainty,
-                }
-            if dp.pressure_lower_uncertainty is not None:
-                dp_dict['pressure-lower-uncertainty'] = {
-                    'type': dp.pressure_uncertainty_type or 'absolute',
-                    'value': dp.pressure_lower_uncertainty,
-                }
+            pressure_fallback = dp.pressure if dp.pressure and dp.pressure != 0.0 else None
+            pressure_entry = _serialize_quantity(
+                dp.pressure_quantity,
+                fallback_value=pressure_fallback,
+                fallback_units='pascal',
+            )
+            if pressure_entry:
+                dp_dict['pressure'] = pressure_entry
             
             # Equivalence ratio
             if dp.equivalence_ratio:
@@ -3751,58 +4215,26 @@ class DatasetExportView(View):
             # Ignition delay
             if hasattr(dp, 'ignition_delay') and dp.ignition_delay:
                 ign = dp.ignition_delay
-                if ign.ignition_delay_quantity:
-                    dp_dict['ignition-delay'] = [
-                        f"{ign.ignition_delay_quantity.value} {ign.ignition_delay_quantity.units}"
-                    ]
-                elif ign.ignition_delay:
-                    dp_dict['ignition-delay'] = [f"{ign.ignition_delay} s"]
-                
-                # Ignition delay uncertainty
-                if ign.ignition_delay_uncertainty is not None:
-                    dp_dict['ignition-delay-uncertainty'] = {
-                        'type': ign.ignition_delay_uncertainty_type or 'absolute',
-                        'value': ign.ignition_delay_uncertainty,
-                    }
-                if ign.ignition_delay_upper_uncertainty is not None:
-                    dp_dict['ignition-delay-upper-uncertainty'] = {
-                        'type': ign.ignition_delay_uncertainty_type or 'absolute',
-                        'value': ign.ignition_delay_upper_uncertainty,
-                    }
-                if ign.ignition_delay_lower_uncertainty is not None:
-                    dp_dict['ignition-delay-lower-uncertainty'] = {
-                        'type': ign.ignition_delay_uncertainty_type or 'absolute',
-                        'value': ign.ignition_delay_lower_uncertainty,
-                    }
+                ign_entry = _serialize_quantity(
+                    ign.ignition_delay_quantity,
+                    fallback_value=ign.ignition_delay,
+                    fallback_units='s',
+                )
+                if ign_entry:
+                    dp_dict['ignition-delay'] = ign_entry
 
             # Laminar burning velocity
             if hasattr(dp, 'laminar_burning_velocity_measurement'):
                 try:
                     lbv = dp.laminar_burning_velocity_measurement
                     if lbv and lbv.laminar_burning_velocity is not None:
-                        if lbv.laminar_burning_velocity_quantity:
-                            dp_dict['laminar-burning-velocity'] = [
-                                f"{lbv.laminar_burning_velocity_quantity.value} {lbv.laminar_burning_velocity_quantity.units}"
-                            ]
-                        else:
-                            dp_dict['laminar-burning-velocity'] = [f"{lbv.laminar_burning_velocity} m/s"]
-                        
-                        # LBV uncertainty
-                        if lbv.laminar_burning_velocity_uncertainty is not None:
-                            dp_dict['laminar-burning-velocity-uncertainty'] = {
-                                'type': lbv.laminar_burning_velocity_uncertainty_type or 'absolute',
-                                'value': lbv.laminar_burning_velocity_uncertainty,
-                            }
-                        if lbv.laminar_burning_velocity_upper_uncertainty is not None:
-                            dp_dict['laminar-burning-velocity-upper-uncertainty'] = {
-                                'type': lbv.laminar_burning_velocity_uncertainty_type or 'absolute',
-                                'value': lbv.laminar_burning_velocity_upper_uncertainty,
-                            }
-                        if lbv.laminar_burning_velocity_lower_uncertainty is not None:
-                            dp_dict['laminar-burning-velocity-lower-uncertainty'] = {
-                                'type': lbv.laminar_burning_velocity_uncertainty_type or 'absolute',
-                                'value': lbv.laminar_burning_velocity_lower_uncertainty,
-                            }
+                        lbv_entry = _serialize_quantity(
+                            lbv.laminar_burning_velocity_quantity,
+                            fallback_value=lbv.laminar_burning_velocity,
+                            fallback_units='m/s',
+                        )
+                        if lbv_entry:
+                            dp_dict['laminar-burning-velocity'] = lbv_entry
                 except dp.__class__.laminar_burning_velocity_measurement.RelatedObjectDoesNotExist:
                     pass
 
@@ -3816,37 +4248,13 @@ class DatasetExportView(View):
                             if rc.measurement_type == MeasurementType.BRANCHING_RATIO
                             else 'rate-coefficient'
                         )
-                        rc_entry = [
-                            f"{rc.rate_coefficient} {rc.rate_coefficient_units}"
-                        ]
-                        dp_dict[yaml_key] = rc_entry
-                        
-                        # Add uncertainty if present (PyKED convention)
-                        if rc.rate_coefficient_uncertainty is not None:
-                            dp_dict[f'{yaml_key}-uncertainty'] = {
-                                'type': rc.rate_coefficient_uncertainty_type or 'absolute',
-                                'value': rc.rate_coefficient_uncertainty,
-                            }
-                        if rc.rate_coefficient_upper_uncertainty is not None:
-                            dp_dict[f'{yaml_key}-upper-uncertainty'] = {
-                                'type': rc.rate_coefficient_uncertainty_type or 'absolute',
-                                'value': rc.rate_coefficient_upper_uncertainty,
-                            }
-                        if rc.rate_coefficient_lower_uncertainty is not None:
-                            dp_dict[f'{yaml_key}-lower-uncertainty'] = {
-                                'type': rc.rate_coefficient_uncertainty_type or 'absolute',
-                                'value': rc.rate_coefficient_lower_uncertainty,
-                            }
-                        
-                        # Add evaluated standard deviation if present
-                        if rc.evaluated_standard_deviation is not None:
-                            esd_dict = {
-                                'type': rc.evaluated_standard_deviation_type or 'absolute',
-                                'value': rc.evaluated_standard_deviation,
-                            }
-                            if rc.evaluated_standard_deviation_sourcetype:
-                                esd_dict['sourcetype'] = rc.evaluated_standard_deviation_sourcetype
-                            dp_dict[f'{yaml_key}-evaluated-standard-deviation'] = esd_dict
+                        rc_entry = _serialize_quantity(
+                            rc.rate_coefficient_quantity,
+                            fallback_value=rc.rate_coefficient,
+                            fallback_units=rc.rate_coefficient_units,
+                        )
+                        if rc_entry:
+                            dp_dict[yaml_key] = rc_entry
                 except dp.__class__.rate_coefficient.RelatedObjectDoesNotExist:
                     pass
 

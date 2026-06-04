@@ -174,7 +174,9 @@ class ValueWithUnit(models.Model):
     )
     evaluated_standard_deviation_sourcetype = models.CharField(
         max_length=100,
-        blank=True
+        choices=PropertySourceType.choices,
+        blank=True,
+        help_text="How the evaluated standard deviation was obtained (reported, estimated, calculated, digitized)"
     )
     evaluated_standard_deviation_method = models.CharField(
         max_length=100,
@@ -189,6 +191,27 @@ class ValueWithUnit(models.Model):
         value = self.value if self.value is not None else self.value_text or "n/a"
         return f"{value} {self.units}"
 
+    def has_uncertainty_data(self):
+        return any(
+            value is not None and value != ""
+            for value in (
+                self.uncertainty,
+                self.upper_uncertainty,
+                self.lower_uncertainty,
+                self.uncertainty_type,
+            )
+        )
+
+    def has_evaluated_standard_deviation_data(self):
+        return any(
+            value is not None and value != ""
+            for value in (
+                self.evaluated_standard_deviation,
+                self.evaluated_standard_deviation_type,
+                self.evaluated_standard_deviation_sourcetype,
+                self.evaluated_standard_deviation_method,
+            )
+        )
 
 
 class FileAuthor(models.Model):
@@ -453,14 +476,6 @@ class ExperimentDatapoint(models.Model):
         blank=True,
         related_name='temperature_datapoints'
     )
-    temperature_uncertainty = models.FloatField(null=True, blank=True)
-    temperature_upper_uncertainty = models.FloatField(null=True, blank=True)
-    temperature_lower_uncertainty = models.FloatField(null=True, blank=True)
-    temperature_uncertainty_type = models.CharField(
-        max_length=20,
-        choices=UncertaintyType.choices,
-        blank=True
-    )
     
     pressure = models.FloatField(
         validators=[MinValueValidator(0)],
@@ -472,14 +487,6 @@ class ExperimentDatapoint(models.Model):
         null=True,
         blank=True,
         related_name='pressure_datapoints'
-    )
-    pressure_uncertainty = models.FloatField(null=True, blank=True)
-    pressure_upper_uncertainty = models.FloatField(null=True, blank=True)
-    pressure_lower_uncertainty = models.FloatField(null=True, blank=True)
-    pressure_uncertainty_type = models.CharField(
-        max_length=20,
-        choices=UncertaintyType.choices,
-        blank=True
     )
     
     # Equivalence ratio
@@ -534,7 +541,7 @@ class ExperimentDatapoint(models.Model):
     class Meta:
         db_table = 'chemked_datapoints'
         ordering = ['dataset', 'temperature']
-    
+
     def __str__(self):
         return f"T={self.temperature}K, P={self.pressure/1e5:.5f}bar"
     
@@ -563,7 +570,6 @@ class ExperimentDatapoint(models.Model):
             return self.ignition_delay.get_ignition_type()
         return None
 
-
 class IgnitionDelayDatapoint(models.Model):
     """
     Ignition-delay-specific fields for a datapoint.
@@ -587,14 +593,6 @@ class IgnitionDelayDatapoint(models.Model):
         null=True,
         blank=True,
         related_name='ignition_delays'
-    )
-    ignition_delay_uncertainty = models.FloatField(null=True, blank=True)
-    ignition_delay_upper_uncertainty = models.FloatField(null=True, blank=True)
-    ignition_delay_lower_uncertainty = models.FloatField(null=True, blank=True)
-    ignition_delay_uncertainty_type = models.CharField(
-        max_length=20,
-        choices=UncertaintyType.choices,
-        blank=True
     )
 
     first_stage_ignition_delay = models.FloatField(
@@ -689,14 +687,6 @@ class LaminarBurningVelocityMeasurementDatapoint(models.Model):
         blank=True,
         related_name='laminar_burning_velocities'
     )
-    laminar_burning_velocity_uncertainty = models.FloatField(null=True, blank=True)
-    laminar_burning_velocity_upper_uncertainty = models.FloatField(null=True, blank=True)
-    laminar_burning_velocity_lower_uncertainty = models.FloatField(null=True, blank=True)
-    laminar_burning_velocity_uncertainty_type = models.CharField(
-        max_length=20,
-        choices=UncertaintyType.choices,
-        blank=True
-    )
 
     stretch = models.FloatField(
         null=True,
@@ -773,14 +763,6 @@ class RateCoefficientDatapoint(models.Model):
         default='cm3 mol-1 s-1',
         help_text="Units for rate coefficient (e.g., cm3 mol-1 s-1)"
     )
-    rate_coefficient_uncertainty = models.FloatField(null=True, blank=True)
-    rate_coefficient_uncertainty_type = models.CharField(
-        max_length=20,
-        choices=UncertaintyType.choices,
-        blank=True
-    )
-    rate_coefficient_upper_uncertainty = models.FloatField(null=True, blank=True)
-    rate_coefficient_lower_uncertainty = models.FloatField(null=True, blank=True)
     rate_coefficient_quantity = models.ForeignKey(
         ValueWithUnit,
         on_delete=models.SET_NULL,
@@ -788,22 +770,6 @@ class RateCoefficientDatapoint(models.Model):
         blank=True,
         related_name='rate_coefficient_datapoints',
         help_text="Rich value container with uncertainty and evaluated standard deviation"
-    )
-    
-    # Evaluated standard deviation (global, from commonProperties)
-    evaluated_standard_deviation = models.FloatField(null=True, blank=True)
-    evaluated_standard_deviation_type = models.CharField(
-        max_length=20,
-        choices=UncertaintyType.choices,
-        blank=True
-    )
-    evaluated_standard_deviation_sourcetype = models.CharField(
-        max_length=100,
-        blank=True
-    )
-    evaluated_standard_deviation_label = models.CharField(
-        max_length=100,
-        blank=True
     )
     
     # Reaction information
@@ -834,7 +800,7 @@ class RateCoefficientDatapoint(models.Model):
         db_table = 'chemked_rate_coefficient'
         verbose_name = 'Rate Coefficient Datapoint'
         verbose_name_plural = 'Rate Coefficient Datapoints'
-    
+
     def __str__(self):
         if self.rate_coefficient is None:
             return "Rate coefficient (n/a)"
@@ -1169,14 +1135,6 @@ class CommonProperties(models.Model):
         blank=True,
         related_name='common_pressure_sets'
     )
-    pressure_uncertainty = models.FloatField(null=True, blank=True)
-    pressure_upper_uncertainty = models.FloatField(null=True, blank=True)
-    pressure_lower_uncertainty = models.FloatField(null=True, blank=True)
-    pressure_uncertainty_type = models.CharField(
-        max_length=20,
-        choices=UncertaintyType.choices,
-        blank=True
-    )
     pressure_rise = models.FloatField(
         null=True,
         blank=True,
@@ -1188,14 +1146,6 @@ class CommonProperties(models.Model):
         null=True,
         blank=True,
         related_name='common_pressure_rise_sets'
-    )
-    pressure_rise_uncertainty = models.FloatField(null=True, blank=True)
-    pressure_rise_upper_uncertainty = models.FloatField(null=True, blank=True)
-    pressure_rise_lower_uncertainty = models.FloatField(null=True, blank=True)
-    pressure_rise_uncertainty_type = models.CharField(
-        max_length=20,
-        choices=UncertaintyType.choices,
-        blank=True
     )
     
     # JSR/Flow Reactor common properties
@@ -1366,12 +1316,6 @@ class RCMData(models.Model):
         blank=True,
         related_name='rcm_compressed_temperature'
     )
-    compressed_temperature_uncertainty = models.FloatField(null=True, blank=True)
-    compressed_temperature_upper_uncertainty = models.FloatField(null=True, blank=True)
-    compressed_temperature_lower_uncertainty = models.FloatField(null=True, blank=True)
-    compressed_temperature_uncertainty_type = models.CharField(
-        max_length=20, choices=UncertaintyType.choices, blank=True
-    )
     
     compressed_pressure = models.FloatField(
         null=True, 
@@ -1384,12 +1328,6 @@ class RCMData(models.Model):
         null=True,
         blank=True,
         related_name='rcm_compressed_pressure'
-    )
-    compressed_pressure_uncertainty = models.FloatField(null=True, blank=True)
-    compressed_pressure_upper_uncertainty = models.FloatField(null=True, blank=True)
-    compressed_pressure_lower_uncertainty = models.FloatField(null=True, blank=True)
-    compressed_pressure_uncertainty_type = models.CharField(
-        max_length=20, choices=UncertaintyType.choices, blank=True
     )
     
     # Machine parameters
@@ -1753,6 +1691,7 @@ class EvaluatedStandardDeviation(models.Model):
     sourcetype = models.CharField(
         max_length=100,
         blank=True,
+        choices=PropertySourceType.choices,
         help_text="How the standard deviation was obtained"
     )
 

@@ -332,7 +332,7 @@
                         </div>
                     </div>
                     
-                    <div class="form-section">
+                    <div class="form-section experiment-type-section" data-experiment-types="ignition delay">
                         <h6 class="form-section-header">
                             <i class="bi bi-fire me-2"></i>Ignition Information
                         </h6>
@@ -360,6 +360,11 @@
                             <div class="col-12">
                                 <label class="form-label">Kind</label>
                                 {{ experiment_form.apparatus_kind }}
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label">Mode</label>
+                                {{ experiment_form.apparatus_mode }}
+                                <div class="help-text">Operating mode (e.g., reflected shock, laminar)</div>
                             </div>
                             <div class="col-12">
                                 <label class="form-label">Institution</label>
@@ -399,14 +404,51 @@
                             {{ common_properties_form.composition_kind }}
                         </div>
                         <div class="mb-3">
-                            <label class="form-label">Common Pressure (optional)</label>
-                            {{ common_properties_form.common_pressure }}
+                            <label class="form-label">Pressure (optional)</label>
+                            {{ common_properties_form.pressure }}
                             <div class="help-text">If all datapoints have same pressure</div>
                         </div>
                         <div class="mb-3">
+                            <label class="form-label">Temperature (optional)</label>
+                            {{ common_properties_form.temperature }}
+                            <div class="help-text">If all datapoints have same temperature</div>
+                        </div>
+                        <div class="mb-3 experiment-type-section" data-experiment-types="ignition delay">
                             <label class="form-label">Pressure Rise Rate (optional)</label>
                             {{ common_properties_form.pressure_rise }}
                             <div class="help-text">For shock tube experiments</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Equivalence Ratio (optional)</label>
+                            {{ common_properties_form.equivalence_ratio }}
+                            <div class="help-text">If all datapoints have same equivalence ratio</div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-section experiment-type-section" data-experiment-types="jet stirred reactor measurement,outlet concentration measurement">
+                        <h6 class="form-section-header">
+                            <i class="bi bi-box me-2"></i>Reactor Properties
+                        </h6>
+                        <div class="mb-3">
+                            <label class="form-label">Reactor Volume</label>
+                            {{ common_properties_form.reactor_volume }}
+                            <div class="help-text">Volume with units (e.g., 85 cm3)</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Residence Time</label>
+                            {{ common_properties_form.residence_time }}
+                            <div class="help-text">Common residence time with units</div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-section experiment-type-section" data-experiment-types="burner stabilized flame speciation measurement">
+                        <h6 class="form-section-header">
+                            <i class="bi bi-wind me-2"></i>Flow Properties
+                        </h6>
+                        <div class="mb-3">
+                            <label class="form-label">Flow Rate</label>
+                            {{ common_properties_form.flow_rate }}
+                            <div class="help-text">Common mass flow rate with units</div>
                         </div>
                     </div>
                 </div>
@@ -484,6 +526,12 @@
             
             {{ datapoint_formset.management_form }}
             {{ ignition_delay_formset.management_form }}
+            {{ lbv_formset.management_form }}
+            {{ rate_coefficient_formset.management_form }}
+            {{ jsr_formset.management_form }}
+            {{ outlet_concentration_formset.management_form }}
+            {{ ctp_formset.management_form }}
+            {{ bsfs_formset.management_form }}
             
             <div id="datapoints-container">
                 {% for dp_form in datapoint_formset %}
@@ -550,7 +598,7 @@
                         <!-- Ignition Delay Section -->
                         {% with ign_form=ignition_delay_formset|get_form:forloop.counter0 %}
                         {% if ign_form %}
-                        <div class="parameter-group p-3 bg-light rounded">
+                        <div class="parameter-group p-3 bg-light rounded experiment-type-section" data-experiment-types="ignition delay">
                             <h6 class="text-warning mb-2"><i class="bi bi-stopwatch me-1"></i> Ignition Delay</h6>
                             <div class="row g-2 align-items-end">
                                 <div class="col-md-4">
@@ -572,6 +620,182 @@
                                 <div class="col-md-2">
                                     <label class="form-label small">Type Override</label>
                                     {{ ign_form.ignition_type_override }}
+                                </div>
+                            </div>
+                        </div>
+                        {% endif %}
+                        {% endwith %}
+                        
+                        <!-- Laminar Burning Velocity Section -->
+                        {% with lbv_form=lbv_formset|get_form:forloop.counter0 %}
+                        {% if lbv_form %}
+                        <div class="parameter-group p-3 bg-light rounded experiment-type-section" data-experiment-types="laminar burning velocity measurement">
+                            <h6 class="text-info mb-2"><i class="bi bi-flame me-1"></i> Laminar Burning Velocity</h6>
+                            <div class="row g-2 align-items-end">
+                                <div class="col-md-5">
+                                    <label class="form-label small">Value with units</label>
+                                    {{ lbv_form.laminar_burning_velocity }}
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small">± Uncertainty</label>
+                                    {{ lbv_form.laminar_burning_velocity_uncertainty }}
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Uncertainty Type</label>
+                                    {{ lbv_form.laminar_burning_velocity_uncertainty_type }}
+                                </div>
+                            </div>
+                        </div>
+                        {% endif %}
+                        {% endwith %}
+                        
+                        <!-- Rate Coefficient Section -->
+                        {% with rc_form=rate_coefficient_formset|get_form:forloop.counter0 %}
+                        {% if rc_form %}
+                        <div class="parameter-group p-3 bg-light rounded experiment-type-section" data-experiment-types="rate coefficient">
+                            <h6 class="text-danger mb-2"><i class="bi bi-graph-up me-1"></i> Rate Coefficient</h6>
+                            <div class="row g-2 align-items-end mb-2">
+                                <div class="col-md-3">
+                                    <label class="form-label small">Measurement Type</label>
+                                    {{ rc_form.measurement_type }}
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small">Value with units</label>
+                                    {{ rc_form.rate_coefficient }}
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small">± Uncertainty</label>
+                                    {{ rc_form.rate_coefficient_uncertainty }}
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small">Uncert. Type</label>
+                                    {{ rc_form.rate_coefficient_uncertainty_type }}
+                                </div>
+                            </div>
+                            <div class="row g-2 align-items-end">
+                                <div class="col-md-4">
+                                    <label class="form-label small">Reaction</label>
+                                    {{ rc_form.reaction }}
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label small">Order</label>
+                                    {{ rc_form.reaction_order }}
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small">Bulk Gas</label>
+                                    {{ rc_form.bulk_gas }}
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small">Method</label>
+                                    {{ rc_form.method }}
+                                </div>
+                            </div>
+                        </div>
+                        {% endif %}
+                        {% endwith %}
+                        
+                        <!-- JSR Section -->
+                        {% with jsr_form=jsr_formset|get_form:forloop.counter0 %}
+                        {% if jsr_form %}
+                        <div class="parameter-group p-3 bg-light rounded experiment-type-section" data-experiment-types="jet stirred reactor measurement">
+                            <h6 class="text-success mb-2"><i class="bi bi-arrow-repeat me-1"></i> JSR Measurement</h6>
+                            <div class="row g-2">
+                                <div class="col-md-6">
+                                    <label class="form-label small">Environment Temperature</label>
+                                    {{ jsr_form.environment_temperature }}
+                                    <div class="help-text">Optional per-datapoint environment temperature</div>
+                                </div>
+                            </div>
+                        </div>
+                        {% endif %}
+                        {% endwith %}
+                        
+                        <!-- Outlet Concentration Section -->
+                        {% with oc_form=outlet_concentration_formset|get_form:forloop.counter0 %}
+                        {% if oc_form %}
+                        <div class="parameter-group p-3 bg-light rounded experiment-type-section" data-experiment-types="outlet concentration measurement">
+                            <h6 class="text-primary mb-2"><i class="bi bi-box-arrow-right me-1"></i> Outlet Concentration</h6>
+                            <div class="row g-2">
+                                <div class="col-md-6">
+                                    <label class="form-label small">Residence Time (override)</label>
+                                    {{ oc_form.residence_time }}
+                                    <div class="help-text">Per-datapoint override of common residence time</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small">Volumetric Flow (ref. state)</label>
+                                    {{ oc_form.volumetric_flow }}
+                                </div>
+                            </div>
+                        </div>
+                        {% endif %}
+                        {% endwith %}
+                        
+                        <!-- Concentration Time Profile Section -->
+                        {% with ctp_form=ctp_formset|get_form:forloop.counter0 %}
+                        {% if ctp_form %}
+                        <div class="parameter-group p-3 bg-light rounded experiment-type-section" data-experiment-types="concentration time profile measurement">
+                            <h6 class="text-dark mb-2"><i class="bi bi-clock-history me-1"></i> Concentration Time Profile</h6>
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-4">
+                                    <label class="form-label small">Tracked Species</label>
+                                    {{ ctp_form.tracked_species_name }}
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Quantity Units</label>
+                                    {{ ctp_form.quantity_units }}
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Time Units</label>
+                                    {{ ctp_form.time_units }}
+                                </div>
+                            </div>
+                            <div class="row g-2 mb-2">
+                                <div class="col-12">
+                                    <label class="form-label small">Time-Value Data</label>
+                                    {{ ctp_form.values_text }}
+                                </div>
+                            </div>
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-4">
+                                    <label class="form-label small">Uncertainty Type</label>
+                                    {{ ctp_form.uncertainty_type }}
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Uncertainty Value</label>
+                                    {{ ctp_form.uncertainty_value }}
+                                </div>
+                            </div>
+                            <div class="row g-2">
+                                <div class="col-md-4">
+                                    <label class="form-label small">Time Shift Target</label>
+                                    {{ ctp_form.timeshift_target }}
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Time Shift Type</label>
+                                    {{ ctp_form.timeshift_type }}
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Time Shift Amount</label>
+                                    {{ ctp_form.timeshift_amount }}
+                                </div>
+                            </div>
+                        </div>
+                        {% endif %}
+                        {% endwith %}
+                        
+                        <!-- BSFS Section -->
+                        {% with bsfs_form=bsfs_formset|get_form:forloop.counter0 %}
+                        {% if bsfs_form %}
+                        <div class="parameter-group p-3 bg-light rounded experiment-type-section" data-experiment-types="burner stabilized flame speciation measurement">
+                            <h6 class="text-secondary mb-2"><i class="bi bi-rulers me-1"></i> Burner Stabilized Flame Speciation</h6>
+                            <div class="row g-2">
+                                <div class="col-md-6">
+                                    <label class="form-label small">Distance from Burner</label>
+                                    {{ bsfs_form.distance }}
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small">Flow Rate</label>
+                                    {{ bsfs_form.flow_rate }}
                                 </div>
                             </div>
                         </div>
@@ -632,6 +856,29 @@
 
 {% block extra_js %}
 <script>
+// =========================================================================
+// Experiment type show/hide logic
+// =========================================================================
+const EXPERIMENT_TYPE_PREFIXES = [
+    'ignition_delays', 'lbv', 'rate_coefficients', 'jsr', 'outlet_conc', 'ctp', 'bsfs'
+];
+
+function updateExperimentTypeSections() {
+    const selectedType = document.getElementById('id_experiment_type').value;
+    document.querySelectorAll('.experiment-type-section').forEach(section => {
+        const types = section.dataset.experimentTypes.split(',').map(t => t.trim());
+        section.style.display = types.includes(selectedType) ? '' : 'none';
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const experimentTypeSelect = document.getElementById('id_experiment_type');
+    if (experimentTypeSelect) {
+        experimentTypeSelect.addEventListener('change', updateExperimentTypeSections);
+        updateExperimentTypeSections();
+    }
+});
+
 // Tab navigation helpers
 function nextTab(tabId) {
     const tab = document.getElementById(tabId);
@@ -770,11 +1017,21 @@ function removeSpeciesRow(button) {
     }
 }
 
+function _updateFormsetInput(input, prefix, oldIdx, newIdx) {
+    const name = input.getAttribute('name');
+    if (name && name.startsWith(prefix + '-')) {
+        const re = new RegExp(`^${prefix}-\\d+-`);
+        input.setAttribute('name', name.replace(re, `${prefix}-${newIdx}-`));
+        const id = input.getAttribute('id');
+        if (id) {
+            input.setAttribute('id', id.replace(re, `${prefix}-${newIdx}-`));
+        }
+    }
+}
+
 function addDatapoint() {
     const container = document.getElementById('datapoints-container');
     const dpTotalForms = document.querySelector('input[name="datapoints-TOTAL_FORMS"]');
-    const ignTotalForms = document.querySelector('input[name="ignition_delays-TOTAL_FORMS"]');
-    
     const dpNum = parseInt(dpTotalForms.value);
     const cards = container.querySelectorAll('.datapoint-card');
     
@@ -796,16 +1053,16 @@ function addDatapoint() {
             header.appendChild(removeBtn);
         }
         
-        // Update input names/ids and clear values
+        // Update input names/ids and clear values for all formset prefixes
+        const allPrefixes = ['datapoints'].concat(EXPERIMENT_TYPE_PREFIXES);
         newCard.querySelectorAll('input, select, textarea').forEach(input => {
             const name = input.getAttribute('name');
             if (name) {
-                if (name.startsWith('datapoints-')) {
-                    input.setAttribute('name', name.replace(/datapoints-\d+-/, `datapoints-${dpNum}-`));
-                    input.setAttribute('id', input.getAttribute('id').replace(/datapoints-\d+-/, `datapoints-${dpNum}-`));
-                } else if (name.startsWith('ignition_delays-')) {
-                    input.setAttribute('name', name.replace(/ignition_delays-\d+-/, `ignition_delays-${dpNum}-`));
-                    input.setAttribute('id', input.getAttribute('id').replace(/ignition_delays-\d+-/, `ignition_delays-${dpNum}-`));
+                for (const prefix of allPrefixes) {
+                    if (name.startsWith(prefix + '-')) {
+                        _updateFormsetInput(input, prefix, 0, dpNum);
+                        break;
+                    }
                 }
                 if (input.type !== 'hidden') {
                     input.value = '';
@@ -815,7 +1072,17 @@ function addDatapoint() {
         
         container.appendChild(newCard);
         dpTotalForms.value = dpNum + 1;
-        ignTotalForms.value = dpNum + 1;
+        
+        // Update all experiment-type formset totals to match
+        EXPERIMENT_TYPE_PREFIXES.forEach(prefix => {
+            const total = document.querySelector(`input[name="${prefix}-TOTAL_FORMS"]`);
+            if (total) {
+                total.value = dpNum + 1;
+            }
+        });
+        
+        // Reapply experiment type visibility
+        updateExperimentTypeSections();
     }
 }
 
@@ -823,14 +1090,22 @@ function removeDatapoint(button) {
     const card = button.closest('.datapoint-card');
     const container = document.getElementById('datapoints-container');
     const dpTotalForms = document.querySelector('input[name="datapoints-TOTAL_FORMS"]');
-    const ignTotalForms = document.querySelector('input[name="ignition_delays-TOTAL_FORMS"]');
     
     if (container.querySelectorAll('.datapoint-card').length > 1) {
         card.remove();
-        dpTotalForms.value = parseInt(dpTotalForms.value) - 1;
-        ignTotalForms.value = parseInt(ignTotalForms.value) - 1;
+        const newCount = parseInt(dpTotalForms.value) - 1;
+        dpTotalForms.value = newCount;
+        
+        // Update all experiment-type formset totals
+        EXPERIMENT_TYPE_PREFIXES.forEach(prefix => {
+            const total = document.querySelector(`input[name="${prefix}-TOTAL_FORMS"]`);
+            if (total) {
+                total.value = newCount;
+            }
+        });
         
         // Re-index and update headers
+        const allPrefixes = ['datapoints'].concat(EXPERIMENT_TYPE_PREFIXES);
         container.querySelectorAll('.datapoint-card').forEach((c, idx) => {
             c.querySelector('.datapoint-card-header span').innerHTML = 
                 `<i class="bi bi-clipboard-data me-2"></i>Datapoint ${idx + 1}`;
@@ -838,12 +1113,11 @@ function removeDatapoint(button) {
             c.querySelectorAll('input, select, textarea').forEach(input => {
                 const name = input.getAttribute('name');
                 if (name) {
-                    if (name.startsWith('datapoints-')) {
-                        input.setAttribute('name', name.replace(/datapoints-\d+-/, `datapoints-${idx}-`));
-                        input.setAttribute('id', input.getAttribute('id').replace(/datapoints-\d+-/, `datapoints-${idx}-`));
-                    } else if (name.startsWith('ignition_delays-')) {
-                        input.setAttribute('name', name.replace(/ignition_delays-\d+-/, `ignition_delays-${idx}-`));
-                        input.setAttribute('id', input.getAttribute('id').replace(/ignition_delays-\d+-/, `ignition_delays-${idx}-`));
+                    for (const prefix of allPrefixes) {
+                        if (name.startsWith(prefix + '-')) {
+                            _updateFormsetInput(input, prefix, -1, idx);
+                            break;
+                        }
                     }
                 }
             });

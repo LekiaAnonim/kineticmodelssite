@@ -227,8 +227,10 @@ class ChemKEDModelTests(TestCase):
 		lbv = LaminarBurningVelocityMeasurementDatapoint.objects.create(
 			datapoint=datapoint,
 			laminar_burning_velocity=0.35,
-			laminar_burning_velocity_uncertainty=0.02,
-			laminar_burning_velocity_uncertainty_type="relative",
+			laminar_burning_velocity_quantity=ValueWithUnit.objects.create(
+				value=0.35, units='m/s',
+				uncertainty=0.02, uncertainty_type='relative',
+			),
 			stretch=50.0,
 		)
 
@@ -890,13 +892,7 @@ class RateCoefficientDatapointModelTests(TestCase):
 			measurement_type=MeasurementType.RATE_COEFFICIENT,
 			rate_coefficient=1.23e10,
 			rate_coefficient_units='cm3 mol-1 s-1',
-			rate_coefficient_uncertainty=5e8,
-			rate_coefficient_uncertainty_type=UncertaintyType.ABSOLUTE,
 			rate_coefficient_quantity=rc_vu,
-			evaluated_standard_deviation=2.5e8,
-			evaluated_standard_deviation_type=UncertaintyType.ABSOLUTE,
-			evaluated_standard_deviation_sourcetype='estimated',
-			evaluated_standard_deviation_label='sigma',
 			reaction='A + B = C + D',
 			reaction_order=2,
 			bulk_gas='Ar',
@@ -906,17 +902,23 @@ class RateCoefficientDatapointModelTests(TestCase):
 		rc.refresh_from_db()
 		self.assertEqual(rc.measurement_type, MeasurementType.RATE_COEFFICIENT)
 		self.assertAlmostEqual(rc.rate_coefficient, 1.23e10)
-		self.assertAlmostEqual(rc.rate_coefficient_uncertainty, 5e8)
 		self.assertIsNotNone(rc.rate_coefficient_quantity)
-		self.assertAlmostEqual(rc.evaluated_standard_deviation, 2.5e8)
-		self.assertEqual(rc.evaluated_standard_deviation_label, 'sigma')
+		self.assertAlmostEqual(rc.rate_coefficient_quantity.uncertainty, 5e8)
+		self.assertAlmostEqual(rc.rate_coefficient_quantity.evaluated_standard_deviation, 2.5e8)
 		self.assertEqual(rc.reaction, 'A + B = C + D')
 		self.assertEqual(rc.reaction_order, 2)
 		self.assertEqual(rc.bulk_gas, 'Ar')
 		self.assertEqual(rc.method, 'Shock tube, LP-FM')
 
 	def test_upper_lower_uncertainty(self):
-		"""Test PyKED-style upper/lower uncertainty fields on RateCoefficientDatapoint."""
+		"""Test PyKED-style upper/lower uncertainty fields on ValueWithUnit."""
+		rc_vu = ValueWithUnit.objects.create(
+			value=2.5e9,
+			units='cm3 mol-1 s-1',
+			upper_uncertainty=1e8,
+			lower_uncertainty=2e8,
+			uncertainty_type=UncertaintyType.ABSOLUTE,
+		)
 		dp = ExperimentDatapoint.objects.create(
 			dataset=self.dataset, temperature=1900, pressure=101325,
 		)
@@ -925,14 +927,12 @@ class RateCoefficientDatapointModelTests(TestCase):
 			measurement_type=MeasurementType.RATE_COEFFICIENT,
 			rate_coefficient=2.5e9,
 			rate_coefficient_units='cm3 mol-1 s-1',
-			rate_coefficient_upper_uncertainty=1e8,
-			rate_coefficient_lower_uncertainty=2e8,
-			rate_coefficient_uncertainty_type=UncertaintyType.ABSOLUTE,
+			rate_coefficient_quantity=rc_vu,
 		)
 		rc.refresh_from_db()
-		self.assertAlmostEqual(rc.rate_coefficient_upper_uncertainty, 1e8)
-		self.assertAlmostEqual(rc.rate_coefficient_lower_uncertainty, 2e8)
-		self.assertIsNone(rc.rate_coefficient_uncertainty)
+		self.assertAlmostEqual(rc.rate_coefficient_quantity.upper_uncertainty, 1e8)
+		self.assertAlmostEqual(rc.rate_coefficient_quantity.lower_uncertainty, 2e8)
+		self.assertIsNone(rc.rate_coefficient_quantity.uncertainty)
 
 	def test_branching_ratio_measurement_type(self):
 		dp = ExperimentDatapoint.objects.create(
