@@ -1,13 +1,17 @@
-"""drf-spectacular postprocessing hook: multi-language code samples.
+"""drf-spectacular postprocessing hooks.
 
-Adds an ``x-codeSamples`` array (cURL, Python, R, MATLAB, JavaScript, Java) to
-every operation in the OpenAPI schema, so ReDoc renders language tabs and the
-docs show ready-to-run snippets. The base URL is taken from the first configured
-SPECTACULAR ``SERVERS`` entry; the ``Authorization`` header uses a token
-placeholder the reader replaces with their own API token.
+- ``add_field_examples`` gives schema fields representative, type- and
+  choice-accurate ``example`` values so ReDoc/Swagger render realistic response
+  samples (instead of ``"string"`` / ``0``). Values are derived from the field
+  type and, for choice fields, from the actual enum; only clearly-named fields
+  get domain values, and genuinely ambiguous fields are left to the UI so we
+  never show a wrong value.
+- ``fix_pagination_urls`` sets each list endpoint's ``next``/``previous`` example
+  to that endpoint's real path (not DRF's ``api.example.org`` placeholder).
+- ``add_code_samples`` injects ``x-codeSamples`` (cURL/Python/R/MATLAB/JS/Java).
 
-Registered via ``SPECTACULAR_SETTINGS["POSTPROCESSING_HOOKS"]`` (alongside the
-default enum-postprocessing hook, which must be kept).
+Registered via ``SPECTACULAR_SETTINGS["POSTPROCESSING_HOOKS"]`` (keep the default
+enum hook first).
 """
 
 from django.conf import settings
@@ -22,6 +26,9 @@ def _base_url():
     return "http://localhost:8000"
 
 
+# ---------------------------------------------------------------------------
+# Multi-language request code samples (x-codeSamples)
+# ---------------------------------------------------------------------------
 def _curl(method, url, has_body):
     parts = [f"curl -X {method}", f'-H "Authorization: Token {TOKEN_PLACEHOLDER}"']
     if has_body:
@@ -140,4 +147,142 @@ def add_code_samples(result, generator, request, public):
                 {"lang": lang, "label": label, "source": gen(m, url, has_body)}
                 for lang, label, gen in _GENERATORS
             ]
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Field-accurate response examples
+# ---------------------------------------------------------------------------
+# Representative values for fields whose meaning is unambiguous from the name.
+# Matched by exact (lower-cased) field name to avoid mismatches.
+_STR_EXAMPLES = {
+    "inchi": "InChI=1S/CH4/h1H4",
+    "smiles": "C",
+    "cas": "74-82-8",
+    "cas_number": "74-82-8",
+    "doi": "10.1016/j.combustflame.2014.03.006",
+    "reference_doi": "10.1016/j.combustflame.2014.03.006",
+    "file_doi": "10.24388/x10100000",
+    "prime_id": "s00000123",
+    "model_name": "GRI-Mech 3.0",
+    "species_name": "methane",
+    "chem_name": "methane",
+    "formula": "CH4",
+    "journal_name": "Combustion and Flame",
+    "source_title": "Comprehensive H2/O2 kinetic model for high-pressure combustion",
+    "adjacency_list": "1 C u0 p0 c0 {2,S} {3,S} {4,S} {5,S}",
+    "institution": "Northeastern University",
+    "facility": "Shock Tube",
+    "firstname": "Jane",
+    "lastname": "Doe",
+    "experiment_type": "ignition delay",
+}
+_NUM_EXAMPLES = {
+    "temperature": 1000.0,
+    "environment_temperature": 1000.0,
+    "min_temperature": 800.0,
+    "max_temperature": 1800.0,
+    "pressure": 101325.0,
+    "min_pressure": 101325.0,
+    "max_pressure": 1013250.0,
+    "equivalence_ratio": 1.0,
+    "ignition_delay": 0.00042,
+    "first_stage_ignition_delay": 0.001,
+    "laminar_burning_velocity": 0.38,
+    "stretch": 100.0,
+    "residence_time": 1.5,
+    "distance": 0.01,
+    "flow_rate": 5.0,
+    "coeff": 1.0,
+    "amount": 0.21,
+    "reaction_order": 2,
+    "multiplicity": 1,
+    "reference_year": 2014,
+    "publication_year": 2004,
+    "reference_volume": 161,
+}
+
+
+def _set_examples_on_component(comp):
+    if not isinstance(comp, dict):
+        return
+    # Enum component -> first valid choice (so choice fields render a real value).
+    if comp.get("enum") and "example" not in comp:
+        comp["example"] = comp["enum"][0]
+        return
+    props = comp.get("properties")
+    if not isinstance(props, dict):
+        return
+    for pname, p in props.items():
+        if not isinstance(p, dict) or "example" in p:
+            continue
+        # Leave references / unions / arrays for the UI to compose from their
+        # own schema (this is also how nested objects and paginated ``results``
+        # get populated).
+        if any(k in p for k in ("$ref", "allOf", "oneOf", "anyOf")):
+            continue
+        lname = pname.lower()
+        t = p.get("type")
+        if p.get("enum"):
+            p["example"] = p["enum"][0]
+        elif t == "integer":
+            p["example"] = _NUM_EXAMPLES.get(lname, 1)
+        elif t == "number":
+            p["example"] = _NUM_EXAMPLES.get(lname, 1.0)
+        elif t == "boolean":
+            p["example"] = True
+        elif t == "string":
+            if lname in _STR_EXAMPLES:
+                p["example"] = _STR_EXAMPLES[lname]
+            # Unrecognized free-text / ambiguous strings (e.g. units): leave to
+            # the UI so we never assert a wrong value.
+
+
+def add_field_examples(result, generator, request, public):
+    """Attach representative examples to schema components."""
+    for comp in ((result.get("components") or {}).get("schemas") or {}).values():
+        _set_examples_on_component(comp)
+    return result
+
+
+def fix_pagination_urls(result, generator, request, public):
+    """Point each list endpoint's next/previous example at its real path."""
+    host = _base_url()
+    netloc = host.split("://", 1)[-1]
+    schemas = (result.get("components") or {}).get("schemas") or {}
+
+    for path, item in (result.get("paths") or {}).items():
+        get = item.get("get") if isinstance(item, dict) else None
+        if not isinstance(get, dict):
+            continue
+        try:
+            ref = get["responses"]["200"]["content"]["application/json"]["schema"].get("$ref")
+        except (KeyError, TypeError, AttributeError):
+            ref = None
+        if not ref:
+            continue
+        comp = schemas.get(ref.rsplit("/", 1)[-1])
+        props = comp.get("properties") if isinstance(comp, dict) else None
+        if not isinstance(props, dict) or "results" not in props:
+            continue
+        if "next" in props:
+            props["next"]["example"] = f"{host}{path}?page=2"
+        if "previous" in props:
+            props["previous"]["example"] = None
+
+    # Safety net: rewrite any remaining api.example.org host left in the schema.
+    def walk(node):
+        if isinstance(node, dict):
+            for key, val in node.items():
+                if isinstance(val, str) and "api.example.org" in val:
+                    node[key] = val.replace("http://api.example.org", host).replace(
+                        "api.example.org", netloc
+                    )
+                else:
+                    walk(val)
+        elif isinstance(node, list):
+            for sub in node:
+                walk(sub)
+
+    walk(result)
     return result
