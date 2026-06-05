@@ -39,8 +39,8 @@ The API is throttled:
 
 | Caller | Limit |
 |--------|-------|
-| Anonymous | 100 requests/day |
-| Authenticated | 1000 requests/day |
+| Anonymous | 10,000 requests/day |
+| Authenticated | 100,000 requests/day |
 
 If you need higher limits for a research workload, contact the maintainers (see the
 [repository](https://github.com/LekiaAnonim/kineticmodelssite)).
