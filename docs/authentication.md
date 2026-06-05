@@ -16,7 +16,7 @@ Tokens use DRF's token authentication. An administrator can issue one from the D
 admin, or via the token endpoint if enabled:
 
 ```bash
-curl -X POST "https://prometheus.example.org/api-token-auth/" \
+curl -X POST "https://dev.omethe.us/api-token-auth/" \
   -d "username=<user>&password=<password>"
 # -> {"token": "9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b"}
 ```
@@ -27,7 +27,7 @@ Send it in the `Authorization` header as `Token <your-token>`:
 
 ```bash
 curl -H "Authorization: Token 9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b" \
-  "https://prometheus.example.org/api/contribute/status/123/"
+  "https://dev.omethe.us/api/contribute/status/123/"
 ```
 
 In Swagger UI (`/api/docs/`), click **Authorize** and paste `Token <your-token>`; it is

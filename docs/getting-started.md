@@ -4,7 +4,7 @@ Throughout these docs we use the following base URLs. **Replace the production h
 your deployment's domain.**
 
 ```text
-https://prometheus.example.org      # production (replace with your domain)
+https://dev.omethe.us      # production (replace with your domain)
 http://localhost:8000               # local development
 ```
 
@@ -13,7 +13,7 @@ http://localhost:8000               # local development
 List kinetic models:
 
 ```bash
-curl "https://prometheus.example.org/api/kineticmodel/"
+curl "https://dev.omethe.us/api/kineticmodel/"
 ```
 
 ## Response shape
@@ -23,7 +23,7 @@ List endpoints are **paginated** (50 items per page) and return:
 ```json
 {
   "count": 102,
-  "next": "https://prometheus.example.org/api/kineticmodel/?page=2",
+  "next": "https://dev.omethe.us/api/kineticmodel/?page=2",
   "previous": null,
   "results": [
     { "id": 1, "model_name": "GRI-Mech 3.0", "prime_id": "", "source": 5, "info": "" }
@@ -34,7 +34,7 @@ List endpoints are **paginated** (50 items per page) and return:
 Retrieve a single object by ID:
 
 ```bash
-curl "https://prometheus.example.org/api/kineticmodel/1/"
+curl "https://dev.omethe.us/api/kineticmodel/1/"
 ```
 
 ## Common query parameters

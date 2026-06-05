@@ -3,7 +3,7 @@
 Using the built-in `fetch` (browser or Node.js 18+).
 
 ```javascript
-const BASE = "https://prometheus.example.org"; // replace with your deployment
+const BASE = "https://dev.omethe.us"; // replace with your deployment
 
 async function getAll(path, params = {}) {
   let url = new URL(BASE + path);

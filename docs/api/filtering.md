@@ -17,25 +17,25 @@ Filter by exact value or by range using `__` lookups:
 Ignition-delay datapoints measured between 1000 K and 1500 K:
 
 ```bash
-curl "https://prometheus.example.org/api/ignition-delay/?datapoint__temperature__gte=1000&datapoint__temperature__lte=1500"
+curl "https://dev.omethe.us/api/ignition-delay/?datapoint__temperature__gte=1000&datapoint__temperature__lte=1500"
 ```
 
 Datapoints near stoichiometric (φ ≈ 1) above 10 atm (≈ 1.0e6 Pa):
 
 ```bash
-curl "https://prometheus.example.org/api/experiment-datapoint/?equivalence_ratio__gte=0.9&equivalence_ratio__lte=1.1&pressure__gte=1000000"
+curl "https://dev.omethe.us/api/experiment-datapoint/?equivalence_ratio__gte=0.9&equivalence_ratio__lte=1.1&pressure__gte=1000000"
 ```
 
 Datasets for a given paper:
 
 ```bash
-curl "https://prometheus.example.org/api/experiment-dataset/?reference_doi=10.1016/j.combustflame.2014.03.006"
+curl "https://dev.omethe.us/api/experiment-dataset/?reference_doi=10.1016/j.combustflame.2014.03.006"
 ```
 
 Completed simulation runs for a model:
 
 ```bash
-curl "https://prometheus.example.org/api/simulation-run/?status=completed&kinetic_model=5"
+curl "https://dev.omethe.us/api/simulation-run/?status=completed&kinetic_model=5"
 ```
 
 !!! note "Choice fields are validated"
@@ -47,8 +47,8 @@ curl "https://prometheus.example.org/api/simulation-run/?status=completed&kineti
 `?search=` runs a case-insensitive search across the endpoint's text fields:
 
 ```bash
-curl "https://prometheus.example.org/api/composition-species/?search=methanol"
-curl "https://prometheus.example.org/api/kineticmodel/?search=GRI"
+curl "https://dev.omethe.us/api/composition-species/?search=methanol"
+curl "https://dev.omethe.us/api/kineticmodel/?search=GRI"
 ```
 
 ## Ordering
@@ -56,8 +56,8 @@ curl "https://prometheus.example.org/api/kineticmodel/?search=GRI"
 `?ordering=field` (ascending) or `?ordering=-field` (descending):
 
 ```bash
-curl "https://prometheus.example.org/api/ignition-delay/?ordering=ignition_delay"
-curl "https://prometheus.example.org/api/experiment-datapoint/?ordering=-temperature"
+curl "https://dev.omethe.us/api/ignition-delay/?ordering=ignition_delay"
+curl "https://dev.omethe.us/api/experiment-datapoint/?ordering=-temperature"
 ```
 
 ## Discovering the parameters

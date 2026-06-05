@@ -3,7 +3,7 @@
 Using `webread` / `weboptions`. MATLAB decodes JSON into structs automatically.
 
 ```matlab
-base = "https://prometheus.example.org";   % replace with your deployment
+base = "https://dev.omethe.us";   % replace with your deployment
 
 % Reads are public; for writes add an Authorization header:
 % opts = weboptions("HeaderFields", ["Authorization" "Token <your-token>"]);
@@ -24,7 +24,7 @@ end
 
 ```matlab
 function rows = get_all(path, query)
-    base = "https://prometheus.example.org";
+    base = "https://dev.omethe.us";
     url = base + path + query;
     rows = [];
     opts = weboptions("Timeout", 30);

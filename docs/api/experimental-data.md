@@ -33,7 +33,7 @@ ExperimentDataset            (apparatus, reference, authors, common properties)
 ## Example: ignition-delay datapoints for a high-temperature window
 
 ```bash
-curl "https://prometheus.example.org/api/ignition-delay/?datapoint__temperature__gte=1200&ordering=datapoint__temperature"
+curl "https://dev.omethe.us/api/ignition-delay/?datapoint__temperature__gte=1200&ordering=datapoint__temperature"
 ```
 
 A response item (abridged):
@@ -55,7 +55,7 @@ Use `composition-species` to locate compositions containing a species (by name, 
 InChI, or SMILES), then follow the composition back to its datapoints/datasets:
 
 ```bash
-curl "https://prometheus.example.org/api/composition-species/?cas=74-82-8"
+curl "https://dev.omethe.us/api/composition-species/?cas=74-82-8"
 ```
 
 See the [language examples](../examples/python.md) for end-to-end scripts.

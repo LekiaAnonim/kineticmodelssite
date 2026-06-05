@@ -11,7 +11,7 @@ The complete, always-current API reference is generated from the live OpenAPI sc
 
 !!! note
     These links resolve on the deployed server. From this docs site, use the same host
-    (e.g. `https://prometheus.example.org/api/docs/`); for local development they are at
+    (e.g. `https://dev.omethe.us/api/docs/`); for local development they are at
     `http://localhost:8000/api/docs/`.
 
 ## Why use the schema?

@@ -198,11 +198,10 @@ SPECTACULAR_SETTINGS = {
         "authentication."
     ),
     "VERSION": "1.0.0",
-    # NOTE: replace the production server URL and (optionally) add a LICENSE for
-    # your deployment. The first SERVERS entry is used as the base URL in the
-    # generated code samples and as the Swagger "Servers" default.
+    # The first SERVERS entry is the base URL used in the generated code samples
+    # and as the Swagger "Servers" default. (Optionally add a LICENSE entry.)
     "SERVERS": [
-        {"url": "https://prometheus.example.org", "description": "Production (replace with your deployed domain)"},
+        {"url": "https://dev.omethe.us", "description": "Production"},
         {"url": "http://localhost:8000", "description": "Local development"},
     ],
     "CONTACT": {
@@ -211,7 +210,7 @@ SPECTACULAR_SETTINGS = {
     },
     "EXTERNAL_DOCS": {
         "description": "Platform & API documentation",
-        "url": "https://prometheus.example.org/docs/",
+        "url": "https://dev.omethe.us/docs/",
     },
     "POSTPROCESSING_HOOKS": [
         # Keep the default enum hook, then append multi-language code samples.

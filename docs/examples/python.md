@@ -5,7 +5,7 @@ Using the `requests` library. For a typed client instead, see [Client SDKs](../c
 ```python
 import requests
 
-BASE = "https://prometheus.example.org"   # replace with your deployment
+BASE = "https://dev.omethe.us"   # replace with your deployment
 # TOKEN only needed for contribution/admin endpoints:
 # HEADERS = {"Authorization": "Token <your-token>"}
 
@@ -36,7 +36,7 @@ for p in points[:5]:
 import requests
 import matplotlib.pyplot as plt
 
-BASE = "https://prometheus.example.org"
+BASE = "https://dev.omethe.us"
 resp = requests.get(f"{BASE}/api/datapoint-result/", params={"success": "true"})
 rows = resp.json()["results"]
 

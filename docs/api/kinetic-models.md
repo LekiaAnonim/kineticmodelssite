@@ -22,24 +22,24 @@ an admin token.
 Find a kinetic model by name:
 
 ```bash
-curl "https://prometheus.example.org/api/kineticmodel/?search=GRI-Mech"
+curl "https://dev.omethe.us/api/kineticmodel/?search=GRI-Mech"
 ```
 
 Find a species by CAS number:
 
 ```bash
-curl "https://prometheus.example.org/api/species/?cas_number=74-82-8"
+curl "https://dev.omethe.us/api/species/?cas_number=74-82-8"
 ```
 
 List a model with its assembled components (the detail view nests species names and
 thermo/transport/kinetics comments):
 
 ```bash
-curl "https://prometheus.example.org/api/kineticmodel/1/"
+curl "https://dev.omethe.us/api/kineticmodel/1/"
 ```
 
 Look up the literature source behind a model:
 
 ```bash
-curl "https://prometheus.example.org/api/source/?search=10.1016/j.combustflame"
+curl "https://dev.omethe.us/api/source/?search=10.1016/j.combustflame"
 ```

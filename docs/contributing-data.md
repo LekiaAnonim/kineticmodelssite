@@ -7,7 +7,7 @@ merge. This keeps every contribution reviewed and provenance-tracked.
 ## Upload a file
 
 ```bash
-curl -X POST "https://prometheus.example.org/api/contribute/" \
+curl -X POST "https://dev.omethe.us/api/contribute/" \
   -H "Authorization: Token <your-token>" \
   -F "contributor_name=Ada Lovelace" \
   -F "contributor_orcid=0000-0002-1825-0097" \
@@ -35,7 +35,7 @@ rejected with per-file messages.
 
 ```bash
 curl -H "Authorization: Token <your-token>" \
-  "https://prometheus.example.org/api/contribute/status/123/"
+  "https://dev.omethe.us/api/contribute/status/123/"
 ```
 
 Returns the CI check-run statuses for the contribution's pull request.
