@@ -13,7 +13,7 @@ ExperimentDataset ──< ExperimentDatapoint ──1:1── one measurement re
    └─ datapoints                                           rate-coefficient, …)
 ExperimentDatapoint ── composition (Composition) ──< CompositionSpecies (species + amount)
 
-KineticModel ── source (Source);   Species ──< Isomers ── formula (Formula) / structures
+KineticModel ── source (Source);   Species ──< Isomers ── formula (Formula) / structures; Reactions ── Kinetics
 SimulationRun = KineticModel × ExperimentDataset ── result (SimulationResult) ──< DatapointResult
 ModelDatasetCoverage = KineticModel × ExperimentDataset  (agreement summary)
 ```
@@ -22,6 +22,18 @@ ModelDatasetCoverage = KineticModel × ExperimentDataset  (agreement summary)
 
 By default, foreign keys come back as IDs. Add `?expand=` to pull them inline in
 the same response; use a dotted path for nested expansion:
+
+!!! note "Why expand exists"
+    By default a related object is returned as just its ID. For example, an
+    ignition-delay record gives `{"id": 12, "ignition_delay": 0.00042, "datapoint": 87}`,
+    where `datapoint` is only the number `87`. To get that datapoint's temperature,
+    pressure, and composition you would otherwise make a second request to
+    `/api/experiment-datapoint/87/`, and looping over 500 records would mean 500 extra
+    requests (the classic "N+1 requests" problem, slow over a network). `?expand=`
+    lets you pull the related object inline in a single request, but only when you ask
+    for it, so callers who just need the IDs still get small, fast responses. Only the
+    fields listed below are expandable; endpoints not listed return related objects as
+    IDs.
 
 ```bash
 # A datapoint with its full dataset object inline

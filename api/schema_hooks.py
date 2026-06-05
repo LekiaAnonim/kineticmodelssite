@@ -288,6 +288,126 @@ def fix_pagination_urls(result, generator, request, public):
     return result
 
 
+# ---------------------------------------------------------------------------
+# Materialized response examples (so Swagger UI renders them too)
+# ---------------------------------------------------------------------------
+# ReDoc synthesizes a response sample from per-property ``example`` values, but
+# Swagger UI's auto-generator does not render nested ``$ref`` objects the same
+# way.  Building a concrete example object and attaching it at the response
+# media-type level makes both renderers show the same corrected sample.
+
+_FALLBACK = {
+    "integer": 0,
+    "number": 0.0,
+    "boolean": True,
+    "string": "string",
+}
+
+# Realistic (unit, value) for a nested ValueWithUnit, inferred from the name of
+# the parent property it hangs off. Ordered most-specific first so that, e.g.,
+# ``first_stage_ignition_delay`` and ``pressure_rise`` match before
+# ``ignition_delay`` / ``pressure``.
+_QUANTITY_UNITS = (
+    ("equivalence_ratio", ("", 1.0)),
+    ("temperature", ("K", 1000.0)),
+    ("pressure_rise", ("bar/ms", 0.5)),
+    ("pressure", ("atm", 1.0)),
+    ("first_stage_ignition_delay", ("us", 1000.0)),
+    ("ignition_delay", ("us", 420.0)),
+    ("laminar_burning_velocity", ("cm/s", 38.0)),
+    ("burning_velocity", ("cm/s", 38.0)),
+    ("residence_time", ("s", 1.5)),
+    ("flow_rate", ("sccm", 5.0)),
+    ("distance", ("cm", 1.0)),
+)
+
+
+def _apply_unit_hint(pname, value):
+    """Give a materialized nested ValueWithUnit realistic units, in place."""
+    if not isinstance(value, dict) or "units" not in value:
+        return
+    low = pname.lower()
+    for key, (unit, val) in _QUANTITY_UNITS:
+        if key in low:
+            value["units"] = unit
+            if "value" in value:
+                value["value"] = val
+            if "value_text" in value:
+                value["value_text"] = f"{val} {unit}".strip()
+            return
+
+
+def _example_from_schema(node, schemas, seen):
+    """Build a concrete example value from a (possibly $ref) schema node."""
+    if not isinstance(node, dict):
+        return None
+
+    if "$ref" in node:
+        name = node["$ref"].rsplit("/", 1)[-1]
+        if name in seen:  # guard against recursive components
+            return {}
+        return _example_from_schema(schemas.get(name, {}), schemas, seen | {name})
+
+    if "example" in node:
+        return node["example"]
+
+    if node.get("allOf"):
+        merged = {}
+        for sub in node["allOf"]:
+            val = _example_from_schema(sub, schemas, seen)
+            if isinstance(val, dict):
+                merged.update(val)
+        return merged
+    for key in ("oneOf", "anyOf"):
+        if node.get(key):
+            return _example_from_schema(node[key][0], schemas, seen)
+
+    if node.get("enum"):
+        return node["enum"][0]
+
+    t = node.get("type")
+    if t == "object" or "properties" in node:
+        obj = {}
+        for pname, p in (node.get("properties") or {}).items():
+            child = _example_from_schema(p, schemas, seen)
+            _apply_unit_hint(pname, child)
+            obj[pname] = child
+        return obj
+    if t == "array":
+        item = _example_from_schema(node.get("items") or {}, schemas, seen)
+        return [item] if item is not None else []
+    if t == "string" and node.get("format") == "date-time":
+        return "2024-01-01T00:00:00Z"
+    return _FALLBACK.get(t)
+
+
+def add_response_examples(result, generator, request, public):
+    """Attach a materialized example to each JSON response (renderer-agnostic).
+
+    Runs after ``add_field_examples`` and ``fix_pagination_urls`` so the
+    per-property and pagination examples are already in place.
+    """
+    schemas = (result.get("components") or {}).get("schemas") or {}
+    for path_item in (result.get("paths") or {}).values():
+        if not isinstance(path_item, dict):
+            continue
+        for operation in path_item.values():
+            if not isinstance(operation, dict):
+                continue
+            for response in (operation.get("responses") or {}).values():
+                content = response.get("content") if isinstance(response, dict) else None
+                media = content.get("application/json") if isinstance(content, dict) else None
+                if not isinstance(media, dict) or "example" in media:
+                    continue
+                schema = media.get("schema")
+                if not isinstance(schema, dict):
+                    continue
+                example = _example_from_schema(schema, schemas, frozenset())
+                if example is not None:
+                    media["example"] = example
+    return result
+
+
 _FLEX_PARAMS = [
     {
         "name": "expand",

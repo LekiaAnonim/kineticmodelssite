@@ -2,7 +2,7 @@
 
 All resources live under `/api/`. List endpoints are paginated, public to read, and
 support [filtering, search, and ordering](filtering.md). The full, always-current
-reference is the live [Swagger UI](../reference.md) and ReDoc.
+reference is the live [Swagger UI and ReDoc](../reference.md).
 
 ## Resource map
 
