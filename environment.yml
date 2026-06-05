@@ -380,6 +380,7 @@ dependencies:
       - docstring-parser==0.17.0
       - docutils==0.21.2
       - drf-spectacular==0.29.0
+      - drf-spectacular-sidecar==2026.6.1
       - drf-writable-nested==0.7.2
       - filelock==3.19.1
       - flake8==6.1.0
@@ -401,6 +402,7 @@ dependencies:
       - itsdangerous==2.2.0
       - lazy-object-proxy==1.12.0
       - mccabe==0.7.0
+      - mkdocs-material==9.7.6
       - msgpack==1.1.2
       - multidict==6.7.1
       - mypy-extensions==1.1.0

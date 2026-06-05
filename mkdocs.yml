@@ -1,0 +1,69 @@
+site_name: Prometheus Cyberinfrastructure
+site_description: FAIR combustion-kinetics data platform — usage guide and API reference
+site_url: https://prometheus.example.org/docs/
+repo_url: https://github.com/LekiaAnonim/kineticmodelssite
+docs_dir: docs
+site_dir: docs_site
+use_directory_urls: false
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: deep orange
+      accent: orange
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep orange
+      accent: orange
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Authentication: authentication.md
+  - API guide:
+      - Overview: api/overview.md
+      - Filtering & search: api/filtering.md
+      - Experimental data: api/experimental-data.md
+      - Kinetic models & species: api/kinetic-models.md
+      - Analysis & agreement: api/analysis.md
+  - Examples:
+      - cURL: examples/curl.md
+      - Python: examples/python.md
+      - R: examples/r.md
+      - MATLAB: examples/matlab.md
+      - JavaScript: examples/javascript.md
+      - Java: examples/java.md
+  - Client SDKs: clients.md
+  - API reference: reference.md
+  - Contributing data: contributing-data.md
