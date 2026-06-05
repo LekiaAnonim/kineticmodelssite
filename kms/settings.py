@@ -206,7 +206,7 @@ SPECTACULAR_SETTINGS = {
     ],
     "CONTACT": {
         "name": "Prometheus Cyberinfrastructure",
-        "url": "https://github.com/LekiaAnonim/kineticmodelssite",
+        "url": "https://dev.omethe.us",
     },
     "EXTERNAL_DOCS": {
         "description": "Platform & API documentation",
