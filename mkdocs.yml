@@ -59,6 +59,7 @@ nav:
   - API guide:
       - Overview: api/overview.md
       - Filtering & search: api/filtering.md
+      - Relationships & complex queries: api/relationships.md
       - Experimental data: api/experimental-data.md
       - Kinetic models & species: api/kinetic-models.md
       - Analysis & agreement: api/analysis.md
