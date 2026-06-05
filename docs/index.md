@@ -1,7 +1,6 @@
 # Prometheus Cyberinfrastructure
 
-Prometheus is a FAIR, openly contributable cyberinfrastructure for combustion and
-catalysis kinetics. It links **kinetic models** and **experimental datasets** through
+Prometheus is a FAIR, openly contributable cyberinfrastructure for combustion kinetics. It links **kinetic models** and **experimental datasets** through
 canonical species and reaction identifiers, and exposes the entire corpus through a
 documented REST API.
 
