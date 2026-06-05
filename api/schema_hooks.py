@@ -286,3 +286,48 @@ def fix_pagination_urls(result, generator, request, public):
 
     walk(result)
     return result
+
+
+_FLEX_PARAMS = [
+    {
+        "name": "expand",
+        "in": "query",
+        "required": False,
+        "schema": {"type": "string"},
+        "description": (
+            "Comma-separated related fields to expand inline instead of returning "
+            "their IDs, e.g. `?expand=dataset` or nested `?expand=dataset.reference`. "
+            "Expandable fields are documented per endpoint."
+        ),
+    },
+    {
+        "name": "fields",
+        "in": "query",
+        "required": False,
+        "schema": {"type": "string"},
+        "description": "Comma-separated subset of fields to return (sparse fieldset).",
+    },
+    {
+        "name": "omit",
+        "in": "query",
+        "required": False,
+        "schema": {"type": "string"},
+        "description": "Comma-separated fields to omit from the response.",
+    },
+]
+
+
+def add_flex_params(result, generator, request, public):
+    """Document the drf-flex-fields expand/fields/omit query params on GET operations."""
+    for path_item in (result.get("paths") or {}).values():
+        if not isinstance(path_item, dict):
+            continue
+        get = path_item.get("get")
+        if not isinstance(get, dict):
+            continue
+        params = get.setdefault("parameters", [])
+        existing = {p.get("name") for p in params if isinstance(p, dict)}
+        for fp in _FLEX_PARAMS:
+            if fp["name"] not in existing:
+                params.append(dict(fp))
+    return result

@@ -6,13 +6,15 @@ the contribution endpoints (see ``api/contribution_views.py``) and the PR/CI
 workflow, not written directly through these endpoints.
 
 High-value relations (quantities, apparatus, authors, composition) are nested
-inline via explicit named serializers so responses carry real values rather than
-bare IDs. Parent back-references (e.g. a datapoint's ``dataset``) are kept as IDs
-to avoid circular and oversized payloads.
+inline. Foreign-key relations to parents (a datapoint's ``dataset``, a dataset's
+``reference``, a measurement's ``datapoint``) are returned as IDs by default and
+can be pulled inline on demand with ``?expand=`` (drf-flex-fields); ``?fields=``
+and ``?omit=`` trim the response.
 """
 
 from drf_spectacular.utils import extend_schema
-from rest_framework import serializers, viewsets
+from rest_flex_fields import FlexFieldsModelSerializer
+from rest_framework import viewsets
 from rest_framework.permissions import AllowAny
 
 from chemked_database import models
@@ -28,7 +30,7 @@ class ReadOnlyViewSet(viewsets.ReadOnlyModelViewSet):
 # ---------------------------------------------------------------------------
 # Leaf / nested serializers (defined first so composites can reference them)
 # ---------------------------------------------------------------------------
-class ValueWithUnitSerializer(serializers.ModelSerializer):
+class ValueWithUnitSerializer(FlexFieldsModelSerializer):
     """A measured quantity: value, units, and uncertainty metadata."""
 
     class Meta:
@@ -36,31 +38,31 @@ class ValueWithUnitSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
-class ApparatusSerializer(serializers.ModelSerializer):
+class ApparatusSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.Apparatus
         fields = "__all__"
 
 
-class FileAuthorSerializer(serializers.ModelSerializer):
+class FileAuthorSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.FileAuthor
         fields = "__all__"
 
 
-class ReferenceAuthorSerializer(serializers.ModelSerializer):
+class ReferenceAuthorSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.ReferenceAuthor
         fields = "__all__"
 
 
-class CompositionSpeciesSerializer(serializers.ModelSerializer):
+class CompositionSpeciesSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.CompositionSpecies
         fields = "__all__"
 
 
-class CompositionSerializer(serializers.ModelSerializer):
+class CompositionSerializer(FlexFieldsModelSerializer):
     # related_name on CompositionSpecies.composition is "species"
     species = CompositionSpeciesSerializer(many=True, read_only=True)
 
@@ -69,7 +71,7 @@ class CompositionSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
-class CommonPropertiesSerializer(serializers.ModelSerializer):
+class CommonPropertiesSerializer(FlexFieldsModelSerializer):
     pressure_quantity = ValueWithUnitSerializer(read_only=True)
     pressure_rise_quantity = ValueWithUnitSerializer(read_only=True)
     reactor_volume_quantity = ValueWithUnitSerializer(read_only=True)
@@ -88,7 +90,7 @@ class CommonPropertiesSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------------
 # Top-level resource serializers
 # ---------------------------------------------------------------------------
-class ExperimentDatasetSerializer(serializers.ModelSerializer):
+class ExperimentDatasetSerializer(FlexFieldsModelSerializer):
     apparatus = ApparatusSerializer(read_only=True)
     file_authors = FileAuthorSerializer(many=True, read_only=True)
     reference_authors = ReferenceAuthorSerializer(many=True, read_only=True)
@@ -98,8 +100,13 @@ class ExperimentDatasetSerializer(serializers.ModelSerializer):
         model = models.ExperimentDataset
         fields = "__all__"
 
+    expandable_fields = {
+        # The literature source lives in the database app.
+        "reference": ("api.serializers.SourceSerializer", {"read_only": True}),
+    }
 
-class ExperimentDatapointSerializer(serializers.ModelSerializer):
+
+class ExperimentDatapointSerializer(FlexFieldsModelSerializer):
     temperature_quantity = ValueWithUnitSerializer(read_only=True)
     pressure_quantity = ValueWithUnitSerializer(read_only=True)
     equivalence_ratio_quantity = ValueWithUnitSerializer(read_only=True)
@@ -109,8 +116,16 @@ class ExperimentDatapointSerializer(serializers.ModelSerializer):
         model = models.ExperimentDatapoint
         fields = "__all__"
 
+    expandable_fields = {
+        "dataset": (ExperimentDatasetSerializer, {"read_only": True}),
+    }
 
-class IgnitionDelayDatapointSerializer(serializers.ModelSerializer):
+
+# Each measurement-type record one-to-one with a datapoint, expandable to it.
+_DATAPOINT_EXPAND = {"datapoint": (ExperimentDatapointSerializer, {"read_only": True})}
+
+
+class IgnitionDelayDatapointSerializer(FlexFieldsModelSerializer):
     ignition_delay_quantity = ValueWithUnitSerializer(read_only=True)
     first_stage_ignition_delay_quantity = ValueWithUnitSerializer(read_only=True)
     pressure_rise_quantity = ValueWithUnitSerializer(read_only=True)
@@ -119,8 +134,10 @@ class IgnitionDelayDatapointSerializer(serializers.ModelSerializer):
         model = models.IgnitionDelayDatapoint
         fields = "__all__"
 
+    expandable_fields = _DATAPOINT_EXPAND
 
-class LaminarBurningVelocityDatapointSerializer(serializers.ModelSerializer):
+
+class LaminarBurningVelocityDatapointSerializer(FlexFieldsModelSerializer):
     laminar_burning_velocity_quantity = ValueWithUnitSerializer(read_only=True)
     stretch_quantity = ValueWithUnitSerializer(read_only=True)
     pressure_rise_quantity = ValueWithUnitSerializer(read_only=True)
@@ -129,24 +146,30 @@ class LaminarBurningVelocityDatapointSerializer(serializers.ModelSerializer):
         model = models.LaminarBurningVelocityMeasurementDatapoint
         fields = "__all__"
 
+    expandable_fields = _DATAPOINT_EXPAND
 
-class RateCoefficientDatapointSerializer(serializers.ModelSerializer):
+
+class RateCoefficientDatapointSerializer(FlexFieldsModelSerializer):
     rate_coefficient_quantity = ValueWithUnitSerializer(read_only=True)
 
     class Meta:
         model = models.RateCoefficientDatapoint
         fields = "__all__"
 
+    expandable_fields = _DATAPOINT_EXPAND
 
-class ConcentrationTimeProfileDatapointSerializer(serializers.ModelSerializer):
+
+class ConcentrationTimeProfileDatapointSerializer(FlexFieldsModelSerializer):
     timeshift_amount_quantity = ValueWithUnitSerializer(read_only=True)
 
     class Meta:
         model = models.ConcentrationTimeProfileMeasurementDatapoint
         fields = "__all__"
 
+    expandable_fields = _DATAPOINT_EXPAND
 
-class JetStirredReactorDatapointSerializer(serializers.ModelSerializer):
+
+class JetStirredReactorDatapointSerializer(FlexFieldsModelSerializer):
     environment_temperature_quantity = ValueWithUnitSerializer(read_only=True)
     measured_composition = CompositionSerializer(read_only=True)
 
@@ -154,8 +177,10 @@ class JetStirredReactorDatapointSerializer(serializers.ModelSerializer):
         model = models.JetStirredReactorMeasurementDatapoint
         fields = "__all__"
 
+    expandable_fields = _DATAPOINT_EXPAND
 
-class OutletConcentrationDatapointSerializer(serializers.ModelSerializer):
+
+class OutletConcentrationDatapointSerializer(FlexFieldsModelSerializer):
     residence_time_quantity = ValueWithUnitSerializer(read_only=True)
     volumetric_flow_quantity = ValueWithUnitSerializer(read_only=True)
     measured_composition = CompositionSerializer(read_only=True)
@@ -165,8 +190,10 @@ class OutletConcentrationDatapointSerializer(serializers.ModelSerializer):
         model = models.OutletConcentrationMeasurementDatapoint
         fields = "__all__"
 
+    expandable_fields = _DATAPOINT_EXPAND
 
-class BurnerStabilizedFlameDatapointSerializer(serializers.ModelSerializer):
+
+class BurnerStabilizedFlameDatapointSerializer(FlexFieldsModelSerializer):
     distance_quantity = ValueWithUnitSerializer(read_only=True)
     flow_rate_quantity = ValueWithUnitSerializer(read_only=True)
     measured_composition = CompositionSerializer(read_only=True)
@@ -174,6 +201,8 @@ class BurnerStabilizedFlameDatapointSerializer(serializers.ModelSerializer):
     class Meta:
         model = models.BurnerStabilizedFlameSpeciationMeasurementDatapoint
         fields = "__all__"
+
+    expandable_fields = _DATAPOINT_EXPAND
 
 
 # ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+from rest_flex_fields import FlexFieldsModelSerializer
 from rest_framework import serializers
 from drf_writable_nested.serializers import NestedCreateMixin
 
@@ -21,22 +22,30 @@ class NestedModelSerializer(NestedCreateMixin, serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
-class FormulaSerializer(serializers.ModelSerializer):
+class FormulaSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.Formula
         fields = "__all__"
 
 
-class IsomerSerializer(serializers.ModelSerializer):
+class IsomerSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.Isomer
         fields = "__all__"
 
+    expandable_fields = {
+        "formula": (FormulaSerializer, {"read_only": True}),
+    }
 
-class SpeciesSerializer(serializers.ModelSerializer):
+
+class SpeciesSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.Species
         exclude = ["hash"]
+
+    expandable_fields = {
+        "isomers": (IsomerSerializer, {"many": True, "read_only": True}),
+    }
 
     def create(self, validated_data):
         isomers = models.Isomer.objects.filter(pk__in=validated_data["isomers"])
@@ -68,13 +77,13 @@ class ReactionSerializer(NestedModelSerializer):
         return super().create(validated_data)
 
 
-class ThermoSerializer(serializers.ModelSerializer):
+class ThermoSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.Thermo
         fields = "__all__"
 
 
-class TransportSerializer(serializers.ModelSerializer):
+class TransportSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.Transport
         fields = "__all__"
@@ -149,19 +158,27 @@ class KineticModelSerializer(NestedModelSerializer):
         ]
 
 
-class AuthorSerializer(serializers.ModelSerializer):
+class AuthorSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.Author
         fields = "__all__"
 
 
-class SourceSerializer(serializers.ModelSerializer):
+class SourceSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.Source
         fields = "__all__"
 
+    expandable_fields = {
+        "authors": (AuthorSerializer, {"many": True, "read_only": True}),
+    }
 
-class StructureSerializer(serializers.ModelSerializer):
+
+class StructureSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.Structure
         fields = "__all__"
+
+    expandable_fields = {
+        "isomer": (IsomerSerializer, {"read_only": True}),
+    }

@@ -217,6 +217,7 @@ SPECTACULAR_SETTINGS = {
         "drf_spectacular.hooks.postprocess_schema_enums",
         "api.schema_hooks.add_field_examples",
         "api.schema_hooks.fix_pagination_urls",
+        "api.schema_hooks.add_flex_params",
         "api.schema_hooks.add_code_samples",
     ],
     "SWAGGER_UI_SETTINGS": {

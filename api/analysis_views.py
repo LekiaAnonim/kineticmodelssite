@@ -4,10 +4,14 @@ Exposes simulation runs/results and model-vs-experiment agreement metrics. These
 records are produced by the simulation pipeline, so the endpoints are read-only.
 User references (``triggered_by_user``) and server ``traceback`` text are excluded
 so the public API does not leak account or internal-path information.
+
+Foreign keys (kinetic model, dataset, datapoint, simulation run/result) are
+returned as IDs and can be pulled inline with ``?expand=`` (drf-flex-fields).
 """
 
 from drf_spectacular.utils import extend_schema
-from rest_framework import serializers, viewsets
+from rest_flex_fields import FlexFieldsModelSerializer
+from rest_framework import viewsets
 from rest_framework.permissions import AllowAny
 
 from analysis import models
@@ -23,50 +27,69 @@ class ReadOnlyViewSet(viewsets.ReadOnlyModelViewSet):
 # ---------------------------------------------------------------------------
 # Serializers
 # ---------------------------------------------------------------------------
-class SimulationRunSerializer(serializers.ModelSerializer):
+class SimulationRunSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.SimulationRun
         # Exclude internal/PII fields from the public API.
         exclude = ["traceback", "triggered_by_user"]
 
+    expandable_fields = {
+        "kinetic_model": ("api.serializers.KineticModelSerializer", {"read_only": True}),
+        "dataset": ("api.chemked_views.ExperimentDatasetSerializer", {"read_only": True}),
+    }
 
-class SimulationResultSerializer(serializers.ModelSerializer):
+
+class SimulationResultSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.SimulationResult
         fields = "__all__"
 
+    expandable_fields = {
+        "simulation_run": (SimulationRunSerializer, {"read_only": True}),
+    }
 
-class DatapointResultSerializer(serializers.ModelSerializer):
+
+class DatapointResultSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.DatapointResult
         fields = "__all__"
 
+    expandable_fields = {
+        "simulation_result": (SimulationResultSerializer, {"read_only": True}),
+        "datapoint": ("api.chemked_views.ExperimentDatapointSerializer", {"read_only": True}),
+    }
 
-class SpeciesMappingSerializer(serializers.ModelSerializer):
+
+class SpeciesMappingSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.SpeciesMapping
         fields = "__all__"
 
 
-class ModelDatasetCoverageSerializer(serializers.ModelSerializer):
+class ModelDatasetCoverageSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.ModelDatasetCoverage
         fields = "__all__"
 
+    expandable_fields = {
+        "kinetic_model": ("api.serializers.KineticModelSerializer", {"read_only": True}),
+        "dataset": ("api.chemked_views.ExperimentDatasetSerializer", {"read_only": True}),
+    }
 
-class FuelGroupSerializer(serializers.ModelSerializer):
+
+class FuelGroupSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.FuelGroup
         fields = "__all__"
 
 
-class FuelSpeciesSerializer(serializers.ModelSerializer):
+class FuelSpeciesSerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.FuelSpecies
         fields = "__all__"
 
 
-class FuelModelCompatibilitySerializer(serializers.ModelSerializer):
+class FuelModelCompatibilitySerializer(FlexFieldsModelSerializer):
     class Meta:
         model = models.FuelModelCompatibility
         fields = "__all__"
