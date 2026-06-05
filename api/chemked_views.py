@@ -250,7 +250,7 @@ class LaminarBurningVelocityViewSet(ReadOnlyViewSet):
 class RateCoefficientViewSet(ReadOnlyViewSet):
     queryset = models.RateCoefficientDatapoint.objects.all()
     serializer_class = RateCoefficientDatapointSerializer
-    filterset_fields = ["measurement_type", "reaction_order"]
+    filterset_class = filters.RateCoefficientFilter
     search_fields = ["reaction", "method"]
     ordering_fields = ["id"]
 
@@ -259,7 +259,7 @@ class RateCoefficientViewSet(ReadOnlyViewSet):
 class ConcentrationTimeProfileViewSet(ReadOnlyViewSet):
     queryset = models.ConcentrationTimeProfileMeasurementDatapoint.objects.all()
     serializer_class = ConcentrationTimeProfileDatapointSerializer
-    filterset_fields = ["timeshift_type"]
+    filterset_class = filters.ConcentrationTimeProfileFilter
     ordering_fields = ["id"]
 
 
@@ -267,6 +267,7 @@ class ConcentrationTimeProfileViewSet(ReadOnlyViewSet):
 class JetStirredReactorViewSet(ReadOnlyViewSet):
     queryset = models.JetStirredReactorMeasurementDatapoint.objects.all()
     serializer_class = JetStirredReactorDatapointSerializer
+    filterset_class = filters.JetStirredReactorFilter
     ordering_fields = ["environment_temperature", "id"]
 
 
@@ -274,6 +275,7 @@ class JetStirredReactorViewSet(ReadOnlyViewSet):
 class OutletConcentrationViewSet(ReadOnlyViewSet):
     queryset = models.OutletConcentrationMeasurementDatapoint.objects.all()
     serializer_class = OutletConcentrationDatapointSerializer
+    filterset_class = filters.OutletConcentrationFilter
     ordering_fields = ["residence_time", "id"]
 
 
@@ -281,4 +283,5 @@ class OutletConcentrationViewSet(ReadOnlyViewSet):
 class BurnerStabilizedFlameViewSet(ReadOnlyViewSet):
     queryset = models.BurnerStabilizedFlameSpeciationMeasurementDatapoint.objects.all()
     serializer_class = BurnerStabilizedFlameDatapointSerializer
+    filterset_class = filters.BurnerStabilizedFlameFilter
     ordering_fields = ["distance", "id"]
