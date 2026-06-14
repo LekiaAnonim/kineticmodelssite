@@ -43,7 +43,7 @@ class IsomerViewSet(PermissionsViewSet):
 class SpeciesViewSet(PermissionsViewSet):
     queryset = models.Species.objects.all()
     serializer_class = serializers.SpeciesSerializer
-    filterset_fields = ["prime_id", "cas_number"]
+    filterset_fields = ["prime_id", "cas_number", "isomers__formula"]
     search_fields = ["prime_id", "cas_number", "hash", "isomers__inchi"]
     ordering_fields = ["id"]
 
