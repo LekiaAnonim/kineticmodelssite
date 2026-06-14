@@ -451,3 +451,32 @@ def add_flex_params(result, generator, request, public):
             if fp["name"] not in existing:
                 params.append(dict(fp))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Ontology / linked-data context
+# ---------------------------------------------------------------------------
+# Namespaces used by the JSON-LD metadata endpoints (api.fair_metadata) and the
+# ontology artifacts (prometheus_chemked_ontology.ttl, prometheus-exp.ttl).
+_ONTOLOGY_CONTEXT = {
+    "prom": "https://pr.omethe.us/ontology/prometheus#",
+    "chemked": "https://pr.omethe.us/ontology/chemked#",
+    "pmtx": "https://omethe.us/ontology/prometheus-exp#",
+    "ontokin": "http://www.theworldavatar.com/ontology/ontokin/OntoKin.owl#",
+    "qudt": "http://qudt.org/schema/qudt/",
+    "prov": "http://www.w3.org/ns/prov#",
+    "dcterms": "http://purl.org/dc/terms/",
+    "schema": "https://schema.org/",
+    "skos": "http://www.w3.org/2004/02/skos/core#",
+}
+
+
+def add_ontology_context(result, generator, request, public):
+    """Advertise the ontology namespaces backing the JSON-LD metadata endpoints.
+
+    Surfaces an ``x-ontologyContext`` block in ``info`` so API consumers can
+    resolve the ``prom:``/``chemked:``/``ontokin:`` terms used by the
+    ``<resource>/<pk>/metadata/`` linked-data documents.
+    """
+    result.setdefault("info", {})["x-ontologyContext"] = dict(_ONTOLOGY_CONTEXT)
+    return result

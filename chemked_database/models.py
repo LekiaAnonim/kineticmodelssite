@@ -226,6 +226,13 @@ class FileAuthor(models.Model):
         db_index=True,
         help_text="ORCID identifier (e.g., 0000-0003-4425-7097)"
     )
+    person = models.ForeignKey(
+        "provenance.Person",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
     
     class Meta:
         db_table = 'chemked_file_authors'
@@ -249,6 +256,13 @@ class ReferenceAuthor(models.Model):
         blank=True,
         db_index=True,
         help_text="ORCID identifier (if available)"
+    )
+    person = models.ForeignKey(
+        "provenance.Person",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
     )
 
     class Meta:
@@ -279,6 +293,13 @@ class Apparatus(models.Model):
         help_text="Operating mode (e.g., 'reflected shock', 'premixed')"
     )
     institution = models.CharField(max_length=255, blank=True)
+    institution_ref = models.ForeignKey(
+        "provenance.Institution",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="apparatus",
+    )
     facility = models.CharField(
         max_length=255, 
         blank=True,
@@ -411,6 +432,16 @@ class ExperimentDataset(models.Model):
     # Validation
     is_valid = models.BooleanField(default=True)
     validation_errors = models.JSONField(default=list, blank=True)
+    
+    # FAIR metadata
+    license = models.ForeignKey(
+        "provenance.License",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="datasets",
+    )
+    data_repository_url = models.URLField(blank=True)
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
