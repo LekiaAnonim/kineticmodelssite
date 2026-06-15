@@ -45,7 +45,6 @@ CURIE_MAP = {
     "doi": "https://doi.org/",
     "orcid": "https://orcid.org/",
     "ror": "https://ror.org/",
-    "prime": "https://primekinetics.org/",
     "chemked": "https://dev.omethe.us/concept/",
     "ontokin": "http://www.theworldavatar.com/ontology/ontokin/OntoKin.owl#",
     "pmtx": "https://omethe.us/ontology/prometheus-exp#",
