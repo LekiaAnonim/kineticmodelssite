@@ -135,15 +135,29 @@ def _expand(curie):
     return base + local
 
 
-@lru_cache(maxsize=1)
-def _provenance_edges():
-    """Load the provenance sidecar once: list of {from, to, kind} CURIE edges."""
-    path = _MAPPINGS_DIR / "prometheus.provenance.json"
+@lru_cache(maxsize=4)
+def _load_edges(path, _mtime):
+    """Parse the sidecar; cached per (path, mtime) so regenerating it reloads."""
     try:
         with open(path) as fh:
             return json.load(fh).get("edges", [])
     except (OSError, ValueError):
         return []
+
+
+def _provenance_edges():
+    """Load the provenance sidecar: list of {from, to, kind} CURIE edges.
+
+    Keyed on the file's modification time so that regenerating
+    ``prometheus.provenance.json`` (via ``export_provenance_edges``) is reflected
+    without restarting the server.
+    """
+    path = _MAPPINGS_DIR / "prometheus.provenance.json"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return []
+    return _load_edges(str(path), mtime)
 
 
 def _edges_for(curie):
