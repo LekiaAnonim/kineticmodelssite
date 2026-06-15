@@ -283,6 +283,57 @@ def resolve_node(request, kind, slug):
     return render(request, "provenance/node.html", context)
 
 
+def resolve_collection(request, kind):
+    """Dereference a namespace/collection base IRI (e.g. ``.../kineticmodel/``).
+
+    The per-entity leaf IRIs (``.../kineticmodel/mb-dooley``) resolve via
+    :func:`resolve_node`; this view makes the *parent* base dereferenceable too,
+    returning an index of the minted members (HTML) or a ``skos:Collection`` with
+    ``skos:member`` links (RDF).
+    """
+    prefix = KIND_PREFIX.get(kind)
+    if prefix is None:
+        raise Http404("Unknown identifier kind")
+    base_iri = CURIE_MAP[prefix]
+
+    subjects = sorted(
+        SemanticMapping.objects.filter(subject_id__startswith=f"{prefix}:")
+        .values_list("subject_id", flat=True)
+        .distinct()
+    )
+    members = []
+    for curie in subjects:
+        slug = curie.split(":", 1)[1]
+        try:
+            url = request.build_absolute_uri(reverse(f"prom-{kind}", args=[slug]))
+        except NoReverseMatch:
+            url = _expand(curie)
+        members.append({"curie": curie, "iri": _expand(curie), "url": url, "slug": slug})
+
+    fmt = _negotiate(request)
+    if fmt is not None:
+        g = Graph()
+        _bind_prefixes(g)
+        coll = URIRef(base_iri)
+        g.add((coll, RDF.type, SKOS.Collection))
+        g.add((coll, RDFS.label, Literal(f"{KIND_LABEL.get(kind, kind)} namespace")))
+        for m in members:
+            g.add((coll, SKOS.member, URIRef(m["iri"])))
+        return _rdf_response(request, g, fmt)
+
+    display_cap = 500
+    context = {
+        "kind": kind,
+        "kind_label": KIND_LABEL.get(kind, kind),
+        "base_iri": base_iri,
+        "count": len(members),
+        "members": members[:display_cap],
+        "shown": min(len(members), display_cap),
+        "truncated": len(members) > display_cap,
+    }
+    return render(request, "provenance/collection.html", context)
+
+
 def vocab(request, term=None):
     """Serve the promv: provenance vocabulary (ontology document)."""
     onto = URIRef(PROMV)

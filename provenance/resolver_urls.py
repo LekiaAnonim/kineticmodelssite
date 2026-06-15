@@ -15,6 +15,13 @@ from provenance import resolver
 urlpatterns = [
     path("vocab/", resolver.vocab, name="prom-vocab"),
     path("vocab/<str:term>", resolver.vocab, name="prom-vocab-term"),
+    path("species/", resolver.resolve_collection, {"kind": "species"}, name="prom-species-collection"),
+    path("concept/", resolver.resolve_collection, {"kind": "concept"}, name="prom-concept-collection"),
+    path("reference/", resolver.resolve_collection, {"kind": "reference"}, name="prom-reference-collection"),
+    path("agent/", resolver.resolve_collection, {"kind": "agent"}, name="prom-agent-collection"),
+    path("institution/", resolver.resolve_collection, {"kind": "institution"}, name="prom-institution-collection"),
+    path("kineticmodel/", resolver.resolve_collection, {"kind": "kineticmodel"}, name="prom-kineticmodel-collection"),
+    path("dataset/", resolver.resolve_collection, {"kind": "dataset"}, name="prom-dataset-collection"),
     path("species/<str:slug>", resolver.resolve_node, {"kind": "species"}, name="prom-species"),
     path("concept/<str:slug>", resolver.resolve_node, {"kind": "concept"}, name="prom-concept"),
     path("reference/<str:slug>", resolver.resolve_node, {"kind": "reference"}, name="prom-reference"),
