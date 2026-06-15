@@ -20,7 +20,7 @@ CONTEXT = {
     "prov": "http://www.w3.org/ns/prov#",
     "prom": "https://pr.omethe.us/ontology/prometheus#",
     "chemked": "https://pr.omethe.us/ontology/chemked#",
-    "pmtx": "https://omethe.us/ontology/prometheus-exp#",
+    "pmtx": "https://dev.omethe.us/ontology/prometheus-exp#",
     "ontokin": "http://www.theworldavatar.com/ontology/ontokin/OntoKin.owl#",
     "qudt": "http://qudt.org/schema/qudt/",
     "skos": "http://www.w3.org/2004/02/skos/core#",

@@ -13,6 +13,7 @@ Routing is host-agnostic, so ``http://127.0.0.1:8000/species/H2O`` (dev) and
 ``https://dev.omethe.us/species/H2O`` (prod) resolve through the same code.
 """
 
+import csv
 import json
 from functools import lru_cache
 from pathlib import Path
@@ -47,7 +48,7 @@ CURIE_MAP = {
     "ror": "https://ror.org/",
     "chemked": "https://dev.omethe.us/concept/",
     "ontokin": "http://www.theworldavatar.com/ontology/ontokin/OntoKin.owl#",
-    "pmtx": "https://omethe.us/ontology/prometheus-exp#",
+    "pmtx": "https://dev.omethe.us/ontology/prometheus-exp#",
     "skos": "http://www.w3.org/2004/02/skos/core#",
     "semapv": "https://w3id.org/semapv/vocab/",
 }
@@ -121,6 +122,112 @@ _ACCEPT_RDF = [
 ]
 
 _MAPPINGS_DIR = Path(__file__).resolve().parents[2] / "mappings"
+
+
+@lru_cache(maxsize=2)
+def _load_pmtx_vocab(path, _mtime):
+    """Parse prometheus-exp.ttl; return the pmtx: classes/properties it defines."""
+    ns = CURIE_MAP["pmtx"]
+    g = Graph()
+    try:
+        g.parse(path, format="turtle")
+    except Exception:  # noqa: BLE001 - any parse failure -> no extra terms
+        return []
+    terms = {}
+    for subj, _, lbl in g.triples((None, RDFS.label, None)):
+        iri = str(subj)
+        if not iri.startswith(ns):
+            continue
+        types = set(g.objects(subj, RDF.type))
+        if OWL.Class in types or RDFS.Class in types:
+            kind = "Class"
+        elif types & {OWL.ObjectProperty, OWL.DatatypeProperty, RDF.Property}:
+            kind = "Property"
+        else:
+            kind = ""
+        comment = g.value(subj, RDFS.comment)
+        local = iri[len(ns):]
+        terms[iri] = {
+            "name": local,
+            "curie": f"pmtx:{local}",
+            "iri": iri,
+            "label": str(lbl),
+            "comment": str(comment) if comment else "",
+            "kind": kind,
+        }
+    return sorted(terms.values(), key=lambda t: (t["kind"] != "Class", t["name"].lower()))
+
+
+def _pmtx_vocab():
+    """pmtx: experimental-extension terms, reloaded when the TTL file changes."""
+    path = _MAPPINGS_DIR / "prometheus-exp.ttl"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return []
+    return _load_pmtx_vocab(str(path), mtime)
+
+
+@lru_cache(maxsize=2)
+def _load_pmtx_graph(path, _mtime):
+    """Parse the whole prometheus-exp.ttl into a Graph for RDF dereferencing."""
+    g = Graph()
+    try:
+        g.parse(path, format="turtle")
+    except Exception:  # noqa: BLE001 - any parse failure -> no document
+        return None
+    return g
+
+
+def _pmtx_graph():
+    """The pmtx: ontology graph, reloaded when the TTL file changes."""
+    path = _MAPPINGS_DIR / "prometheus-exp.ttl"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    return _load_pmtx_graph(str(path), mtime)
+
+
+@lru_cache(maxsize=2)
+def _load_ontokin_vocab(path, _mtime):
+    """Read the OntoKin term inventory; keep only terms Prometheus reuses."""
+    ns = CURIE_MAP["ontokin"]
+    terms = []
+    try:
+        with open(path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if (row.get("prometheus_status") or "").strip() == "not currently represented":
+                    continue  # OntoKin defines it but Prometheus does not use it
+                iri = (row.get("iri") or "").strip()
+                name = (row.get("term") or "").strip()
+                definition = (row.get("definition") or "").strip()
+                if definition.startswith("No textual definition"):
+                    definition = ""
+                terms.append(
+                    {
+                        "name": name,
+                        "curie": f"ontokin:{name}" if iri.startswith(ns) else "",
+                        "iri": iri,
+                        "kind": (row.get("kind") or "").strip(),
+                        "definition": definition,
+                        "status": (row.get("prometheus_status") or "").strip(),
+                        "mapping": (row.get("prometheus_mapping") or "").strip(),
+                    }
+                )
+    except (OSError, ValueError):
+        return []
+    return sorted(terms, key=lambda t: (t["kind"] != "class", t["name"].lower()))
+
+
+def _ontokin_vocab():
+    """OntoKin terms Prometheus reuses, reloaded when the inventory CSV changes."""
+    path = _MAPPINGS_DIR / "ontokin_vocabulary_definitions.csv"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return []
+    return _load_ontokin_vocab(str(path), mtime)
 
 
 # --- helpers ----------------------------------------------------------------
@@ -364,6 +471,14 @@ def vocab(request, term=None):
             g.add((t, RDFS.label, Literal(lbl)))
             g.add((t, RDFS.comment, Literal(desc)))
             g.add((t, RDFS.isDefinedBy, onto))
+        if term is None:
+            # Point clients at the vocabularies Prometheus reuses without
+            # re-minting their IRIs: the experimental extension (pmtx:) and
+            # OntoKin. seeAlso is non-authoritative, so it is FAIR-correct here.
+            g.bind("pmtx", CURIE_MAP["pmtx"])
+            g.bind("ontokin", CURIE_MAP["ontokin"])
+            g.add((onto, RDFS.seeAlso, URIRef(CURIE_MAP["pmtx"])))
+            g.add((onto, RDFS.seeAlso, URIRef(CURIE_MAP["ontokin"])))
         return _rdf_response(request, g, fmt)
 
     if term is not None and term not in PROMV_TERMS:
@@ -375,5 +490,29 @@ def vocab(request, term=None):
             {"name": name, "iri": PROMV + name, "label": lbl, "comment": desc}
             for name, (lbl, desc) in PROMV_TERMS.items()
         ],
+        # Full vocabulary hub (only on the index page, not a single-term focus):
+        # terms Prometheus reuses from its experimental extension and from OntoKin.
+        "pmtx": {"iri": CURIE_MAP["pmtx"], "terms": _pmtx_vocab()} if term is None else None,
+        "ontokin": (
+            {"iri": CURIE_MAP["ontokin"], "terms": _ontokin_vocab()} if term is None else None
+        ),
     }
     return render(request, "provenance/vocab.html", context)
+
+
+def pmtx_ontology(request):
+    """Dereference the pmtx: experimental-extension ontology and its terms.
+
+    Term IRIs carry a fragment (``...prometheus-exp#Apparatus``); fragments are
+    never sent to the server, so every ``pmtx:`` term dereferences to this one
+    document. RDF clients get the full ontology graph; browsers get the
+    vocabulary hub, whose pmtx term anchors (``id="Apparatus"``) let the
+    fragment scroll straight to the requested term.
+    """
+    fmt = _negotiate(request)
+    if fmt is not None:
+        g = _pmtx_graph()
+        if g is None:
+            raise Http404("pmtx ontology unavailable")
+        return _rdf_response(request, g, fmt)
+    return vocab(request)

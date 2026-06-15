@@ -25,6 +25,11 @@ Emitted rows use ``prom:<species-name>`` subjects and store the database
 matches them to the exact ``database.Isomer`` and sets the ``species`` foreign
 key -- which is what makes the model-uses-species provenance edges light up.
 
+To avoid case-variant duplicate subjects (``prom:AR`` vs ``prom:Ar``), the
+command reuses an existing subject when one already maps the *same InChIKey*
+under a case-insensitive variant of the species name; requiring the InChIKey to
+agree keeps distinct isomers spelled alike (``C3H3O`` vs ``c3h3o``) separate.
+
 Rows are appended to the shared SSSOM TSV (no header rewrite) and the command is
 idempotent: an existing ``(subject_id, predicate_id, object_id)`` is never
 duplicated.  Follow with ``import_sssom`` -> ``link_semantic_mappings`` ->
@@ -275,12 +280,19 @@ class Command(BaseCommand):
             species_ids = species_ids[: options["limit"]]
 
         existing = set()
+        # (lowercased species name, inchikey object) -> existing prom subject, so a
+        # later mechanism spelling reuses the canonical IRI instead of minting a
+        # case-variant duplicate (e.g. "AR" reuses prom:Ar). Requiring the InChIKey
+        # to match keeps different isomers spelled alike (C3H3O vs c3h3o) apart.
+        subject_by_key = {}
         with path.open(newline="", encoding="utf-8") as fh:
             data_lines = (line for line in fh if not line.startswith("#"))
             for row in csv.DictReader(data_lines, delimiter="\t"):
-                existing.add(
-                    (row.get("subject_id"), row.get("predicate_id"), row.get("object_id"))
-                )
+                s = row.get("subject_id")
+                o = row.get("object_id")
+                existing.add((s, row.get("predicate_id"), o))
+                if s and s.startswith("prom:") and o and o.startswith("inchikey:"):
+                    subject_by_key.setdefault((s.split(":", 1)[1].lower(), o), s)
 
         today = date.today().isoformat()
         new_rows = []
@@ -299,12 +311,20 @@ class Command(BaseCommand):
             if not name or not (augmented_inchi or smiles):
                 skipped += 1
                 continue
-            subject = f"prom:{name}"
 
             _, inchikey = self._standard_key(Molecule, smiles, augmented_inchi)
             if not inchikey:
                 unresolved += 1
                 continue
+
+            # Reuse the canonical subject if one already maps this exact InChIKey
+            # under a case-variant of this name; otherwise mint prom:<name>.
+            inchikey_obj = f"inchikey:{inchikey}"
+            subject = subject_by_key.get((name.lower(), inchikey_obj))
+            if subject is None:
+                subject = f"prom:{name}"
+                subject_by_key[(name.lower(), inchikey_obj)] = subject
+            subject_label = subject.split(":", 1)[1]
 
             def add(object_id, object_label, confidence, justification, tool, comment):
                 key = (subject, PREDICATE, object_id)
@@ -314,7 +334,7 @@ class Command(BaseCommand):
                 new_rows.append(
                     [
                         subject,
-                        name,
+                        subject_label,
                         PREDICATE,
                         object_id,
                         object_label,

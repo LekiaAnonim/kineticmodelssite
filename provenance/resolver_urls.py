@@ -15,6 +15,7 @@ from provenance import resolver
 urlpatterns = [
     path("vocab/", resolver.vocab, name="prom-vocab"),
     path("vocab/<str:term>", resolver.vocab, name="prom-vocab-term"),
+    path("ontology/prometheus-exp", resolver.pmtx_ontology, name="pmtx-ontology"),
     path("species/", resolver.resolve_collection, {"kind": "species"}, name="prom-species-collection"),
     path("concept/", resolver.resolve_collection, {"kind": "concept"}, name="prom-concept-collection"),
     path("reference/", resolver.resolve_collection, {"kind": "reference"}, name="prom-reference-collection"),

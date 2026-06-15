@@ -461,7 +461,7 @@ def add_flex_params(result, generator, request, public):
 _ONTOLOGY_CONTEXT = {
     "prom": "https://pr.omethe.us/ontology/prometheus#",
     "chemked": "https://pr.omethe.us/ontology/chemked#",
-    "pmtx": "https://omethe.us/ontology/prometheus-exp#",
+    "pmtx": "https://dev.omethe.us/ontology/prometheus-exp#",
     "ontokin": "http://www.theworldavatar.com/ontology/ontokin/OntoKin.owl#",
     "qudt": "http://qudt.org/schema/qudt/",
     "prov": "http://www.w3.org/ns/prov#",
