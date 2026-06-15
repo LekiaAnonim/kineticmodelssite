@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prometheus provenance vocabulary</title>
+  <style>
+    body { font: 15px/1.5 -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+           color: #1f2937; max-width: 920px; margin: 2rem auto; padding: 0 1.2rem; }
+    a { color: #0e7490; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    h1 { margin: .2rem 0 .4rem; font-size: 1.8rem; }
+    code { background: #f3f4f6; padding: .1rem .35rem; border-radius: 4px; font-size: .9em; }
+    .iri { color: #6b7280; word-break: break-all; }
+    .term { border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem 1.1rem; margin: 1rem 0; }
+    .term.focus { border-color: #0e7490; background: #ecfeff; }
+    .muted { color: #9ca3af; }
+    .formats a { margin-right: .8rem; }
+  </style>
+</head>
+<body>
+  <h1>Prometheus provenance vocabulary</h1>
+  <p class="iri"><a href="{{ vocab_iri }}">{{ vocab_iri }}</a> &nbsp;(<code>promv:</code>)</p>
+  <p>Domain predicates that connect Prometheus SSSOM nodes — kinetic models,
+     datasets, and species — in the knowledge graph.</p>
+
+  <p class="formats muted">
+    RDF:
+    <a href="?format=ttl">Turtle</a>
+    <a href="?format=jsonld">JSON-LD</a>
+    <a href="?format=xml">RDF/XML</a>
+  </p>
+
+  {% for t in terms %}
+  <div class="term {% if focus == t.name %}focus{% endif %}" id="{{ t.name }}">
+    <h2><code>promv:{{ t.name }}</code></h2>
+    <p class="iri"><a href="{{ t.iri }}">{{ t.iri }}</a></p>
+    <p><strong>{{ t.label }}</strong></p>
+    <p class="muted">{{ t.comment }}</p>
+  </div>
+  {% endfor %}
+</body>
+</html>
