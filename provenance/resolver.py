@@ -17,17 +17,30 @@ import csv
 import json
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote
 
 from django.http import Http404, HttpResponse
 from django.shortcuts import render
 from django.urls import NoReverseMatch, reverse
 
 from rdflib import Graph, Literal, URIRef
-from rdflib.namespace import DCTERMS, OWL, RDF, RDFS, SKOS
+from rdflib.collection import Collection
+from rdflib.namespace import DCTERMS, OWL, RDF, RDFS, SKOS, XSD, Namespace
+from rdflib.term import BNode
 
 from provenance.models import SemanticMapping
 
+# Namespaces for the numeric data layer (thermo / kinetics / transport values).
+QUDT = Namespace("http://qudt.org/schema/qudt/")
+UNIT = Namespace("http://qudt.org/vocab/unit/")
+PMTX = Namespace("https://dev.omethe.us/ontology/prometheus-exp#")
+
 # --- prefixes (kept in sync with mappings/prometheus.sssom.tsv curie_map) ----
+# Characters left un-encoded in a CURIE reference: the URI sub-delims plus ``@``
+# and ``%`` (so already-encoded subjects round-trip unchanged).  Everything else
+# invalid -- whitespace, brackets, non-ASCII -- is percent-encoded.
+_CURIE_SAFE = "!$&'()*+,;=@%"
+
 CURIE_MAP = {
     "prom": "https://dev.omethe.us/species/",
     "promc": "https://dev.omethe.us/concept/",
@@ -36,6 +49,8 @@ CURIE_MAP = {
     "promorg": "https://dev.omethe.us/institution/",
     "promkm": "https://dev.omethe.us/kineticmodel/",
     "promds": "https://dev.omethe.us/dataset/",
+    "promapp": "https://dev.omethe.us/apparatus/",
+    "promrxn": "https://dev.omethe.us/reaction/",
     "promv": "https://dev.omethe.us/vocab/",
     "inchikey": "https://www.inchi-trust.org/inchikey/",
     "pubchem.compound": "https://pubchem.ncbi.nlm.nih.gov/compound/",
@@ -46,8 +61,10 @@ CURIE_MAP = {
     "doi": "https://doi.org/",
     "orcid": "https://orcid.org/",
     "ror": "https://ror.org/",
-    "chemked": "https://dev.omethe.us/concept/",
+    "chemked": "https://dev.omethe.us/ontology/chemked#",
     "ontokin": "http://www.theworldavatar.com/ontology/ontokin/OntoKin.owl#",
+    "ontochemexp": "http://www.theworldavatar.com/ontology/ontochemexp/OntoChemExp.owl#",
+    "ontospecies": "http://www.theworldavatar.com/ontology/ontospecies/OntoSpecies.owl#",
     "pmtx": "https://dev.omethe.us/ontology/prometheus-exp#",
     "skos": "http://www.w3.org/2004/02/skos/core#",
     "semapv": "https://w3id.org/semapv/vocab/",
@@ -62,6 +79,8 @@ KIND_PREFIX = {
     "institution": "promorg",
     "kineticmodel": "promkm",
     "dataset": "promds",
+    "apparatus": "promapp",
+    "reaction": "promrxn",
 }
 KIND_LABEL = {
     "species": "Chemical species",
@@ -71,6 +90,8 @@ KIND_LABEL = {
     "institution": "Institution",
     "kineticmodel": "Kinetic model",
     "dataset": "Experimental dataset",
+    "apparatus": "Experimental apparatus",
+    "reaction": "Chemical reaction",
 }
 
 # SemanticMapping FK attribute -> URLconf name of the human detail page.
@@ -79,6 +100,7 @@ DETAIL_VIEW = {
     "source": "source-detail",
     "kinetic_model": "kinetic-model-detail",
     "experiment_dataset": "dataset-detail",
+    "reaction": "reaction-detail",
 }
 
 # Provenance edge kind -> (predicate IRI, human label).
@@ -87,7 +109,16 @@ PROV_PREDICATE = {
     "contains": ("https://dev.omethe.us/vocab/containsSpecies", "contains species"),
     "cites": ("http://purl.org/dc/terms/references", "references"),
     "from": ("http://purl.org/dc/terms/source", "derived from source"),
+    "locatedAt": ("https://dev.omethe.us/vocab/locatedAtInstitution", "located at institution"),
+    "usesApparatus": ("https://dev.omethe.us/vocab/usesApparatus", "uses apparatus"),
+    "usesReaction": ("https://dev.omethe.us/vocab/usesReaction", "uses reaction"),
+    "thermoFrom": ("https://dev.omethe.us/vocab/thermoDataFrom", "thermo data from"),
+    "kineticsFrom": ("https://dev.omethe.us/vocab/kineticsDataFrom", "kinetics data from"),
 }
+
+# Human-readable documentation for the semapv mapping-justification vocabulary.
+# The w3id namespace base (CURIE_MAP["semapv"]) does not dereference to a page.
+SEMAPV_DOCS = "https://mapping-commons.github.io/semantic-mapping-vocabulary/"
 
 # Terms minted under the promv: vocabulary namespace.
 PROMV = "https://dev.omethe.us/vocab/"
@@ -99,6 +130,28 @@ PROMV_TERMS = {
     "containsSpecies": (
         "contains species",
         "Relates an experimental dataset to a chemical species present in a reported mixture.",
+    ),
+    "locatedAtInstitution": (
+        "located at institution",
+        "Relates an experimental apparatus to the institution that operates it.",
+    ),
+    "usesApparatus": (
+        "uses apparatus",
+        "Relates an experimental dataset to the apparatus used to produce its measurements.",
+    ),
+    "usesReaction": (
+        "uses reaction",
+        "Relates a kinetic model to a chemical reaction whose rate it incorporates.",
+    ),
+    "thermoDataFrom": (
+        "thermo data from",
+        "Relates a chemical species to a publication that is the source of its "
+        "thermodynamic (NASA polynomial) data.",
+    ),
+    "kineticsDataFrom": (
+        "kinetics data from",
+        "Relates a chemical reaction to a publication that is the source of "
+        "a rate-coefficient expression for it.",
     ),
 }
 
@@ -189,16 +242,21 @@ def _pmtx_graph():
     return _load_pmtx_graph(str(path), mtime)
 
 
-@lru_cache(maxsize=2)
-def _load_ontokin_vocab(path, _mtime):
-    """Read the OntoKin term inventory; keep only terms Prometheus reuses."""
-    ns = CURIE_MAP["ontokin"]
+@lru_cache(maxsize=8)
+def _load_external_vocab(path, _mtime, prefix, ns):
+    """Read a reused-ontology term inventory; keep only terms Prometheus reuses.
+
+    Shared by the OntoKin, OntoChemExp and OntoSpecies vocabulary catalogues.
+    Each is a curated CSV (term, kind, definition, ..., prometheus_status,
+    prometheus_mapping) that supplies the labels/definitions the source
+    ontologies do not always carry, so the vocab page can render reused terms.
+    """
     terms = []
     try:
         with open(path, newline="", encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
                 if (row.get("prometheus_status") or "").strip() == "not currently represented":
-                    continue  # OntoKin defines it but Prometheus does not use it
+                    continue  # the source defines it but Prometheus does not use it
                 iri = (row.get("iri") or "").strip()
                 name = (row.get("term") or "").strip()
                 definition = (row.get("definition") or "").strip()
@@ -207,7 +265,7 @@ def _load_ontokin_vocab(path, _mtime):
                 terms.append(
                     {
                         "name": name,
-                        "curie": f"ontokin:{name}" if iri.startswith(ns) else "",
+                        "curie": f"{prefix}:{name}" if iri.startswith(ns) else "",
                         "iri": iri,
                         "kind": (row.get("kind") or "").strip(),
                         "definition": definition,
@@ -220,14 +278,29 @@ def _load_ontokin_vocab(path, _mtime):
     return sorted(terms, key=lambda t: (t["kind"] != "class", t["name"].lower()))
 
 
-def _ontokin_vocab():
-    """OntoKin terms Prometheus reuses, reloaded when the inventory CSV changes."""
-    path = _MAPPINGS_DIR / "ontokin_vocabulary_definitions.csv"
+def _external_vocab(filename, prefix):
+    """A reused-ontology vocabulary, reloaded when its inventory CSV changes."""
+    path = _MAPPINGS_DIR / filename
     try:
         mtime = path.stat().st_mtime
     except OSError:
         return []
-    return _load_ontokin_vocab(str(path), mtime)
+    return _load_external_vocab(str(path), mtime, prefix, CURIE_MAP[prefix])
+
+
+def _ontokin_vocab():
+    """OntoKin terms Prometheus reuses for mechanism concepts."""
+    return _external_vocab("ontokin_vocabulary_definitions.csv", "ontokin")
+
+
+def _ontochemexp_vocab():
+    """OntoChemExp terms Prometheus reuses for experimental concepts."""
+    return _external_vocab("ontochemexp_vocabulary_definitions.csv", "ontochemexp")
+
+
+def _ontospecies_vocab():
+    """OntoSpecies terms Prometheus reuses for species concepts."""
+    return _external_vocab("ontospecies_vocabulary_definitions.csv", "ontospecies")
 
 
 # --- helpers ----------------------------------------------------------------
@@ -313,6 +386,8 @@ def _bind_prefixes(g):
         g.bind(prefix.replace(".", "_"), ns, replace=True)
     g.bind("dcterms", DCTERMS)
     g.bind("owl", OWL)
+    g.bind("qudt", QUDT)
+    g.bind("unit", UNIT)
 
 
 def _rdf_response(request, graph, fmt):
@@ -323,13 +398,207 @@ def _rdf_response(request, graph, fmt):
     return HttpResponse(data, content_type=f"{content_type}; charset=utf-8")
 
 
+# --- numeric data layer (thermo / kinetics / transport VALUES) --------------
+# OntoKin 1.0 has the structural classes but no datatype properties for the
+# actual numbers, so dereferencing a node returned only identity + provenance.
+# These helpers attach the real coefficients, using the QUDT QuantityValue
+# pattern (numericValue + unit IRI) for scalars and rdf:List for vectors, so an
+# agent that follows a species or reaction IRI gets the values as RDF.
+def _quantity(g, value, unit_iri=None, unit_text=None):
+    """A qudt:QuantityValue bnode for a scalar, or None if the value is missing."""
+    if value is None:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    qv = BNode()
+    g.add((qv, RDF.type, QUDT.QuantityValue))
+    g.add((qv, QUDT.numericValue, Literal(num, datatype=XSD.double)))
+    if unit_iri is not None:
+        g.add((qv, QUDT.unit, unit_iri))
+    if unit_text:
+        g.add((qv, PMTX.unitText, Literal(unit_text)))
+    return qv
+
+
+def _add_quantity(g, subject, predicate, value, unit_iri=None, unit_text=None):
+    qv = _quantity(g, value, unit_iri=unit_iri, unit_text=unit_text)
+    if qv is not None:
+        g.add((subject, predicate, qv))
+
+
+def _vector(g, values):
+    """An ordered rdf:List of xsd:double for a coefficient vector."""
+    head = BNode()
+    Collection(g, head, [Literal(float(v), datatype=XSD.double) for v in values])
+    return head
+
+
+def _record_source(g, record_node, record):
+    """Attribute one value record (thermo/transport/rate) to the paper it came
+    from, so the N competing fits on a node are individually traceable."""
+    source = getattr(record, "source", None)
+    doi = (getattr(source, "doi", "") or "").strip()
+    if doi:
+        g.add((record_node, DCTERMS.source, URIRef(f"https://doi.org/{doi}")))
+
+
+def _emit_arrhenius(g, node, data):
+    """Attach Arrhenius A/n/Ea to a pmtx:RateParameters node from a raw_data dict."""
+    _add_quantity(g, node, PMTX.preExponentialFactor, data.get("a_si"),
+                  unit_text=data.get("a_units"))
+    if data.get("n") is not None:
+        g.add((node, PMTX.temperatureExponent, Literal(float(data["n"]), datatype=XSD.double)))
+    _add_quantity(g, node, PMTX.activationEnergy, data.get("e_si"), unit_iri=UNIT["J-PER-MOL"])
+
+
+def _emit_rate(g, node, data):
+    """Attach the numeric parameters of one rate expression (any supported type)."""
+    rtype = data.get("type")
+    if rtype:
+        g.add((node, PMTX.rateExpressionType, Literal(rtype)))
+    if rtype in ("arrhenius", "arrhenius_ep"):
+        _emit_arrhenius(g, node, data)
+    elif rtype == "troe":
+        if data.get("alpha") is not None:
+            g.add((node, PMTX.troeAlpha, Literal(float(data["alpha"]), datatype=XSD.double)))
+        _add_quantity(g, node, PMTX.troeT1, data.get("t1"), unit_iri=UNIT.K)
+        if data.get("t2"):
+            _add_quantity(g, node, PMTX.troeT2, data.get("t2"), unit_iri=UNIT.K)
+        _add_quantity(g, node, PMTX.troeT3, data.get("t3"), unit_iri=UNIT.K)
+        _emit_falloff(g, node, data)
+    elif rtype == "lindemann":
+        _emit_falloff(g, node, data)
+    elif rtype == "third_body":
+        low = data.get("low_arrhenius")
+        if low:
+            sub = _rate_subnode(g, node, PMTX.lowPressureParameters, "arrhenius")
+            _emit_arrhenius(g, sub, low)
+    elif rtype == "pdep_arrhenius":
+        for point in data.get("pressure_set", []):
+            sub = _rate_subnode(g, node, PMTX.pressurePoint, "arrhenius")
+            _add_quantity(g, sub, PMTX.atPressure, point.get("pressure"), unit_iri=UNIT.PA)
+            arr = point.get("arrhenius")
+            if arr:
+                _emit_arrhenius(g, sub, arr)
+    elif rtype == "chebyshev":
+        matrix = data.get("coefficient_matrix")
+        if matrix:
+            rows = [_vector(g, row) for row in matrix]
+            head = BNode()
+            Collection(g, head, rows)
+            g.add((node, PMTX.chebyshevCoefficients, head))
+
+
+def _emit_falloff(g, node, data):
+    """Attach the low/high-pressure-limit Arrhenius nodes of a fall-off rate."""
+    low = data.get("low_arrhenius")
+    if low:
+        sub = _rate_subnode(g, node, PMTX.lowPressureParameters, "arrhenius")
+        _emit_arrhenius(g, sub, low)
+    high = data.get("high_arrhenius")
+    if high:
+        sub = _rate_subnode(g, node, PMTX.highPressureParameters, "arrhenius")
+        _emit_arrhenius(g, sub, high)
+
+
+def _rate_subnode(g, parent, predicate, rtype):
+    sub = BNode()
+    g.add((sub, RDF.type, PMTX.RateParameters))
+    g.add((sub, PMTX.rateExpressionType, Literal(rtype)))
+    g.add((parent, predicate, sub))
+    return sub
+
+
+def _emit_thermo(g, subject, thermo):
+    tnode = BNode()
+    g.add((subject, PMTX.hasThermo, tnode))
+    g.add((tnode, RDF.type, PMTX.ThermoData))
+    _record_source(g, tnode, thermo)
+    _add_quantity(g, tnode, PMTX.enthalpyOfFormation, thermo.enthalpy_formation,
+                  unit_iri=UNIT["J-PER-MOL"])
+    _add_quantity(g, tnode, PMTX.referenceTemperature, thermo.reference_temp, unit_iri=UNIT.K)
+    _add_quantity(g, tnode, PMTX.referencePressure, thermo.reference_pressure, unit_iri=UNIT.PA)
+    for coeffs, tmin, tmax, predicate in (
+        (thermo.coeffs_poly1, thermo.temp_min_1, thermo.temp_max_1, PMTX.lowTemperaturePolynomial),
+        (thermo.coeffs_poly2, thermo.temp_min_2, thermo.temp_max_2, PMTX.highTemperaturePolynomial),
+    ):
+        if not coeffs:
+            continue
+        poly = BNode()
+        g.add((poly, RDF.type, PMTX.NASAPolynomial))
+        g.add((poly, PMTX.coefficients, _vector(g, coeffs)))
+        _add_quantity(g, poly, PMTX.lowerTemperatureBound, tmin, unit_iri=UNIT.K)
+        _add_quantity(g, poly, PMTX.upperTemperatureBound, tmax, unit_iri=UNIT.K)
+        g.add((tnode, predicate, poly))
+
+
+def _emit_transport(g, subject, tr):
+    tnode = BNode()
+    g.add((subject, PMTX.hasTransport, tnode))
+    g.add((tnode, RDF.type, PMTX.TransportData))
+    _record_source(g, tnode, tr)
+    _add_quantity(g, tnode, PMTX.potentialWellDepth, tr.potential_well_depth, unit_iri=UNIT.K)
+    _add_quantity(g, tnode, PMTX.collisionDiameter, tr.collision_diameter, unit_iri=UNIT.ANGSTROM)
+    _add_quantity(g, tnode, PMTX.dipoleMoment, tr.dipole_moment, unit_text="debye")
+    _add_quantity(g, tnode, PMTX.polarizability, tr.polarizability, unit_text="cubic angstrom")
+    if tr.rotational_relaxation:
+        g.add((tnode, PMTX.rotationalRelaxation,
+               Literal(float(tr.rotational_relaxation), datatype=XSD.double)))
+
+
+def _emit_kinetics(g, subject, kin):
+    knode = BNode()
+    g.add((subject, PMTX.hasRateParameters, knode))
+    g.add((knode, RDF.type, PMTX.RateParameters))
+    _record_source(g, knode, kin)
+    _emit_rate(g, knode, kin.raw_data or {})
+    _add_quantity(g, knode, PMTX.lowerTemperatureBound, kin.min_temp, unit_iri=UNIT.K)
+    _add_quantity(g, knode, PMTX.upperTemperatureBound, kin.max_temp, unit_iri=UNIT.K)
+    _add_quantity(g, knode, PMTX.lowerPressureBound, kin.min_pressure, unit_iri=UNIT.PA)
+    _add_quantity(g, knode, PMTX.upperPressureBound, kin.max_pressure, unit_iri=UNIT.PA)
+
+
+def _emit_species_data(g, node, mappings):
+    """Attach NASA thermo + transport values for the species behind these mappings."""
+    species_ids = {m.species_id for m in mappings if m.species_id}
+    if not species_ids:
+        return
+    try:
+        from database.models import Thermo, Transport
+        for thermo in Thermo.objects.filter(species_id__in=species_ids).select_related("source"):
+            _emit_thermo(g, node, thermo)
+        for tr in Transport.objects.filter(species_id__in=species_ids).select_related("source"):
+            _emit_transport(g, node, tr)
+    except Exception:  # noqa: BLE001 - data layer must never break dereferencing
+        pass
+
+
+def _emit_reaction_data(g, node, mappings):
+    """Attach rate-coefficient values for the reaction behind these mappings."""
+    reaction_ids = {m.reaction_id for m in mappings if m.reaction_id}
+    if not reaction_ids:
+        return
+    try:
+        from database.models import Kinetics
+        for kin in Kinetics.objects.filter(reaction_id__in=reaction_ids).select_related("source"):
+            _emit_kinetics(g, node, kin)
+    except Exception:  # noqa: BLE001 - data layer must never break dereferencing
+        pass
+
+
 # --- views ------------------------------------------------------------------
 def resolve_node(request, kind, slug):
     """Dereference a minted entity IRI (species, reference, kineticmodel, ...)."""
     prefix = KIND_PREFIX.get(kind)
     if prefix is None:
         raise Http404("Unknown identifier kind")
-    curie = f"{prefix}:{slug}"
+    # Django hands us the percent-decoded path segment; re-encode the invalid
+    # CURIE characters (whitespace, brackets, non-ASCII) so it matches the
+    # stored subject_id (e.g. species ``CHFCH[Z]`` -> ``CHFCH%5BZ%5D``).  A
+    # no-op for clean slugs such as reference or kinetic-model identifiers.
+    curie = f"{prefix}:{quote(slug, safe=_CURIE_SAFE)}"
     mappings = list(SemanticMapping.objects.filter(subject_id=curie))
     if not mappings:
         raise Http404(f"No minted node for {curie}")
@@ -355,6 +624,13 @@ def resolve_node(request, kind, slug):
                 g.add((node, URIRef(pred), other_iri))
             else:
                 g.add((other_iri, URIRef(pred), node))
+        # Attach the actual numeric data so an agent gets the values, not just
+        # the citation: NASA thermo + transport for species, rate params for
+        # reactions.
+        if kind == "species":
+            _emit_species_data(g, node, mappings)
+        elif kind == "reaction":
+            _emit_reaction_data(g, node, mappings)
         if detail_url:
             g.add((node, RDFS.seeAlso, URIRef(detail_url)))
         return _rdf_response(request, g, fmt)
@@ -479,6 +755,9 @@ def vocab(request, term=None):
             g.bind("ontokin", CURIE_MAP["ontokin"])
             g.add((onto, RDFS.seeAlso, URIRef(CURIE_MAP["pmtx"])))
             g.add((onto, RDFS.seeAlso, URIRef(CURIE_MAP["ontokin"])))
+            # The semapv mapping-justification namespace base does not
+            # dereference to a document; point humans at its rendered docs.
+            g.add((onto, RDFS.seeAlso, URIRef(SEMAPV_DOCS)))
         return _rdf_response(request, g, fmt)
 
     if term is not None and term not in PROMV_TERMS:
@@ -495,6 +774,21 @@ def vocab(request, term=None):
         "pmtx": {"iri": CURIE_MAP["pmtx"], "terms": _pmtx_vocab()} if term is None else None,
         "ontokin": (
             {"iri": CURIE_MAP["ontokin"], "terms": _ontokin_vocab()} if term is None else None
+        ),
+        "ontochemexp": (
+            {"iri": CURIE_MAP["ontochemexp"], "terms": _ontochemexp_vocab()}
+            if term is None
+            else None
+        ),
+        "ontospecies": (
+            {"iri": CURIE_MAP["ontospecies"], "terms": _ontospecies_vocab()}
+            if term is None
+            else None
+        ),
+        # The mapping-justification vocabulary (semapv:) used in the SSSOM set.
+        # Its namespace base does not dereference, so link humans to its docs.
+        "semapv": (
+            {"iri": CURIE_MAP["semapv"], "docs": SEMAPV_DOCS} if term is None else None
         ),
     }
     return render(request, "provenance/vocab.html", context)
