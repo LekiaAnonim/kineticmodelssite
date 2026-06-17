@@ -33,6 +33,11 @@ so the overlay lights up automatically as coverage improves):
   * ``thermoFrom``    Species       --> KineticModel      (via ThermoComment)
   * ``kineticsFrom``  Reaction      --> KineticModel      (via KineticsComment)
 
+A separate sidecar (``prometheus.reactions.json``) carries the reaction
+stoichiometry as ``hasReactant``/``hasProduct`` edges (Reaction --> Species), so
+the graph can reconstruct a reaction from its species and toggle that layer on
+its own.
+
 Read-only against the database; idempotent (overwrites the sidecars).
 """
 
@@ -48,6 +53,7 @@ from database.models import KineticModel
 from database.models.kinetic_model import SpeciesName
 from database.models.kinetic_model import KineticsComment
 from database.models.kinetic_model import ThermoComment
+from database.models.reaction_species import Stoichiometry
 from provenance.models import SemanticMapping
 # Sidecars live beside the SSSOM artifacts in the sibling mappings/ directory.
 # This file: <Prometheus>/kineticmodelssite/provenance/management/commands/<this>
@@ -56,10 +62,17 @@ from provenance.models import SemanticMapping
 MAPPINGS_DIR = Path(__file__).resolve().parents[4] / "mappings"
 DEFAULT_JSON = MAPPINGS_DIR / "sssom" / "prometheus.provenance.json"
 DEFAULT_TTL = MAPPINGS_DIR / "rdf" / "prometheus.provenance.ttl"
+DEFAULT_RXN = MAPPINGS_DIR / "sssom" / "prometheus.reactions.json"
 
 # Local domain predicates for the RDF (knowledge-graph) serialization.
 PROMV = "https://dev.omethe.us/vocab/"
 PROV = "http://www.w3.org/ns/prov#"
+# OntoKin / OntoCAPE reaction-mechanism predicates for the reaction <-> species
+# structural links (reaction has these reactants / products).
+ONTOKIN_RXNMECH = (
+    "http://www.theworldavatar.com/ontology/ontocape/material/substance/"
+    "reaction_mechanism.owl#"
+)
 PREDICATE_IRI = {
     "uses": PROMV + "usesSpecies",
     "contains": PROMV + "containsSpecies",
@@ -70,6 +83,8 @@ PREDICATE_IRI = {
     "usesReaction": PROMV + "usesReaction",
     "thermoFrom": PROV + "wasDerivedFrom",
     "kineticsFrom": PROV + "wasDerivedFrom",
+    "hasReactant": ONTOKIN_RXNMECH + "hasReactant",
+    "hasProduct": ONTOKIN_RXNMECH + "hasProduct",
 }
 
 
@@ -148,6 +163,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--json", default=str(DEFAULT_JSON))
         parser.add_argument("--ttl", default=str(DEFAULT_TTL))
+        parser.add_argument("--reactions", default=str(DEFAULT_RXN))
         parser.add_argument(
             "--dry-run",
             action="store_true",
@@ -373,6 +389,41 @@ class Command(BaseCommand):
         for e in edges:
             counts[e["kind"]] += 1
 
+        # (10) Reaction <-> Species structural links (OntoKin hasReactant /
+        # hasProduct). Unlike the provenance edges above these are the reaction
+        # *stoichiometry* -- which species are the reactants/products -- so a
+        # reaction can be reconstructed from its species (and vice versa) in the
+        # graph. Reactants have a negative stoichiometric coefficient, products a
+        # positive one. Emitted to a separate sidecar so the graph can toggle the
+        # reaction layer independently of the (dense) provenance overlay; an edge
+        # is only kept when its reaction and species both have a prom: node.
+        rxn_species_edges = []
+        seen_rs = set()
+        for st in (
+            Stoichiometry.objects.filter(
+                reaction_id__in=rxn_subject.keys(),
+                species_id__in=sp_subjects.keys(),
+            )
+            .values("reaction_id", "species_id", "coeff")
+            .iterator()
+        ):
+            rxn = rxn_subject.get(st["reaction_id"])
+            if not rxn:
+                continue
+            kind = "hasReactant" if st["coeff"] < 0 else "hasProduct"
+            for sp in sp_subjects.get(st["species_id"], ()):
+                if not sp.startswith("prom:"):
+                    continue
+                key = (rxn, sp, kind)
+                if key in seen_rs:
+                    continue
+                seen_rs.add(key)
+                rxn_species_edges.append({"from": rxn, "to": sp, "kind": kind})
+
+        rs_counts = defaultdict(int)
+        for e in rxn_species_edges:
+            rs_counts[e["kind"]] += 1
+
         self.stdout.write("Provenance edges resolved to existing SSSOM nodes:")
         for kind in (
             "uses",
@@ -387,6 +438,10 @@ class Command(BaseCommand):
         ):
             self.stdout.write(f"  {kind:13s} {counts[kind]}")
         self.stdout.write(f"  {'total':13s} {len(edges)}")
+        self.stdout.write("Reaction <-> species structural edges:")
+        for kind in ("hasReactant", "hasProduct"):
+            self.stdout.write(f"  {kind:13s} {rs_counts[kind]}")
+        self.stdout.write(f"  {'total':13s} {len(rxn_species_edges)}")
 
         if options["dry_run"]:
             self.stdout.write(self.style.WARNING("Dry run: no files written."))
@@ -400,6 +455,15 @@ class Command(BaseCommand):
         self._write_ttl(Path(options["ttl"]), edges)
         self.stdout.write(self.style.SUCCESS(f"Wrote {json_path}"))
         self.stdout.write(self.style.SUCCESS(f"Wrote {options['ttl']}"))
+
+        rxn_path = Path(options["reactions"])
+        rxn_path.write_text(
+            json.dumps(
+                {"edges": rxn_species_edges, "counts": dict(rs_counts)}
+            ),
+            encoding="utf-8",
+        )
+        self.stdout.write(self.style.SUCCESS(f"Wrote {rxn_path}"))
 
     # -- RDF serialization ----------------------------------------------
     def _write_ttl(self, path, edges):
