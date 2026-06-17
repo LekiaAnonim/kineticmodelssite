@@ -81,6 +81,75 @@
   </section>
   {% endif %}
 
+  {% if values %}
+  <section>
+    <h2>Data values</h2>
+    {% if values.thermo %}
+    <h3>Thermodynamics (NASA polynomials)</h3>
+    {% for t in values.thermo %}
+    <table>
+      <tbody>
+        {% if t.enthalpy %}<tr><th>Enthalpy of formation</th><td>{{ t.enthalpy }}</td></tr>{% endif %}
+        {% if t.ref_temp %}<tr><th>Reference temperature (K)</th><td>{{ t.ref_temp }}</td></tr>{% endif %}
+        {% for p in t.polys %}
+        <tr>
+          <th>{{ p.name }}-T coefficients{% if p.t_min and p.t_max %} ({{ p.t_min }}–{{ p.t_max }} K){% endif %}</th>
+          <td><code>{{ p.coeffs|join:", " }}</code></td>
+        </tr>
+        {% endfor %}
+        {% if t.sources %}
+        <tr><th>Derived from</th><td>
+          {% for s in t.sources %}<a href="{{ s.iri }}">{{ s.label }}</a>{% if not forloop.last %}, {% endif %}{% endfor %}
+        </td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+    {% endfor %}
+    {% endif %}
+
+    {% if values.transport %}
+    <h3>Transport</h3>
+    {% for tr in values.transport %}
+    <table>
+      <tbody>
+        {% if tr.well_depth %}<tr><th>Potential well depth</th><td>{{ tr.well_depth }}</td></tr>{% endif %}
+        {% if tr.diameter %}<tr><th>Collision diameter</th><td>{{ tr.diameter }}</td></tr>{% endif %}
+        {% if tr.dipole %}<tr><th>Dipole moment</th><td>{{ tr.dipole }}</td></tr>{% endif %}
+        {% if tr.polarizability %}<tr><th>Polarizability</th><td>{{ tr.polarizability }}</td></tr>{% endif %}
+        {% if tr.rot_relax %}<tr><th>Rotational relaxation</th><td>{{ tr.rot_relax }}</td></tr>{% endif %}
+        {% if tr.sources %}
+        <tr><th>Derived from</th><td>
+          {% for s in tr.sources %}<a href="{{ s.iri }}">{{ s.label }}</a>{% if not forloop.last %}, {% endif %}{% endfor %}
+        </td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+    {% endfor %}
+    {% endif %}
+
+    {% if values.rates %}
+    <h3>Rate parameters</h3>
+    {% for r in values.rates %}
+    <table>
+      <thead><tr><th>Type</th><th>Parameters</th><th>T range (K)</th><th>Derived from</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>{{ r.type }}</td>
+          <td>
+            {% for p in r.params %}<code>{{ p.name }} = {{ p.value }}{% if p.unit %} {{ p.unit }}{% endif %}</code>{% if not forloop.last %} &nbsp; {% endif %}{% empty %}<span class="muted">—</span>{% endfor %}
+          </td>
+          <td>{% if r.t_min and r.t_max %}{{ r.t_min }}–{{ r.t_max }}{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td>
+            {% for s in r.sources %}<a href="{{ s.iri }}">{{ s.label }}</a>{% if not forloop.last %}, {% endif %}{% endfor %}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    {% endfor %}
+    {% endif %}
+  </section>
+  {% endif %}
+
   <section class="muted">
     <p>This is a Prometheus FAIR identifier. It is dereferenceable: machines that
     request RDF (<code>Accept: text/turtle</code>) receive the cross-references above

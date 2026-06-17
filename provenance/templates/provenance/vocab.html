@@ -28,7 +28,7 @@
   <h1>Prometheus vocabulary</h1>
   <p class="lead">The terms Prometheus uses to describe kinetic models, experiments,
      and species — its own provenance predicates, its experimental-extension
-     ontology, and the OntoKin terms it reuses.</p>
+     ontology, and the OntoKin, OntoChemExp, and OntoSpecies terms it reuses.</p>
 
   <h2 class="section">Provenance predicates <span class="tag">promv:</span></h2>
   <p class="iri"><a href="{{ vocab_iri }}">{{ vocab_iri }}</a></p>
@@ -81,6 +81,53 @@
     </p>
   </div>
   {% endfor %}
+  {% endif %}
+
+  {% if ontochemexp and ontochemexp.terms %}
+  <h2 class="section">Reused from OntoChemExp <span class="tag">ontochemexp:</span></h2>
+  <p class="iri"><a href="{{ ontochemexp.iri }}">{{ ontochemexp.iri }}</a></p>
+  <p>Experimental concepts (apparatus, conditions, composition, measured quantities)
+     Prometheus aligns to <a href="http://www.theworldavatar.com/ontology/ontochemexp/">OntoChemExp</a>
+     rather than re-minting. Definitions are curated by Prometheus where the source ontology omits them.</p>
+  {% for t in ontochemexp.terms %}
+  <div class="term" id="ontochemexp-{{ t.name }}">
+    <h3><code>{% if t.curie %}{{ t.curie }}{% else %}{{ t.name }}{% endif %}</code>{% if t.kind %}<span class="tag">{{ t.kind }}</span>{% endif %}</h3>
+    <p class="iri"><a href="{{ t.iri }}">{{ t.iri }}</a></p>
+    {% if t.definition %}<p class="muted">{{ t.definition }}</p>{% endif %}
+    <p class="meta">
+      {% if t.status %}<strong>Status:</strong> {{ t.status }}{% endif %}
+      {% if t.mapping %} &nbsp;·&nbsp; <strong>Prometheus mapping:</strong> {{ t.mapping }}{% endif %}
+    </p>
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if ontospecies and ontospecies.terms %}
+  <h2 class="section">Reused from OntoSpecies <span class="tag">ontospecies:</span></h2>
+  <p class="iri"><a href="{{ ontospecies.iri }}">{{ ontospecies.iri }}</a></p>
+  <p>Species and chemical-identifier concepts Prometheus aligns to
+     <a href="http://www.theworldavatar.com/ontology/ontospecies/">OntoSpecies</a>
+     rather than re-minting. Definitions are reused from the source ontology.</p>
+  {% for t in ontospecies.terms %}
+  <div class="term" id="ontospecies-{{ t.name }}">
+    <h3><code>{% if t.curie %}{{ t.curie }}{% else %}{{ t.name }}{% endif %}</code>{% if t.kind %}<span class="tag">{{ t.kind }}</span>{% endif %}</h3>
+    <p class="iri"><a href="{{ t.iri }}">{{ t.iri }}</a></p>
+    {% if t.definition %}<p class="muted">{{ t.definition }}</p>{% endif %}
+    <p class="meta">
+      {% if t.status %}<strong>Status:</strong> {{ t.status }}{% endif %}
+      {% if t.mapping %} &nbsp;·&nbsp; <strong>Prometheus mapping:</strong> {{ t.mapping }}{% endif %}
+    </p>
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if semapv %}
+  <h2 class="section">Mapping justifications <span class="tag">semapv:</span></h2>
+  <p>The SSSOM mapping set records why each cross-reference was asserted using the
+     <a href="{{ semapv.docs }}">Semantic Mapping Vocabulary (SEMAPV)</a> —
+     e.g. <code>semapv:LexicalMatching</code>, <code>semapv:ManualMappingCuration</code>.
+     The namespace base <span class="iri">{{ semapv.iri }}</span> is not a web page,
+     but each term IRI resolves to its definition in the docs above.</p>
   {% endif %}
 </body>
 </html>

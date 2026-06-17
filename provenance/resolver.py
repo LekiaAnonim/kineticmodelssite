@@ -34,6 +34,7 @@ from provenance.models import SemanticMapping
 QUDT = Namespace("http://qudt.org/schema/qudt/")
 UNIT = Namespace("http://qudt.org/vocab/unit/")
 PMTX = Namespace("https://dev.omethe.us/ontology/prometheus-exp#")
+PROV = Namespace("http://www.w3.org/ns/prov#")
 
 # --- prefixes (kept in sync with mappings/prometheus.sssom.tsv curie_map) ----
 # Characters left un-encoded in a CURIE reference: the URI sub-delims plus ``@``
@@ -52,6 +53,11 @@ CURIE_MAP = {
     "promapp": "https://dev.omethe.us/apparatus/",
     "promrxn": "https://dev.omethe.us/reaction/",
     "promv": "https://dev.omethe.us/vocab/",
+    # Data-record identities (each dereferences to its numeric values; see the
+    # content-negotiated thermo/kinetics/transport detail views).
+    "promthermo": "https://dev.omethe.us/thermo/",
+    "promkin": "https://dev.omethe.us/kinetics/",
+    "promtrans": "https://dev.omethe.us/transport/",
     "inchikey": "https://www.inchi-trust.org/inchikey/",
     "pubchem.compound": "https://pubchem.ncbi.nlm.nih.gov/compound/",
     "CHEBI": "http://purl.obolibrary.org/obo/CHEBI_",
@@ -112,8 +118,8 @@ PROV_PREDICATE = {
     "locatedAt": ("https://dev.omethe.us/vocab/locatedAtInstitution", "located at institution"),
     "usesApparatus": ("https://dev.omethe.us/vocab/usesApparatus", "uses apparatus"),
     "usesReaction": ("https://dev.omethe.us/vocab/usesReaction", "uses reaction"),
-    "thermoFrom": ("https://dev.omethe.us/vocab/thermoDataFrom", "thermo data from"),
-    "kineticsFrom": ("https://dev.omethe.us/vocab/kineticsDataFrom", "kinetics data from"),
+    "thermoFrom": ("http://www.w3.org/ns/prov#wasDerivedFrom", "thermo data from"),
+    "kineticsFrom": ("http://www.w3.org/ns/prov#wasDerivedFrom", "kinetics data from"),
 }
 
 # Human-readable documentation for the semapv mapping-justification vocabulary.
@@ -142,16 +148,6 @@ PROMV_TERMS = {
     "usesReaction": (
         "uses reaction",
         "Relates a kinetic model to a chemical reaction whose rate it incorporates.",
-    ),
-    "thermoDataFrom": (
-        "thermo data from",
-        "Relates a chemical species to a publication that is the source of its "
-        "thermodynamic (NASA polynomial) data.",
-    ),
-    "kineticsDataFrom": (
-        "kinetics data from",
-        "Relates a chemical reaction to a publication that is the source of "
-        "a rate-coefficient expression for it.",
     ),
 }
 
@@ -388,6 +384,7 @@ def _bind_prefixes(g):
     g.bind("owl", OWL)
     g.bind("qudt", QUDT)
     g.bind("unit", UNIT)
+    g.bind("prov", PROV)
 
 
 def _rdf_response(request, graph, fmt):
@@ -396,6 +393,62 @@ def _rdf_response(request, graph, fmt):
     if isinstance(data, bytes):
         data = data.decode("utf-8")
     return HttpResponse(data, content_type=f"{content_type}; charset=utf-8")
+
+
+# Map a data-record kind to (emit helper, comment-join model, record fk attr,
+# detail-view url name) for the content-negotiated record resolver below.
+_RECORD_KINDS = {
+    "thermo": ("thermo_id", "thermo-detail"),
+    "transport": ("transport_id", "transport-detail"),
+    "kinetics": ("kinetics_id", "kinetics-detail"),
+}
+
+
+def negotiate_record(request, kind, obj):
+    """If the client asked for RDF, return the value record as linked data;
+    otherwise ``None`` so the HTML detail view renders as usual.
+
+    Lets the existing ``/thermo/<pk>`` ``/kinetics/<pk>`` ``/transport/<pk>``
+    detail URLs double as dereferenceable FAIR identifiers for the numeric
+    records that the species/reaction documents now link to.
+    """
+    fmt = _negotiate(request)
+    if fmt is None:
+        return None
+    try:
+        from database.models.kinetic_model import (
+            KineticsComment,
+            ThermoComment,
+            TransportComment,
+        )
+
+        comment_model = {
+            "thermo": ThermoComment,
+            "transport": TransportComment,
+            "kinetics": KineticsComment,
+        }[kind]
+        record_attr, detail_name = _RECORD_KINDS[kind]
+        source_iris = _record_model_map(comment_model, record_attr, [obj.id]).get(
+            obj.id, ()
+        )
+
+        g = Graph()
+        _bind_prefixes(g)
+        if kind == "thermo":
+            _emit_thermo(g, None, obj, source_iris)
+        elif kind == "transport":
+            _emit_transport(g, None, obj, source_iris)
+        else:
+            _emit_kinetics(g, None, obj, source_iris)
+        node = _record_iri(kind, obj.id)
+        try:
+            g.add((node, RDFS.seeAlso,
+                   URIRef(request.build_absolute_uri(reverse(detail_name, args=[obj.id])))))
+        except NoReverseMatch:
+            pass
+        return _rdf_response(request, g, fmt)
+    except Exception:  # noqa: BLE001 - never break the detail page
+        return None
 
 
 # --- numeric data layer (thermo / kinetics / transport VALUES) --------------
@@ -435,13 +488,62 @@ def _vector(g, values):
     return head
 
 
-def _record_source(g, record_node, record):
-    """Attribute one value record (thermo/transport/rate) to the paper it came
-    from, so the N competing fits on a node are individually traceable."""
-    source = getattr(record, "source", None)
-    doi = (getattr(source, "doi", "") or "").strip()
-    if doi:
-        g.add((record_node, DCTERMS.source, URIRef(f"https://doi.org/{doi}")))
+def _record_source(g, record_node, source_iris):
+    """Attribute one value record (thermo/transport/rate) to the kinetic
+    model(s) it was parsed from -- the actual data artifact.  Uses the standard
+    PROV-O ``prov:wasDerivedFrom``; the model carries its own publication one hop
+    further out (the model's ``from`` edge), giving an honest data -> model ->
+    article chain instead of attributing raw values straight to a paper."""
+    for iri in source_iris:
+        g.add((record_node, PROV.wasDerivedFrom, URIRef(iri)))
+
+
+# Each value record is a dereferenceable IRI (its existing detail page, which
+# content-negotiates to RDF), so the species/reaction document links out to a
+# stable record identity rather than burying the values in a blank node.
+_RECORD_BASE = {
+    "thermo": CURIE_MAP["promthermo"],
+    "transport": CURIE_MAP["promtrans"],
+    "kinetics": CURIE_MAP["promkin"],
+}
+
+
+def _record_iri(kind, pk):
+    return URIRef(f"{_RECORD_BASE[kind]}{pk}")
+
+
+def _km_iri_map(model_ids):
+    """Map kinetic-model PKs -> their promkm IRI via the SSSOM subject id."""
+    out = {}
+    if not model_ids:
+        return out
+    for m in SemanticMapping.objects.filter(
+        kinetic_model_id__in=model_ids
+    ).values("kinetic_model_id", "subject_id"):
+        out.setdefault(m["kinetic_model_id"], _expand(m["subject_id"]))
+    return out
+
+
+def _record_model_map(comment_model, record_attr, record_ids):
+    """For a ``*Comment`` join model, map each value-record id -> sorted list of
+    the promkm IRIs of the kinetic models that include that record."""
+    by_record = {}
+    if not record_ids:
+        return by_record
+    rows = list(
+        comment_model.objects.filter(**{f"{record_attr}__in": record_ids})
+        .values(record_attr, "kinetic_model_id")
+        .distinct()
+    )
+    km_iri = _km_iri_map({r["kinetic_model_id"] for r in rows})
+    tmp = {}
+    for r in rows:
+        iri = km_iri.get(r["kinetic_model_id"])
+        if iri:
+            tmp.setdefault(r[record_attr], set()).add(iri)
+    for rid, iris in tmp.items():
+        by_record[rid] = sorted(iris)
+    return by_record
 
 
 def _emit_arrhenius(g, node, data):
@@ -511,11 +613,12 @@ def _rate_subnode(g, parent, predicate, rtype):
     return sub
 
 
-def _emit_thermo(g, subject, thermo):
-    tnode = BNode()
-    g.add((subject, PMTX.hasThermo, tnode))
+def _emit_thermo(g, subject, thermo, source_iris=()):
+    tnode = _record_iri("thermo", thermo.id)
+    if subject is not None:
+        g.add((subject, PMTX.hasThermo, tnode))
     g.add((tnode, RDF.type, PMTX.ThermoData))
-    _record_source(g, tnode, thermo)
+    _record_source(g, tnode, source_iris)
     _add_quantity(g, tnode, PMTX.enthalpyOfFormation, thermo.enthalpy_formation,
                   unit_iri=UNIT["J-PER-MOL"])
     _add_quantity(g, tnode, PMTX.referenceTemperature, thermo.reference_temp, unit_iri=UNIT.K)
@@ -534,11 +637,12 @@ def _emit_thermo(g, subject, thermo):
         g.add((tnode, predicate, poly))
 
 
-def _emit_transport(g, subject, tr):
-    tnode = BNode()
-    g.add((subject, PMTX.hasTransport, tnode))
+def _emit_transport(g, subject, tr, source_iris=()):
+    tnode = _record_iri("transport", tr.id)
+    if subject is not None:
+        g.add((subject, PMTX.hasTransport, tnode))
     g.add((tnode, RDF.type, PMTX.TransportData))
-    _record_source(g, tnode, tr)
+    _record_source(g, tnode, source_iris)
     _add_quantity(g, tnode, PMTX.potentialWellDepth, tr.potential_well_depth, unit_iri=UNIT.K)
     _add_quantity(g, tnode, PMTX.collisionDiameter, tr.collision_diameter, unit_iri=UNIT.ANGSTROM)
     _add_quantity(g, tnode, PMTX.dipoleMoment, tr.dipole_moment, unit_text="debye")
@@ -548,11 +652,12 @@ def _emit_transport(g, subject, tr):
                Literal(float(tr.rotational_relaxation), datatype=XSD.double)))
 
 
-def _emit_kinetics(g, subject, kin):
-    knode = BNode()
-    g.add((subject, PMTX.hasRateParameters, knode))
+def _emit_kinetics(g, subject, kin, source_iris=()):
+    knode = _record_iri("kinetics", kin.id)
+    if subject is not None:
+        g.add((subject, PMTX.hasRateParameters, knode))
     g.add((knode, RDF.type, PMTX.RateParameters))
-    _record_source(g, knode, kin)
+    _record_source(g, knode, source_iris)
     _emit_rate(g, knode, kin.raw_data or {})
     _add_quantity(g, knode, PMTX.lowerTemperatureBound, kin.min_temp, unit_iri=UNIT.K)
     _add_quantity(g, knode, PMTX.upperTemperatureBound, kin.max_temp, unit_iri=UNIT.K)
@@ -561,16 +666,28 @@ def _emit_kinetics(g, subject, kin):
 
 
 def _emit_species_data(g, node, mappings):
-    """Attach NASA thermo + transport values for the species behind these mappings."""
+    """Attach NASA thermo + transport values for the species behind these
+    mappings, each attributed to the kinetic model(s) it was parsed from."""
     species_ids = {m.species_id for m in mappings if m.species_id}
     if not species_ids:
         return
     try:
         from database.models import Thermo, Transport
-        for thermo in Thermo.objects.filter(species_id__in=species_ids).select_related("source"):
-            _emit_thermo(g, node, thermo)
-        for tr in Transport.objects.filter(species_id__in=species_ids).select_related("source"):
-            _emit_transport(g, node, tr)
+        from database.models.kinetic_model import ThermoComment, TransportComment
+
+        thermos = list(Thermo.objects.filter(species_id__in=species_ids))
+        thermo_models = _record_model_map(
+            ThermoComment, "thermo_id", [t.id for t in thermos]
+        )
+        for thermo in thermos:
+            _emit_thermo(g, node, thermo, thermo_models.get(thermo.id, ()))
+
+        transports = list(Transport.objects.filter(species_id__in=species_ids))
+        transport_models = _record_model_map(
+            TransportComment, "transport_id", [t.id for t in transports]
+        )
+        for tr in transports:
+            _emit_transport(g, node, tr, transport_models.get(tr.id, ()))
     except Exception:  # noqa: BLE001 - data layer must never break dereferencing
         pass
 
@@ -582,10 +699,133 @@ def _emit_reaction_data(g, node, mappings):
         return
     try:
         from database.models import Kinetics
-        for kin in Kinetics.objects.filter(reaction_id__in=reaction_ids).select_related("source"):
-            _emit_kinetics(g, node, kin)
+        from database.models.kinetic_model import KineticsComment
+
+        kinetics = list(Kinetics.objects.filter(reaction_id__in=reaction_ids))
+        kin_models = _record_model_map(
+            KineticsComment, "kinetics_id", [k.id for k in kinetics]
+        )
+        for kin in kinetics:
+            _emit_kinetics(g, node, kin, kin_models.get(kin.id, ()))
     except Exception:  # noqa: BLE001 - data layer must never break dereferencing
         pass
+
+
+# --- numeric data layer for the HTML view -----------------------------------
+# The same values the RDF emitters above attach as linked data, but as plain
+# dicts so the human page can show the actual coefficients (not only expose them
+# to machines that ask for Turtle).
+def _fmt(value):
+    """Render a number compactly, or None if it is missing/non-numeric."""
+    if value is None:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f"{num:.6g}"
+
+
+def _km_labels(record_iris_map, record_id):
+    """CURIE-ish short labels (slug) for the kinetic-model IRIs of a record."""
+    out = []
+    for iri in record_iris_map.get(record_id, ()):
+        out.append({"iri": iri, "label": iri.rstrip("/").rsplit("/", 1)[-1]})
+    return out
+
+
+def _species_values(mappings):
+    """Thermo + transport values for the species, for HTML rendering."""
+    species_ids = {m.species_id for m in mappings if m.species_id}
+    if not species_ids:
+        return None
+    try:
+        from database.models import Thermo, Transport
+        from database.models.kinetic_model import ThermoComment, TransportComment
+
+        thermos = list(Thermo.objects.filter(species_id__in=species_ids))
+        thermo_models = _record_model_map(ThermoComment, "thermo_id", [t.id for t in thermos])
+        transports = list(Transport.objects.filter(species_id__in=species_ids))
+        transport_models = _record_model_map(
+            TransportComment, "transport_id", [t.id for t in transports]
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    thermo_rows = []
+    for t in thermos:
+        polys = []
+        for coeffs, tmin, tmax, name in (
+            (t.coeffs_poly1, t.temp_min_1, t.temp_max_1, "low"),
+            (t.coeffs_poly2, t.temp_min_2, t.temp_max_2, "high"),
+        ):
+            if coeffs:
+                polys.append({
+                    "name": name,
+                    "t_min": _fmt(tmin),
+                    "t_max": _fmt(tmax),
+                    "coeffs": [_fmt(c) for c in coeffs],
+                })
+        if not polys and t.enthalpy_formation is None:
+            continue
+        thermo_rows.append({
+            "enthalpy": _fmt(t.enthalpy_formation),
+            "ref_temp": _fmt(t.reference_temp),
+            "polys": polys,
+            "sources": _km_labels(thermo_models, t.id),
+        })
+
+    transport_rows = []
+    for tr in transports:
+        transport_rows.append({
+            "well_depth": _fmt(tr.potential_well_depth),
+            "diameter": _fmt(tr.collision_diameter),
+            "dipole": _fmt(tr.dipole_moment),
+            "polarizability": _fmt(tr.polarizability),
+            "rot_relax": _fmt(tr.rotational_relaxation),
+            "sources": _km_labels(transport_models, tr.id),
+        })
+
+    if not thermo_rows and not transport_rows:
+        return None
+    return {"thermo": thermo_rows, "transport": transport_rows}
+
+
+def _reaction_values(mappings):
+    """Rate-parameter values for the reaction, for HTML rendering."""
+    reaction_ids = {m.reaction_id for m in mappings if m.reaction_id}
+    if not reaction_ids:
+        return None
+    try:
+        from database.models import Kinetics
+        from database.models.kinetic_model import KineticsComment
+
+        kinetics = list(Kinetics.objects.filter(reaction_id__in=reaction_ids))
+        kin_models = _record_model_map(KineticsComment, "kinetics_id", [k.id for k in kinetics])
+    except Exception:  # noqa: BLE001
+        return None
+
+    rows = []
+    for kin in kinetics:
+        data = kin.raw_data or {}
+        params = []
+        a_si = data.get("a_si")
+        if a_si is not None:
+            params.append(("A", _fmt(a_si), data.get("a_units") or ""))
+        if data.get("n") is not None:
+            params.append(("n", _fmt(data.get("n")), ""))
+        if data.get("e_si") is not None:
+            params.append(("Ea", _fmt(data.get("e_si")), "J/mol"))
+        rows.append({
+            "type": data.get("type") or "—",
+            "params": [{"name": n, "value": v, "unit": u} for n, v, u in params],
+            "t_min": _fmt(kin.min_temp),
+            "t_max": _fmt(kin.max_temp),
+            "sources": _km_labels(kin_models, kin.id),
+        })
+    if not rows:
+        return None
+    return {"rates": rows}
 
 
 # --- views ------------------------------------------------------------------
@@ -661,8 +901,18 @@ def resolve_node(request, kind, slug):
                 "outgoing": outgoing,
             }
             for other, _pred, lbl, outgoing in edges
+            # On a reaction page, the incoming `uses reaction` (Model -> Reaction)
+            # is just the inverse of the outgoing `kinetics data from`
+            # (Reaction -> Model) shown alongside it; hide the redundant
+            # direction here (the model page still shows `uses reaction ->`).
+            if not (kind == "reaction" and not outgoing and _pred == PROV_PREDICATE["usesReaction"][0])
         ],
     }
+    # Human-visible numeric data (mirrors the RDF value layer).
+    if kind == "species":
+        context["values"] = _species_values(mappings)
+    elif kind == "reaction":
+        context["values"] = _reaction_values(mappings)
     return render(request, "provenance/node.html", context)
 
 

@@ -23,6 +23,8 @@ urlpatterns = [
     path("institution/", resolver.resolve_collection, {"kind": "institution"}, name="prom-institution-collection"),
     path("kineticmodel/", resolver.resolve_collection, {"kind": "kineticmodel"}, name="prom-kineticmodel-collection"),
     path("dataset/", resolver.resolve_collection, {"kind": "dataset"}, name="prom-dataset-collection"),
+    path("apparatus/", resolver.resolve_collection, {"kind": "apparatus"}, name="prom-apparatus-collection"),
+    path("reaction/", resolver.resolve_collection, {"kind": "reaction"}, name="prom-reaction-collection"),
     path("species/<str:slug>", resolver.resolve_node, {"kind": "species"}, name="prom-species"),
     path("concept/<str:slug>", resolver.resolve_node, {"kind": "concept"}, name="prom-concept"),
     path("reference/<str:slug>", resolver.resolve_node, {"kind": "reference"}, name="prom-reference"),
@@ -30,4 +32,6 @@ urlpatterns = [
     path("institution/<str:slug>", resolver.resolve_node, {"kind": "institution"}, name="prom-institution"),
     path("kineticmodel/<str:slug>", resolver.resolve_node, {"kind": "kineticmodel"}, name="prom-kineticmodel"),
     path("dataset/<str:slug>", resolver.resolve_node, {"kind": "dataset"}, name="prom-dataset"),
+    path("apparatus/<str:slug>", resolver.resolve_node, {"kind": "apparatus"}, name="prom-apparatus"),
+    path("reaction/<str:slug>", resolver.resolve_node, {"kind": "reaction"}, name="prom-reaction"),
 ]

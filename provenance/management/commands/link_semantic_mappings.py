@@ -58,6 +58,8 @@ class Command(BaseCommand):
         model_linked, model_unresolved = self._link_kinetic_models()
         inst_linked, inst_unresolved = self._link_institutions()
         person_linked, person_unresolved = self._link_persons()
+        app_linked, app_unresolved = self._link_apparatus()
+        rxn_linked, rxn_unresolved = self._link_reactions()
 
         self.stdout.write(
             self.style.SUCCESS(
@@ -66,7 +68,9 @@ class Command(BaseCommand):
                 f"references: {ref_linked} ({ref_unresolved}), "
                 f"kinetic-models: {model_linked} ({model_unresolved}), "
                 f"institutions: {inst_linked} ({inst_unresolved}), "
-                f"persons: {person_linked} ({person_unresolved})."
+                f"persons: {person_linked} ({person_unresolved}), "
+                f"apparatus: {app_linked} ({app_unresolved}), "
+                f"reactions: {rxn_linked} ({rxn_unresolved})."
             )
         )
 
@@ -215,5 +219,46 @@ class Command(BaseCommand):
             if m.person_id != person_id:
                 m.person_id = person_id
                 m.save(update_fields=["person"])
+                linked += 1
+        return linked, unresolved
+
+    # -- apparatus (promapp instance rows) ----------------------------------
+    def _link_apparatus(self):
+        from chemked_database.models import Apparatus
+
+        slug_map = {}
+        for ap in Apparatus.objects.select_related("institution_ref").all():
+            slug = ap.sssom_slug
+            if slug:
+                slug_map.setdefault(slug, ap.pk)
+
+        linked = unresolved = 0
+        for m in SemanticMapping.objects.filter(subject_id__startswith="promapp:"):
+            ap_id = slug_map.get(_strip(m.subject_id, "promapp:"))
+            if ap_id is None:
+                unresolved += 1
+                continue
+            if m.apparatus_id != ap_id:
+                m.apparatus_id = ap_id
+                m.save(update_fields=["apparatus"])
+                linked += 1
+        return linked, unresolved
+
+    # -- reactions (promrxn instance rows) ----------------------------------
+    def _link_reactions(self):
+        from database.models import Reaction
+
+        hash_map = dict(
+            Reaction.objects.exclude(hash="").values_list("hash", "id")
+        )
+        linked = unresolved = 0
+        for m in SemanticMapping.objects.filter(subject_id__startswith="promrxn:"):
+            rxn_id = hash_map.get(_strip(m.subject_id, "promrxn:"))
+            if rxn_id is None:
+                unresolved += 1
+                continue
+            if m.reaction_id != rxn_id:
+                m.reaction_id = rxn_id
+                m.save(update_fields=["reaction"])
                 linked += 1
         return linked, unresolved

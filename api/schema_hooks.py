@@ -459,10 +459,12 @@ def add_flex_params(result, generator, request, public):
 # Namespaces used by the JSON-LD metadata endpoints (api.fair_metadata) and the
 # ontology artifacts (prometheus_chemked_ontology.ttl, prometheus-exp.ttl).
 _ONTOLOGY_CONTEXT = {
-    "prom": "https://pr.omethe.us/ontology/prometheus#",
-    "chemked": "https://pr.omethe.us/ontology/chemked#",
+    "prom": "https://dev.omethe.us/ontology/prometheus#",
+    "chemked": "https://dev.omethe.us/ontology/chemked#",
     "pmtx": "https://dev.omethe.us/ontology/prometheus-exp#",
     "ontokin": "http://www.theworldavatar.com/ontology/ontokin/OntoKin.owl#",
+    "ontochemexp": "http://www.theworldavatar.com/ontology/ontochemexp/OntoChemExp.owl#",
+    "ontospecies": "http://www.theworldavatar.com/ontology/ontospecies/OntoSpecies.owl#",
     "qudt": "http://qudt.org/schema/qudt/",
     "prov": "http://www.w3.org/ns/prov#",
     "dcterms": "http://purl.org/dc/terms/",

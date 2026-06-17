@@ -10,6 +10,10 @@ classes, so a single ``/api/semantic-mapping/`` query spans both levels:
     "reuse" layer of the ontology.
   * experimental concepts (``chemked:*``) -> Prometheus extension classes
     (``pmtx:*``), the concepts OntoKin 1.0 does not cover.
+  * the same ``pmtx:*`` experimental classes -> OntoChemExp classes
+    (``ontochemexp:*``), and species concepts -> OntoSpecies (``ontospecies:*``),
+    so the extension stays aligned with the established TheWorldAvatar
+    experiment/species ontologies instead of standing alone.
 
 The bridge is a fixed, curated table (no instance data, no network). Rows are
 appended idempotently -- an existing ``(subject_id, predicate_id, object_id)`` is
@@ -56,6 +60,26 @@ BRIDGE = [
     ("chemked:ExperimentDatapoint", "Experiment datapoint", "pmtx:ExperimentDatapoint", "Experiment datapoint", 1.0),
     ("chemked:Measurement", "Measurement", "pmtx:Measurement", "Measurement", 1.0),
     ("chemked:Apparatus", "Apparatus", "pmtx:Apparatus", "Apparatus", 1.0),
+    # pmtx: experimental classes -> OntoChemExp classes (align the extension to TheWorldAvatar)
+    ("pmtx:ExperimentDataset", "Experiment dataset", "ontochemexp:Experiment", "Experiment", 0.9),
+    ("pmtx:ExperimentDatapoint", "Experiment datapoint", "ontochemexp:DataPoint", "Data point", 0.9),
+    ("pmtx:Measurement", "Measurement", "ontochemexp:DataGroup", "Data group", 0.8),
+    ("pmtx:Apparatus", "Experimental apparatus", "ontochemexp:Apparatus", "Apparatus", 1.0),
+    ("pmtx:CommonProperties", "Common properties", "ontochemexp:CommonProperties", "Common properties", 1.0),
+    ("pmtx:MeasuredComposition", "Measured composition", "ontochemexp:Composition", "Composition", 0.9),
+    ("pmtx:Temperature", "Temperature", "ontochemexp:Temperature", "Temperature", 1.0),
+    ("pmtx:Pressure", "Pressure", "ontochemexp:Pressure", "Pressure", 1.0),
+    ("pmtx:EquivalenceRatio", "Equivalence ratio", "ontochemexp:EquivalenceRatio", "Equivalence ratio", 1.0),
+    ("pmtx:ResidenceTime", "Residence time", "ontochemexp:ResidenceTime", "Residence time", 1.0),
+    ("pmtx:FlowRate", "Flow rate", "ontochemexp:FlowRate", "Flow rate", 1.0),
+    ("pmtx:Distance", "Distance", "ontochemexp:Distance", "Distance", 1.0),
+    ("pmtx:IgnitionDelayTime", "Ignition delay time", "ontochemexp:IgnitionDelay", "Ignition delay", 1.0),
+    ("pmtx:LaminarBurningVelocity", "Laminar burning velocity",
+     "ontochemexp:LaminarBurningVelocity", "Laminar burning velocity", 0.9),
+    ("pmtx:Uncertainty", "Uncertainty", "ontochemexp:Uncertainty", "Uncertainty", 1.0),
+    # species concepts -> OntoSpecies classes (the canonical species ontology)
+    ("promc:Species", "Species", "ontospecies:Species", "Species", 1.0),
+    ("promc:Thermo", "Thermodynamic model", "ontospecies:ThermoProperty", "Thermodynamic property", 0.7),
 ]
 
 

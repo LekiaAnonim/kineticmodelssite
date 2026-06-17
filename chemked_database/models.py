@@ -10,6 +10,7 @@ Schema: https://github.com/pr-omethe-us/PyKED
 
 from django.db import models
 from django.core.validators import MinValueValidator
+import re
 
 
 class ApparatusKind(models.TextChoices):
@@ -318,6 +319,21 @@ class Apparatus(models.Model):
         if self.facility:
             parts.append(f"({self.facility})")
         return ' '.join(parts)
+
+    @property
+    def sssom_slug(self):
+        """Deterministic slug for the minted ``promapp:`` node identity.
+
+        Built from the unique_together basis (kind, institution, facility),
+        falling back to the linked institution's name when the free-text
+        institution is blank, so the generator and linker agree on one slug.
+        """
+        institution = self.institution or (
+            self.institution_ref.name if self.institution_ref else ""
+        )
+        parts = [self.kind, institution, self.facility]
+        joined = "-".join(p for p in parts if p).lower()
+        return re.sub(r"[^a-z0-9]+", "-", joined).strip("-")
 
 
 class ExperimentDataset(models.Model):

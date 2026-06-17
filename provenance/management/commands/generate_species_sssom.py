@@ -64,6 +64,15 @@ DEFAULT = Path(__file__).resolve().parents[4] / "mappings" / "prometheus.sssom.t
 AUTHOR_ID = "orcid:0000-0001-7137-5721"
 PREDICATE = "skos:exactMatch"
 
+
+def _curie_local(text: str) -> str:
+    """Percent-encode only the characters that make a CURIE reference invalid
+    (whitespace, brackets, non-ASCII), leaving chemistry punctuation such as
+    ``( ) * . + -`` intact.  Reversible, so ``CHFCH[Z]`` -> ``CHFCH%5BZ%5D``.
+    """
+    return urllib.parse.quote(text or "", safe="!$&'()*+,;=@%")
+
+
 USER_AGENT = "Prometheus-SSSOM-generator/1.0 (https://dev.omethe.us)"
 HTTP_TIMEOUT = 20
 POLITE_DELAY = 0.2
@@ -292,7 +301,9 @@ class Command(BaseCommand):
                 o = row.get("object_id")
                 existing.add((s, row.get("predicate_id"), o))
                 if s and s.startswith("prom:") and o and o.startswith("inchikey:"):
-                    subject_by_key.setdefault((s.split(":", 1)[1].lower(), o), s)
+                    subject_by_key.setdefault(
+                        (urllib.parse.unquote(s.split(":", 1)[1]).lower(), o), s
+                    )
 
         today = date.today().isoformat()
         new_rows = []
@@ -322,9 +333,9 @@ class Command(BaseCommand):
             inchikey_obj = f"inchikey:{inchikey}"
             subject = subject_by_key.get((name.lower(), inchikey_obj))
             if subject is None:
-                subject = f"prom:{name}"
+                subject = f"prom:{_curie_local(name)}"
                 subject_by_key[(name.lower(), inchikey_obj)] = subject
-            subject_label = subject.split(":", 1)[1]
+            subject_label = name
 
             def add(object_id, object_label, confidence, justification, tool, comment):
                 key = (subject, PREDICATE, object_id)

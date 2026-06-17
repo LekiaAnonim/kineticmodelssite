@@ -64,6 +64,20 @@ class SemanticMapping(models.Model):
         blank=True,
         related_name="semantic_mappings",
     )
+    apparatus = models.ForeignKey(
+        "chemked_database.Apparatus",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="semantic_mappings",
+    )
+    reaction = models.ForeignKey(
+        "database.Reaction",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="semantic_mappings",
+    )
 
     class Meta:
         db_table = "provenance_semantic_mapping"
