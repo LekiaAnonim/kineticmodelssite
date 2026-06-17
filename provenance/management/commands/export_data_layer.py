@@ -94,6 +94,69 @@ def _escape_pn_local(local):
     return "".join(out)
 
 
+def _fmt(value):
+    """Render a number compactly, or None if missing/non-numeric."""
+    if value is None:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f"{num:.6g}"
+
+
+def _thermo_summary(t):
+    """Human-readable value lines for a thermo record (NASA polynomials)."""
+    lines = []
+    if t.enthalpy_formation is not None:
+        lines.append(f"\u0394Hf = {_fmt(t.enthalpy_formation)} J/mol")
+    if t.reference_temp is not None:
+        lines.append(f"Reference T = {_fmt(t.reference_temp)} K")
+    for coeffs, tmin, tmax, name in (
+        (t.coeffs_poly1, t.temp_min_1, t.temp_max_1, "Low"),
+        (t.coeffs_poly2, t.temp_min_2, t.temp_max_2, "High"),
+    ):
+        if coeffs:
+            rng = f"[{_fmt(tmin)}\u2013{_fmt(tmax)} K]"
+            lines.append(
+                f"NASA {name} {rng}: " + ", ".join(_fmt(c) for c in coeffs)
+            )
+    return lines
+
+
+def _transport_summary(tr):
+    """Human-readable value lines for a transport record (Lennard-Jones)."""
+    lines = []
+    for label, val, unit in (
+        ("Well depth \u03b5/k", tr.potential_well_depth, "K"),
+        ("Collision diameter \u03c3", tr.collision_diameter, "\u00c5"),
+        ("Dipole moment", tr.dipole_moment, "debye"),
+        ("Polarizability", tr.polarizability, "\u00c5\u00b3"),
+        ("Rotational relaxation", tr.rotational_relaxation, ""),
+    ):
+        if val is not None:
+            lines.append(f"{label} = {_fmt(val)}{(' ' + unit) if unit else ''}")
+    return lines
+
+
+def _kinetics_summary(kin):
+    """Human-readable value lines for a kinetics record (rate parameters)."""
+    data = kin.raw_data or {}
+    lines = []
+    rtype = data.get("type")
+    if rtype:
+        lines.append(f"Type: {rtype}")
+    if data.get("a_si") is not None:
+        lines.append(f"A = {_fmt(data.get('a_si'))} {data.get('a_units') or ''}".rstrip())
+    if data.get("n") is not None:
+        lines.append(f"n = {_fmt(data.get('n'))}")
+    if data.get("e_si") is not None:
+        lines.append(f"Ea = {_fmt(data.get('e_si'))} J/mol")
+    if kin.min_temp is not None or kin.max_temp is not None:
+        lines.append(f"T range: {_fmt(kin.min_temp)}\u2013{_fmt(kin.max_temp)} K")
+    return lines
+
+
 class Command(BaseCommand):
     help = (
         "Export the data layer: species/reaction SSSOM nodes linked to their "
@@ -156,6 +219,7 @@ class Command(BaseCommand):
         # mappings/sssom_graph.py as the "Data records" overlay.
         data_nodes = {}  # record CURIE -> record kind
         data_edges = []  # {"from", "to", "kind"}
+        data_values = {}  # record CURIE -> [human-readable value lines]
 
         def term(curie):
             prefix, _, local = curie.partition(":")
@@ -193,68 +257,72 @@ class Command(BaseCommand):
 
         # Species --hasThermo--> thermo record
         thermo_rows = list(
-            Thermo.objects.filter(species_id__in=sp_anchor.keys()).values(
-                "id", "species_id"
-            )
+            Thermo.objects.filter(species_id__in=sp_anchor.keys())
         )
         thermo_models = self._model_map(
-            ThermoComment, "thermo_id", [r["id"] for r in thermo_rows], km_subject
+            ThermoComment, "thermo_id", [t.id for t in thermo_rows], km_subject
         )
-        for r in thermo_rows:
+        for t in thermo_rows:
             if link(
-                sp_anchor[r["species_id"]],
+                sp_anchor[t.species_id],
                 "thermo",
-                r["id"],
-                thermo_models.get(r["id"], ()),
+                t.id,
+                thermo_models.get(t.id, ()),
             ):
                 counts["thermo"] += 1
+                summary = _thermo_summary(t)
+                if summary:
+                    data_values[f"promthermo:{t.id}"] = summary
 
         # Species --hasTransport--> transport record
         transport_rows = list(
-            Transport.objects.filter(species_id__in=sp_anchor.keys()).values(
-                "id", "species_id"
-            )
+            Transport.objects.filter(species_id__in=sp_anchor.keys())
         )
         transport_models = self._model_map(
             TransportComment,
             "transport_id",
-            [r["id"] for r in transport_rows],
+            [t.id for t in transport_rows],
             km_subject,
         )
-        for r in transport_rows:
+        for t in transport_rows:
             if link(
-                sp_anchor[r["species_id"]],
+                sp_anchor[t.species_id],
                 "transport",
-                r["id"],
-                transport_models.get(r["id"], ()),
+                t.id,
+                transport_models.get(t.id, ()),
             ):
                 counts["transport"] += 1
+                summary = _transport_summary(t)
+                if summary:
+                    data_values[f"promtrans:{t.id}"] = summary
 
         # Reaction --hasRateParameters--> kinetics record
         kinetics_rows = list(
-            Kinetics.objects.filter(reaction_id__in=rxn_anchor.keys()).values(
-                "id", "reaction_id"
-            )
+            Kinetics.objects.filter(reaction_id__in=rxn_anchor.keys())
         )
         kinetics_models = self._model_map(
             KineticsComment,
             "kinetics_id",
-            [r["id"] for r in kinetics_rows],
+            [k.id for k in kinetics_rows],
             km_subject,
         )
-        for r in kinetics_rows:
+        for k in kinetics_rows:
             if link(
-                rxn_anchor[r["reaction_id"]],
+                rxn_anchor[k.reaction_id],
                 "kinetics",
-                r["id"],
-                kinetics_models.get(r["id"], ()),
+                k.id,
+                kinetics_models.get(k.id, ()),
             ):
                 counts["kinetics"] += 1
+                summary = _kinetics_summary(k)
+                if summary:
+                    data_values[f"promkin:{k.id}"] = summary
 
         self.stdout.write("Data-layer records linked to existing SSSOM nodes:")
         for kind in ("thermo", "transport", "kinetics"):
             self.stdout.write(f"  {kind:10s} {counts[kind]}")
         self.stdout.write(f"  {'triples':10s} {len(triples)}")
+        self.stdout.write(f"  {'values':10s} {len(data_values)}")
 
         if options["dry_run"]:
             self.stdout.write(self.style.WARNING("Dry run: no file written."))
@@ -262,7 +330,7 @@ class Command(BaseCommand):
 
         self._write_ttl(Path(options["ttl"]), triples, used, curie_map)
         self.stdout.write(self.style.SUCCESS(f"Wrote {options['ttl']}"))
-        self._write_json(Path(options["json"]), data_nodes, data_edges)
+        self._write_json(Path(options["json"]), data_nodes, data_edges, data_values)
         self.stdout.write(self.style.SUCCESS(f"Wrote {options['json']}"))
 
     # -- serialization ---------------------------------------------------
@@ -287,18 +355,21 @@ class Command(BaseCommand):
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     @staticmethod
-    def _write_json(path, data_nodes, data_edges):
+    def _write_json(path, data_nodes, data_edges, data_values):
         """Graph-overlay sidecar: record nodes + species/reaction and model edges.
 
         Mirrors ``prometheus.provenance.json`` so ``sssom_graph.py`` can render the
         data layer as a toggleable overlay.  CURIEs are raw (no Turtle escaping);
-        the graph resolves them via the SSSOM ``curie_map``.
+        the graph resolves them via the SSSOM ``curie_map``.  ``values`` maps each
+        record CURIE to its human-readable value lines so the graph can display
+        the actual numbers on demand.
         """
         payload = {
             "nodes": [
                 {"id": curie, "kind": kind} for curie, kind in sorted(data_nodes.items())
             ],
             "edges": data_edges,
+            "values": data_values,
         }
         path.write_text(json.dumps(payload), encoding="utf-8")
 
