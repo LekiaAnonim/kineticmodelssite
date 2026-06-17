@@ -30,7 +30,7 @@ from database.models import Reaction
 from database.models.reaction_species import Stoichiometry
 from database.models.kinetic_model import SpeciesName
 
-DEFAULT = Path(__file__).resolve().parents[4] / "mappings" / "prometheus.sssom.tsv"
+DEFAULT = Path(__file__).resolve().parents[4] / "mappings" / "sssom" / "prometheus.sssom.tsv"
 AUTHOR_ID = "orcid:0000-0001-7137-5721"
 PREDICATE = "skos:broadMatch"
 OBJECT = "ontokin:GasPhaseReaction"

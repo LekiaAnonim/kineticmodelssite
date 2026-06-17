@@ -31,7 +31,7 @@ from provenance import resolver
 from provenance.models import SemanticMapping
 
 MAPPINGS_DIR = Path(__file__).resolve().parents[4] / "mappings"
-DEFAULT_TTL = MAPPINGS_DIR / "prometheus.records.ttl"
+DEFAULT_TTL = MAPPINGS_DIR / "rdf" / "prometheus.records.ttl"
 
 HEADER = (
     "# Prometheus data records: the full numeric thermo/transport/kinetics layer.\n"

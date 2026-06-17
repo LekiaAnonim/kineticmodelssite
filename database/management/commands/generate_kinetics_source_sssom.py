@@ -32,7 +32,7 @@ from django.core.management.base import BaseCommand
 
 from database.models.kinetic_data import Kinetics
 
-DEFAULT = Path(__file__).resolve().parents[4] / "mappings" / "prometheus.sssom.tsv"
+DEFAULT = Path(__file__).resolve().parents[4] / "mappings" / "sssom" / "prometheus.sssom.tsv"
 AUTHOR_ID = "orcid:0000-0001-7137-5721"
 PREDICATE = "skos:exactMatch"
 JUSTIFICATION = "semapv:UnspecifiedMatching"

@@ -28,7 +28,7 @@ from pathlib import Path
 from django.core.management.base import BaseCommand
 
 # Prometheus/mappings/prometheus.sssom.tsv (shared with the A-Box generators).
-DEFAULT = Path(__file__).resolve().parents[4] / "mappings" / "prometheus.sssom.tsv"
+DEFAULT = Path(__file__).resolve().parents[4] / "mappings" / "sssom" / "prometheus.sssom.tsv"
 AUTHOR_ID = "orcid:0000-0001-7137-5721"
 TOOL = "generate_ontology_bridge"
 

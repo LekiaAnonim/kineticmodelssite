@@ -209,7 +209,7 @@ def _load_pmtx_vocab(path, _mtime):
 
 def _pmtx_vocab():
     """pmtx: experimental-extension terms, reloaded when the TTL file changes."""
-    path = _MAPPINGS_DIR / "prometheus-exp.ttl"
+    path = _MAPPINGS_DIR / "rdf" / "prometheus-exp.ttl"
     try:
         mtime = path.stat().st_mtime
     except OSError:
@@ -230,7 +230,7 @@ def _load_pmtx_graph(path, _mtime):
 
 def _pmtx_graph():
     """The pmtx: ontology graph, reloaded when the TTL file changes."""
-    path = _MAPPINGS_DIR / "prometheus-exp.ttl"
+    path = _MAPPINGS_DIR / "rdf" / "prometheus-exp.ttl"
     try:
         mtime = path.stat().st_mtime
     except OSError:
@@ -276,7 +276,7 @@ def _load_external_vocab(path, _mtime, prefix, ns):
 
 def _external_vocab(filename, prefix):
     """A reused-ontology vocabulary, reloaded when its inventory CSV changes."""
-    path = _MAPPINGS_DIR / filename
+    path = _MAPPINGS_DIR / "vocab" / filename
     try:
         mtime = path.stat().st_mtime
     except OSError:
@@ -328,7 +328,7 @@ def _provenance_edges():
     ``prometheus.provenance.json`` (via ``export_provenance_edges``) is reflected
     without restarting the server.
     """
-    path = _MAPPINGS_DIR / "prometheus.provenance.json"
+    path = _MAPPINGS_DIR / "sssom" / "prometheus.provenance.json"
     try:
         mtime = path.stat().st_mtime
     except OSError:

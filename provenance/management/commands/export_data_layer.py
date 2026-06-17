@@ -39,8 +39,8 @@ from database.models.kinetic_model import (
 from provenance.models import SemanticMapping
 
 MAPPINGS_DIR = Path(__file__).resolve().parents[4] / "mappings"
-DEFAULT_TTL = MAPPINGS_DIR / "prometheus.data.ttl"
-DEFAULT_JSON = MAPPINGS_DIR / "prometheus.data.json"
+DEFAULT_TTL = MAPPINGS_DIR / "rdf" / "prometheus.data.ttl"
+DEFAULT_JSON = MAPPINGS_DIR / "sssom" / "prometheus.data.json"
 
 PMTX = "https://dev.omethe.us/ontology/prometheus-exp#"
 PROV = "http://www.w3.org/ns/prov#"
@@ -305,7 +305,7 @@ class Command(BaseCommand):
     @staticmethod
     def _curie_map():
         """Read the curie_map from the SSSOM TSV header for IRI resolution."""
-        tsv = MAPPINGS_DIR / "prometheus.sssom.tsv"
+        tsv = MAPPINGS_DIR / "sssom" / "prometheus.sssom.tsv"
         curie_map = {}
         if not tsv.exists():
             return curie_map

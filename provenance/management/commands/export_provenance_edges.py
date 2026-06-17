@@ -54,8 +54,8 @@ from provenance.models import SemanticMapping
 #            parents: [0]commands [1]management [2]provenance [3]kineticmodelssite
 #                     [4]Prometheus
 MAPPINGS_DIR = Path(__file__).resolve().parents[4] / "mappings"
-DEFAULT_JSON = MAPPINGS_DIR / "prometheus.provenance.json"
-DEFAULT_TTL = MAPPINGS_DIR / "prometheus.provenance.ttl"
+DEFAULT_JSON = MAPPINGS_DIR / "sssom" / "prometheus.provenance.json"
+DEFAULT_TTL = MAPPINGS_DIR / "rdf" / "prometheus.provenance.ttl"
 
 # Local domain predicates for the RDF (knowledge-graph) serialization.
 PROMV = "https://dev.omethe.us/vocab/"
@@ -470,7 +470,7 @@ class Command(BaseCommand):
     @staticmethod
     def _curie_map():
         """Read the curie_map from the SSSOM TSV header for IRI resolution."""
-        tsv = MAPPINGS_DIR / "prometheus.sssom.tsv"
+        tsv = MAPPINGS_DIR / "sssom" / "prometheus.sssom.tsv"
         curie_map = {}
         if not tsv.exists():
             return curie_map
