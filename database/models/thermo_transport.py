@@ -5,6 +5,10 @@ from django.contrib.postgres.fields import ArrayField
 from rmgpy.constants import R as gas_constant
 
 
+STANDARD_STATE_TEMPERATURE = 298.15
+STANDARD_STATE_TEMPERATURE_TOLERANCE = 2.0
+
+
 class Thermo(models.Model):
     source = models.ForeignKey("Source", null=True, on_delete=models.CASCADE)
     species = models.ForeignKey("Species", on_delete=models.CASCADE)
@@ -50,7 +54,7 @@ class Thermo(models.Model):
     @property
     def enthalpy298(self):
         "Enthalpy (J/mol) at 298.15 K"
-        return self.enthalpy(298.15)
+        return self.enthalpy(STANDARD_STATE_TEMPERATURE)
 
     def entropy(self, temp):
         "Entropy (J/mol/K) at specified temperature (K)"
@@ -68,7 +72,7 @@ class Thermo(models.Model):
     @property
     def entropy298(self):
         "Entropy (J/mol/K) at 298.15 K"
-        return self.entropy(298.15)
+        return self.entropy(STANDARD_STATE_TEMPERATURE)
 
     def free_energy(self, temp, poly_num):
         "Gibbs Free Energy (J/mol) at specified temperature (K)"
@@ -80,6 +84,11 @@ class Thermo(models.Model):
         and returns the coefficients.
         """
         if temperature < self.temp_min_1:
+            if (
+                abs(temperature - STANDARD_STATE_TEMPERATURE) < 1e-9
+                and self.temp_min_1 - temperature <= STANDARD_STATE_TEMPERATURE_TOLERANCE
+            ):
+                return self.coeffs_poly1
             raise ValueError(
                 f"Requested temperature {temperature:.0f} K is below "
                 f"minimum {self.temp_min_1:.0f} K"
