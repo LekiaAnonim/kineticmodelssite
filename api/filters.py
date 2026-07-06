@@ -21,6 +21,7 @@ _DATAPOINT_FIELDS = {
     "datapoint__pressure": ["gte", "lte"],
     "datapoint__equivalence_ratio": ["gte", "lte"],
     "datapoint__composition__species__cas": ["exact"],
+    "datapoint__composition__species__inchi": ["exact"],
     "datapoint__composition__species__species_name": ["icontains"],
 }
 
