@@ -754,7 +754,7 @@
                                 <div class="mini-info-grid">
                                     <div class="mini-info-item">
                                         <span class="mini-info-label">RMG Label</span>
-                                        <span class="mini-info-value">{{ species.rmg_label|default:"N/A" }}</span>
+                                        <span class="mini-info-value">{% if species.rmg_label and species.rmg_label == species.chemkin_label %}<em>Same as Chemkin label</em>{% else %}{{ species.rmg_label|default:"N/A" }}{% endif %}</span>
                                     </div>
                                     <div class="mini-info-item">
                                         <span class="mini-info-label">RMG Index</span>
@@ -968,7 +968,7 @@
                             <tr>
                                 <td><strong>{{ species.chemkin_label }}</strong></td>
                                 <td><code>{{ species.smiles }}</code></td>
-                                <td>{{ species.rmg_label|default:"—" }}</td>
+                                <td>{% if species.rmg_label and species.rmg_label == species.chemkin_label %}<em>Same as Chemkin label</em>{% else %}{{ species.rmg_label|default:"—" }}{% endif %}</td>
                                 <td class="numeric">{{ species.rmg_index|default:"—" }}</td>
                                 <td class="numeric">{{ species.enthalpy_discrepancy|floatformat:2|default:"—" }}</td>
                                 <td><span class="badge badge-secondary">{{ species.identification_method|default:"auto" }}</span></td>
