@@ -5,7 +5,13 @@ from typing import Iterable, Iterator, Optional, Sequence
 
 import cantera as ct
 import numpy as np
-from pyteck.simulation import get_ignition_delay
+
+try:
+    from pyteck.simulation import get_ignition_delay
+except ImportError:  # PyTeCK >= 0.2.6 moved it onto HomogeneousReactorSimulation
+    from pyteck.simulation import HomogeneousReactorSimulation
+
+    get_ignition_delay = HomogeneousReactorSimulation.get_ignition_delay
 
 from database.models import KineticModel
 

@@ -871,7 +871,9 @@ def run_pyteck_simulation(
     # detected (empty peak array → "argmax of empty sequence").  We wrap
     # the original method so that it sets a large sentinel value instead
     # of crashing, allowing the rest of the PyTeCK pipeline to proceed.
-    _orig_process_results = _pyteck_sim.Simulation.process_results
+    # PyTeCK >= 0.2.6 renamed Simulation to HomogeneousReactorSimulation
+    _SimCls = getattr(_pyteck_sim, 'Simulation', None) or _pyteck_sim.HomogeneousReactorSimulation
+    _orig_process_results = _SimCls.process_results
 
     def _safe_process_results(self):
         try:
@@ -886,7 +888,7 @@ def run_pyteck_simulation(
             else:
                 raise
 
-    _pyteck_sim.Simulation.process_results = _safe_process_results
+    _SimCls.process_results = _safe_process_results
 
     try:
         # Export mechanism
@@ -1047,7 +1049,7 @@ def run_pyteck_simulation(
         finally:
             os.chdir(original_cwd)
             # Restore the original process_results method
-            _pyteck_sim.Simulation.process_results = _orig_process_results
+            _SimCls.process_results = _orig_process_results
         
         # Parse results
         expected_results_file = os.path.join(
@@ -1095,7 +1097,7 @@ def run_pyteck_simulation(
         logger.exception(f"PyTeCK simulation failed: {e}")
         # Restore the original process_results method in case of error
         try:
-            _pyteck_sim.Simulation.process_results = _orig_process_results
+            _SimCls.process_results = _orig_process_results
         except NameError:
             pass
         return False, str(e), None

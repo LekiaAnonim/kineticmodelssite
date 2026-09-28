@@ -294,3 +294,16 @@ def refresh_all_job_statuses():
     if config:
         manager = LocalJobManager(config=config)
         manager.refresh_statuses()
+
+
+@shared_task(name='importer_dashboard.ping')
+def ping(sent_at=None):
+    """Lightweight probe used to measure enqueue -> worker-pickup latency.
+
+    Returns the worker-side monotonic clock reading at the moment the task
+    starts executing. On a single host time.monotonic() shares a system-wide
+    reference, so the caller can subtract its own send-time monotonic reading to
+    obtain the real start-up latency of the co-located Celery/Redis worker pool.
+    """
+    import time
+    return time.monotonic()
