@@ -152,7 +152,7 @@
 </div>
 
 <!-- Real-time Activity Logger - Right Side Panel -->
-<div id="activityLogPanel" class="activity-log-fixed">
+<div id="activityLogPanel" class="activity-log-fixed minimized">
     <div class="activity-log-header">
         <div style="display: flex; align-items: center; gap: 10px;">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; color: #2563eb;">
@@ -171,7 +171,7 @@
             </button>
             <button id="minimizeLogBtn" class="btn btn-secondary btn-small" title="Hide log panel">
                 <svg id="minimizeIcon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">
-                    <polyline points="15 18 9 12 15 6"/>
+                    <polyline points="9 18 15 12 9 6"/>
                 </svg>
             </button>
             <form method="post" action="{% url 'importer_dashboard:clear_logs' %}" style="display: inline; margin: 0;">
@@ -185,7 +185,7 @@
             </form>
         </div>
     </div>
-    <div id="logViewer" class="log-viewer">
+    <div id="logViewer" class="log-viewer" style="display: none;">
         <div id="logMessages" class="log-messages">
             <div class="log-entry log-info">
                 <span class="log-time">--:--:--</span>
@@ -196,13 +196,14 @@
 </div>
 
 <!-- Floating Toggle Button (visible when panel is minimized) -->
-<button id="floatingLogToggle" class="floating-log-toggle" title="Show Activity Log" style="display: none;">
+<button id="floatingLogToggle" class="floating-log-toggle" title="Show Activity Log" style="display: flex;">
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 22px; height: 22px;">
         <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
     </svg>
     <span style="font-size: 10px; display: block; margin-top: 4px; font-weight: 600;">Logs</span>
     <span id="floatingStatusDot" class="floating-status-dot">●</span>
 </button>
+<script>document.body.classList.add('log-minimized');</script>
 
 {% endblock %}
 
