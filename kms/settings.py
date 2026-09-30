@@ -299,6 +299,9 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE  # or 'America/New_York'
 CELERY_TASK_TRACK_STARTED = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_ACKS_LATE = True
+CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': 4 * 24 * 3600}  # > 3-day time limit
 
 # Long-running import jobs need longer timeouts
 CELERY_TASK_TIME_LIMIT = 3 * 24 * 3600      # Hard limit: 3 days (matches your SLURM --time=3-00:00:00)

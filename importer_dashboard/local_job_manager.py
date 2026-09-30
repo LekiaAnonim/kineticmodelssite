@@ -325,6 +325,9 @@ class LocalJobManager:
         """Return True if a local PID currently exists."""
         try:
             os.kill(pid, 0)
+        except PermissionError:
+            # Process exists but belongs to another user
+            return True
         except OSError:
             return False
         return True

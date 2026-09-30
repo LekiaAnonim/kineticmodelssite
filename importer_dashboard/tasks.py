@@ -127,10 +127,18 @@ def run_import_job(self, job_id):
 
             # Read last few lines of error log
             error_tail = _tail_file(error_log, 20)
+            output_tail = _tail_file(output_log, 20)
+            reason = ''
+            if returncode < 0:
+                # Negative code = killed by signal; -9 on a big job is usually the OOM killer
+                reason = f' (killed by signal {-returncode}{", likely out of memory" if returncode == -9 else ""})'
             JobLog.objects.create(
                 job=job,
                 log_type='error',
-                message=f'Job failed with exit code {returncode}. Errors:\n{error_tail}'
+                message=(
+                    f'Job failed with exit code {returncode}{reason}.\n'
+                    f'error.log:\n{error_tail}\n\noutput.log:\n{output_tail}'
+                )
             )
             logger.error(f"Job {job.name} failed with exit code {returncode}")
             return {'status': 'failed', 'job_id': job_id, 'returncode': returncode}
@@ -249,10 +257,10 @@ def _build_command_from_import_sh(import_sh_path, rmg_py_path, conda_env, job_pa
     )
 
     # Wrap with conda activation and cd
+    # stderr is left alone so Popen routes it to error.log (the Errors page)
     command = (
         f'cd {job_path} && '
-        f'{import_cmd} '
-        f'2>&1'
+        f'{import_cmd}'
     )
 
     logger.info(f"Built command from import.sh: {command}")
