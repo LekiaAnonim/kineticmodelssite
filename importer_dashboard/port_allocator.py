@@ -13,7 +13,7 @@ import socket
 from django.conf import settings
 from django.db import IntegrityError, transaction
 
-from .models import PortReservation
+from .models import ClusterJob, PortReservation
 
 logger = logging.getLogger(__name__)
 
@@ -49,17 +49,31 @@ def reserve_port(job):
     # Re-starting a job: drop any reservation left over from its last run
     PortReservation.objects.filter(job=job).delete()
 
+    # ClusterJob has a unique (config, port) constraint, so ports stored on other
+    # jobs -- including idle ones whose port came from import.sh -- are off limits
     taken = set(PortReservation.objects.values_list('port', flat=True))
-    for port in _port_range():
+    taken |= set(
+        ClusterJob.objects.filter(config=job.config, port__isnull=False)
+        .exclude(pk=job.pk).values_list('port', flat=True)
+    )
+
+    # Prefer the job's existing port so its URL stays stable between runs
+    candidates = list(_port_range())
+    if job.port in candidates:
+        candidates.remove(job.port)
+        candidates.insert(0, job.port)
+
+    for port in candidates:
         if port in taken or not _is_port_free(port):
             continue
         try:
             with transaction.atomic():
                 PortReservation.objects.create(port=port, job=job)
+                if job.port != port:
+                    job.port = port
+                    job.save(update_fields=['port'])
         except IntegrityError:
-            continue  # lost the race for this port
-        job.port = port
-        job.save(update_fields=['port'])
+            continue  # another worker claimed this port first
         logger.info(f"Reserved port {port} for job {job.name}")
         return port
 

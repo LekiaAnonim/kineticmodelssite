@@ -78,6 +78,14 @@ def run_import_job(self, job_id):
         JobLog.objects.create(job=job, log_type='warning',
                               message=f'{e}; retrying in 5 minutes')
         raise self.retry(countdown=300, max_retries=None)
+    except Exception as e:
+        logger.exception(f"Could not reserve a port for {job.name}")
+        job.status = ImportJobStatus.FAILED
+        job.completed_at = timezone.now()
+        job.save()
+        JobLog.objects.create(job=job, log_type='error',
+                              message=f'Could not reserve a port: {e}')
+        return {'status': 'error', 'job_id': job_id, 'error': str(e)}
     command = apply_port_to_command(command, port)
 
     # Set up log files (same structure as the cluster)
