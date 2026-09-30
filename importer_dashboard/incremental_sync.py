@@ -39,8 +39,10 @@ class IncrementalSync:
         self.job = job
         self.config = job.config
         
-        # Build path to vote database on cluster
-        self.job_path = f"{self.config.root_path}/{job.name}"
+        # Build path to vote database. LocalJobManager carries its own root_path
+        # (settings.RMG_MODELS_PATH); SSHJobManager uses the config's cluster path.
+        root_path = getattr(ssh_manager, 'root_path', None) or self.config.root_path
+        self.job_path = f"{root_path}/{job.name}"
         self.vote_db_pattern = f"{self.job_path}/votes_*.db"
     
     def find_vote_database(self):
