@@ -316,6 +316,9 @@ RMG_MODELS_PATH = os.getenv('RMGMODELSPATH', '/home/prometheus/Importer/RMG-mode
 CONDA_ENV_NAME = os.getenv('CONDA_ENV_NAME', 'rmg_env')
 CONDA_BASE_PATH = os.getenv('CONDA_BASE_PATH', '/home/prometheus/miniconda3')
 
+# Ports handed out to running importers' web UIs; must match the nginx /importer/ rule
+IMPORTER_PORT_RANGE = (8100, 8999)
+
 # 'local' = Celery on office server, 'cluster' = SSH/SLURM on Explorer
 IMPORTER_MODE = 'local'
 

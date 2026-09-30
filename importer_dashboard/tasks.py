@@ -17,6 +17,8 @@ from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.utils import timezone
 
+from .port_allocator import NoFreePortError, apply_port_to_command, release_port, reserve_port
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,9 +68,17 @@ def run_import_job(self, job_id):
     import_sh_path = os.path.join(job_path, 'import.sh')
     command = _build_command_from_import_sh(import_sh_path, rmg_py_path, conda_env, job_path)
 
-    # Build the command that import.sh used to run
-    # This mirrors the sbatch script from the cluster
-    port = job.port or 0
+    # Reserve a free port for this run instead of the one hard-coded in import.sh
+    try:
+        port = reserve_port(job)
+    except NoFreePortError as e:
+        # Every port is busy: put the job back in the queue and try again later
+        job.status = ImportJobStatus.PENDING
+        job.save(update_fields=['status'])
+        JobLog.objects.create(job=job, log_type='warning',
+                              message=f'{e}; retrying in 5 minutes')
+        raise self.retry(countdown=300, max_retries=None)
+    command = apply_port_to_command(command, port)
 
     # Set up log files (same structure as the cluster)
     output_log = os.path.join(job_path, 'output.log')
@@ -170,6 +180,9 @@ def run_import_job(self, job_id):
             message=f'Unexpected error: {str(e)}'
         )
         return {'status': 'error', 'job_id': job_id, 'error': str(e)}
+
+    finally:
+        release_port(job)
 
 
 def _build_command_from_import_sh(import_sh_path, rmg_py_path, conda_env, job_path):

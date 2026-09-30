@@ -22,6 +22,7 @@ from celery.result import AsyncResult
 
 from .models import ClusterJob, ImportJobConfig, ImportJobStatus
 from .tasks import run_import_job
+from .port_allocator import release_port, release_stale_ports
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,7 @@ class LocalJobManager:
         job.status = ImportJobStatus.CANCELLED
         job.completed_at = timezone.now()
         job.save()
+        release_port(job)
 
     def get_log_tail(self, job: ClusterJob, lines: int = 50):
         """
@@ -216,6 +218,9 @@ class LocalJobManager:
                 job.completed_at = timezone.now()
 
             job.save()
+
+        # A worker killed mid-job never reaches its `finally`, so sweep up here
+        release_stale_ports([ImportJobStatus.RUNNING, ImportJobStatus.PENDING])
 
     # ------------------------------------------------------------------
     # Aliases so views.py can call the same names as SSHJobManager

@@ -253,6 +253,21 @@ class ClusterJob(models.Model):
         return f"{self.config.ood_base_url}/{self.host}/{self.port}/"
 
 
+class PortReservation(models.Model):
+    """
+    A port currently held by a running import job's web interface.
+    The unique constraint on `port` is what prevents two jobs from
+    being handed the same port, even when workers allocate concurrently.
+    """
+    port = models.IntegerField(unique=True)
+    job = models.OneToOneField(ClusterJob, on_delete=models.CASCADE,
+                               related_name='port_reservation')
+    reserved_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.port} -> {self.job.name}"
+
+
 class JobLog(models.Model):
     """
     Stores log entries for import jobs
