@@ -14,6 +14,9 @@ class ImportJobStatus(models.TextChoices):
     IDLE = 'idle', 'Idle'  # Job discovered but never started
     PENDING = 'pending', 'Pending'  # Job submitted to SLURM but not running yet
     RUNNING = 'running', 'Running'
+    # The importer is waiting for someone to confirm a match on its page. It keeps
+    # running and keeps its port, but its Celery worker slot is free for other jobs.
+    AWAITING_INPUT = 'awaiting_input', 'Awaiting input'
     PAUSED = 'paused', 'Paused'
     COMPLETED = 'completed', 'Completed'
     FAILED = 'failed', 'Failed'

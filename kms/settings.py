@@ -302,6 +302,10 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_TASK_ACKS_LATE = True
 CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': 4 * 24 * 3600}  # > 3-day time limit
+# Keep task results longer than the 3-day job limit. The default (1 day) lets a running
+# job's result expire, and Celery then reports it as PENDING. Redis drops expired results
+# itself; the database backend relies on Celery Beat's daily cleanup task.
+CELERY_RESULT_EXPIRES = 4 * 24 * 3600
 
 # Long-running import jobs need longer timeouts
 CELERY_TASK_TIME_LIMIT = 3 * 24 * 3600      # Hard limit: 3 days (matches your SLURM --time=3-00:00:00)

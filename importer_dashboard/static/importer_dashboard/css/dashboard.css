@@ -371,6 +371,11 @@ tbody tr:last-child td {
     color: #92400e;
 }
 
+.status-awaiting_input {
+    background-color: #ede9fe;
+    color: #5b21b6;
+}
+
 .status-idle {
     background-color: #e5e7eb;
     color: #6b7280;

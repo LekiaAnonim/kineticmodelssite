@@ -5,6 +5,7 @@ Replaces the SLURM submission in SSHJobManager.start_job().
 The import logic mirrors what import.sh did on the cluster.
 """
 import os
+import shlex
 import subprocess
 import signal
 import logging
@@ -17,6 +18,8 @@ from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.utils import timezone
 
+from .importer_files import (EXIT_KILLED_FROM_WEB_PAGE, apply_progress, clear_importer_state,
+                             read_importer_state, read_progress)
 from .port_allocator import NoFreePortError, apply_port_to_command, release_port, reserve_port
 
 logger = logging.getLogger(__name__)
@@ -48,6 +51,7 @@ def run_import_job(self, job_id):
     job.status = ImportJobStatus.RUNNING
     job.host = 'localhost'
     job.started_at = timezone.now()
+    job.worker_pid = None  # the previous run's PID, until Popen below sets this run's
     job.save()
 
     JobLog.objects.create(
@@ -103,9 +107,12 @@ def run_import_job(self, job_id):
         'PATH': f'{conda_bin}:{os.environ.get("PATH", "")}',
     }
 
+    poll_seconds = getattr(settings, 'IMPORTER_STATE_POLL_SECONDS', 10)
     process = None
+    detached = False  # set when the importer is left running without this task
     try:
         with open(output_log, 'w') as stdout_f, open(error_log, 'w') as stderr_f:
+            clear_importer_state(job_path)
             process = subprocess.Popen(
                 command,
                 shell=True,
@@ -120,8 +127,42 @@ def run_import_job(self, job_id):
             job.worker_pid = process.pid
             job.save()
 
-            # Wait for completion
-            returncode = process.wait()
+            # Wait for the importer to exit, or to start waiting for someone to confirm a
+            # match on its page. Then it has nothing to compute, so free this worker slot
+            # for other jobs and leave it running; refresh_statuses takes over from there.
+            returncode = None
+            while returncode is None:
+                try:
+                    returncode = process.wait(timeout=poll_seconds)
+                except subprocess.TimeoutExpired:
+                    if read_importer_state(job_path).get('state') == 'awaiting_input':
+                        detached = True
+                        break
+
+        if detached:
+            job.status = ImportJobStatus.AWAITING_INPUT
+            job.save(update_fields=['status'])
+            apply_progress(job, read_progress(job_path))
+            JobLog.objects.create(
+                job=job,
+                log_type='info',
+                message=('Waiting for someone to confirm a match on the importer page. The importer '
+                         'keeps running and keeps its port; its worker slot is free for other jobs.')
+            )
+            logger.info(f"Job {job.name} is awaiting input; freed its worker slot")
+            return {'status': 'awaiting_input', 'job_id': job_id}
+
+        if returncode == EXIT_KILLED_FROM_WEB_PAGE:
+            job.status = ImportJobStatus.CANCELLED
+            job.completed_at = timezone.now()
+            job.save()
+            _update_completion_stats(job, job_path)
+            JobLog.objects.create(
+                job=job,
+                log_type='info',
+                message='Stopped with the Kill job button on the importer page'
+            )
+            return {'status': 'cancelled', 'job_id': job_id}
 
         if returncode == 0:
             job.status = ImportJobStatus.COMPLETED
@@ -190,7 +231,8 @@ def run_import_job(self, job_id):
         return {'status': 'error', 'job_id': job_id, 'error': str(e)}
 
     finally:
-        release_port(job)
+        if not detached:
+            release_port(job)  # a detached importer still serves its page on this port
 
 
 def _build_command_from_import_sh(import_sh_path, rmg_py_path, conda_env, job_path):
@@ -279,8 +321,10 @@ def _build_command_from_import_sh(import_sh_path, rmg_py_path, conda_env, job_pa
 
     # Wrap with conda activation and cd
     # stderr is left alone so Popen routes it to error.log (the Errors page)
+    # The path is quoted because the command runs in a shell, and some model folders
+    # have shell characters in their names, e.g. PCI2017/038-Labbe-Zhao(30Torr-10Atm)
     command = (
-        f'cd {job_path} && '
+        f'cd {shlex.quote(job_path)} && '
         f'{import_cmd}'
     )
 
@@ -289,18 +333,10 @@ def _build_command_from_import_sh(import_sh_path, rmg_py_path, conda_env, job_pa
 
 
 def _update_completion_stats(job, job_path):
-    """Read progress.json after completion to update job statistics."""
-    progress_file = os.path.join(job_path, 'RMG-Py-output', 'progress.json')
+    """Copy the importer's final progress counts (its progress.json) onto the job."""
     try:
-        if os.path.exists(progress_file):
-            with open(progress_file, 'r') as f:
-                progress = json.load(f)
-            job.total_species = progress.get('totalspecies', 0)
-            job.identified_species = progress.get('identifiedspecies', 0)
-            job.processed_species = progress.get('processedspecies', 0)
-            job.confirmed_species = progress.get('confirmedspecies', 0)
-            job.total_reactions = progress.get('totalreactions', 0)
-            job.save()
+        if not apply_progress(job, read_progress(job_path)):
+            logger.warning(f"No progress.json for {job.name}, so its final counts weren't recorded")
     except Exception as e:
         logger.warning(f"Could not read completion stats: {e}")
 

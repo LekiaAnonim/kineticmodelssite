@@ -66,6 +66,11 @@
     color: #92400e;
 }
 
+.status-awaiting_input {
+    background: #ede9fe;
+    color: #5b21b6;
+}
+
 .status-completed {
     background: #dbeafe;
     color: #1e40af;
@@ -604,7 +609,12 @@
             <a href="{% url 'importer_dashboard:job_error_log' job.id %}" class="btn btn-secondary btn-sm">
                 <i class="bi bi-exclamation-triangle"></i> Errors
             </a>
-            {% if job.status == 'running' or job.status == 'pending' %}
+            {% if job.port and job.status == 'running' or job.port and job.status == 'awaiting_input' %}
+            <a href="/importer/{{ job.port }}/" target="_blank" class="btn btn-primary btn-sm">
+                <i class="bi bi-box-arrow-up-right"></i> Open importer
+            </a>
+            {% endif %}
+            {% if job.status == 'running' or job.status == 'pending' or job.status == 'awaiting_input' %}
             <form method="post" action="{% url 'importer_dashboard:job_kill' job.id %}" style="display: inline;">
                 {% csrf_token %}
                 <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Kill this job?')">

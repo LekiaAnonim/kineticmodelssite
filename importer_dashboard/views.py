@@ -19,6 +19,10 @@ from django.conf import settings
 from .models import ClusterJob, ImportJobConfig, JobLog, ImportJobStatus, VotingReaction
 from .manager_factory import get_job_manager
 from .logger import dashboard_logger, setup_dashboard_logging
+from .importer_files import apply_progress
+
+# Jobs whose importer is up, so its page can be opened and its progress changes
+LIVE_STATUSES = [ImportJobStatus.RUNNING, ImportJobStatus.AWAITING_INPUT]
 
 # Set up dashboard logging - this forwards Python logging to dashboard_logger
 logger = setup_dashboard_logging('importer_dashboard', 'dashboard')
@@ -61,7 +65,7 @@ def dashboard_index(request):
     # Get all jobs ordered with running jobs first, then alphabetically by name
     jobs = ClusterJob.objects.annotate(
         status_priority=Case(
-            When(status='running', then=Value(0)),
+            When(status__in=LIVE_STATUSES, then=Value(0)),
             default=Value(1),
             output_field=IntegerField(),
         )
@@ -80,6 +84,7 @@ def dashboard_index(request):
     stats = {
         'total_jobs': ClusterJob.objects.count(),  # Total unfiltered count
         'running_jobs': ClusterJob.objects.filter(status='running').count(),
+        'awaiting_input_jobs': ClusterJob.objects.filter(status='awaiting_input').count(),
         'pending_jobs': ClusterJob.objects.filter(status='pending').count(),
         'idle_jobs': ClusterJob.objects.filter(status='idle').count(),
         'completed_jobs': ClusterJob.objects.filter(status='completed').count(),
@@ -87,7 +92,7 @@ def dashboard_index(request):
     }
 
     # Get list of running job IDs for AJAX updates
-    running_job_ids = json.dumps(list(jobs.filter(status='running').values_list('id', flat=True)))
+    running_job_ids = json.dumps(list(jobs.filter(status__in=LIVE_STATUSES).values_list('id', flat=True)))
 
     context = {
         'jobs': jobs,
@@ -188,7 +193,7 @@ def job_detail(request, job_id):
             )
     
     # Now try to fetch live progress if we have a valid host
-    if job.status == 'running' and job.host and job.host != 'Pending...' and config:
+    if job.status in LIVE_STATUSES and job.host and job.host != 'Pending...' and config:
         try:
             manager = get_job_manager(config=config) if 'manager' not in locals() else manager
 
@@ -204,20 +209,7 @@ def job_detail(request, job_id):
             )
 
             progress = manager.get_progress_json(job)
-            if progress:
-                # Update job progress from live data - map ALL progress.json fields
-                job.total_species = progress.get('total', 0)
-                job.processed_species = progress.get('processed', 0)
-                job.unprocessed_species = progress.get('unprocessed', 0)
-                job.confirmed_species = progress.get('confirmed', 0)
-                job.tentative_species = progress.get('tentative', 0)
-                job.unidentified_species = progress.get('unidentified', 0)
-                job.identified_species = progress.get('confirmed', 0) + progress.get('tentative', 0)
-                job.total_reactions = progress.get('totalreactions', 0)
-                job.unmatched_reactions = progress.get('unmatchedreactions', 0)
-                job.matched_reactions = progress.get('totalreactions', 0) - progress.get('unmatchedreactions', 0)
-                job.thermo_matches_count = progress.get('thermomatches', 0)
-                job.save()
+            if apply_progress(job, progress):
                 dashboard_logger.success(
                     f"Updated progress: {job.total_species} species, {job.total_reactions} reactions", 
                     "dashboard",
@@ -263,15 +255,8 @@ def job_detail(request, job_id):
             )
             manager = get_job_manager(config=config) if 'manager' not in locals() else manager
             completion_stats = manager.get_completion_stats(job)
-            
-            if completion_stats:
-                job.total_species = completion_stats.get('total_species', 0)
-                job.identified_species = completion_stats.get('identified_species', 0)
-                job.processed_species = completion_stats.get('processed_species', 0)
-                job.confirmed_species = completion_stats.get('confirmed_species', 0)
-                job.total_reactions = completion_stats.get('total_reactions', 0)
-                job.save()
-                
+
+            if apply_progress(job, completion_stats):
                 dashboard_logger.success(
                     f"Retrieved completion stats: {job.total_species} species, {job.total_reactions} reactions",
                     "dashboard",
@@ -307,6 +292,12 @@ def job_detail(request, job_id):
                     f'If using Open OnDemand, progress is fetched from {job.ood_url or "the configured OOD URL"}.'
                 )
             }
+    elif job.status == 'awaiting_input':
+        progress_status = {
+            'type': 'info',
+            'message': ('Waiting for someone to confirm a match on the importer page. The importer keeps '
+                        'running and keeps its port, but its worker slot is free for other jobs.')
+        }
     elif job.status == 'completed':
         if job.total_species > 0:
             progress_status = {
@@ -366,6 +357,13 @@ def job_start(request, job_id):
     Start an import job on the cluster
     """
     job = get_object_or_404(ClusterJob, id=job_id)
+
+    # A second importer on the same model would share its files and vote database
+    if job.status in (ImportJobStatus.RUNNING, ImportJobStatus.PENDING, ImportJobStatus.AWAITING_INPUT):
+        messages.warning(request, f"{job.name} is already {job.get_status_display().lower()}. "
+                                  f"Kill it first if you want to start it again.")
+        return redirect('importer_dashboard:index')
+
     dashboard_logger.info(
         f"Starting job: {job.name}", 
         "dashboard",
@@ -896,14 +894,17 @@ def refresh_jobs(request):
         
         # Get updated counts
         running_count = ClusterJob.objects.filter(status='running').count()
+        awaiting_count = ClusterJob.objects.filter(status='awaiting_input').count()
         pending_count = ClusterJob.objects.filter(status='pending').count()
         completed_count = ClusterJob.objects.filter(status='completed').count()
-        
+
         dashboard_logger.success(
-            f"Status updated: {running_count} running, {pending_count} pending, {completed_count} completed",
+            f"Status updated: {running_count} running, {awaiting_count} awaiting input, "
+            f"{pending_count} pending, {completed_count} completed",
             "dashboard",
             details={
                 'running': running_count,
+                'awaiting_input': awaiting_count,
                 'pending': pending_count,
                 'completed': completed_count,
                 'total_discovered': len(discovered_jobs)
@@ -975,7 +976,7 @@ def refresh_progress(request):
         manager.update_running_jobs_status()
         
         # Get running jobs with hosts
-        running_jobs = ClusterJob.objects.filter(status='running').exclude(host=None)
+        running_jobs = ClusterJob.objects.filter(status__in=LIVE_STATUSES).exclude(host=None)
         dashboard_logger.info(
             f"Found {running_jobs.count()} jobs with active hosts", 
             "dashboard",
@@ -1231,40 +1232,16 @@ def job_pause(request, job_id):
 @login_required
 def stream_logs(request):
     """
-    Server-Sent Events endpoint for streaming dashboard logs in real-time
+    Kept for dashboard pages opened before the log panel switched to polling get_logs.
+    It used to stream forever, which held one of gunicorn's few workers per open tab.
+    Now it sends the recent messages and ends; the long `retry` makes an old page's
+    EventSource reconnect only every 30 seconds.
     """
-    def event_stream():
-        """Generator function for SSE"""
-        # Send initial connection message
-        yield f"data: {json.dumps({'type': 'connected', 'message': 'Log stream connected'})}\n\n"
-        
-        # Send recent messages (last 20)
-        recent_messages = dashboard_logger.get_recent_messages(count=20)
-        for msg in recent_messages:
-            yield f"data: {json.dumps(msg)}\n\n"
-        
-        # Keep connection alive with periodic heartbeat
-        # In a production system, you'd use proper async/channels for this
-        # For now, this is a simple implementation
-        import time
-        last_count = len(dashboard_logger.messages)
-        
-        while True:
-            current_count = len(dashboard_logger.messages)
-            if current_count > last_count:
-                # New messages available
-                new_messages = dashboard_logger.get_recent_messages(count=current_count - last_count)
-                for msg in new_messages:
-                    yield f"data: {json.dumps(msg)}\n\n"
-                last_count = current_count
-            
-            # Heartbeat to keep connection alive
-            yield f": heartbeat\n\n"
-            time.sleep(2)  # Check every 2 seconds
-    
-    response = HttpResponse(event_stream(), content_type='text/event-stream')
+    events = ['retry: 30000\n\n']
+    for msg in dashboard_logger.get_recent_messages(count=20):
+        events.append(f"data: {json.dumps(msg)}\n\n")
+    response = HttpResponse(''.join(events), content_type='text/event-stream')
     response['Cache-Control'] = 'no-cache'
-    response['X-Accel-Buffering'] = 'no'  # Disable nginx buffering
     return response
 
 
@@ -1275,8 +1252,13 @@ def get_logs(request):
     """
     count = int(request.GET.get('count', 20))
     category = request.GET.get('category', None)
-    
+    # Only messages newer than this ISO timestamp, so a polling page doesn't repeat any.
+    # (Each gunicorn worker keeps its own messages, so ids would differ between polls.)
+    after = request.GET.get('after')
+
     messages = dashboard_logger.get_recent_messages(count=count, category=category)
+    if after:
+        messages = [m for m in messages if m['timestamp'] > after]
     
     return JsonResponse({
         'messages': messages,
@@ -1311,8 +1293,8 @@ def jobs_stats_api(request):
     
     Returns JSON with stats for all running jobs.
     """
-    # Get running jobs
-    running_jobs = ClusterJob.objects.filter(status='running')
+    # Get running jobs, and jobs awaiting input (their progress still changes)
+    running_jobs = ClusterJob.objects.filter(status__in=LIVE_STATUSES)
     
     # Optionally filter by specific job IDs
     job_ids = request.GET.get('job_ids', '')

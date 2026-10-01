@@ -20,9 +20,13 @@ from django.conf import settings
 from django.utils import timezone
 from celery.result import AsyncResult
 
-from .models import ClusterJob, ImportJobConfig, ImportJobStatus
-from .tasks import run_import_job
+from .models import ClusterJob, ImportJobConfig, ImportJobStatus, JobLog
+from .tasks import run_import_job, _tail_file
+from .importer_files import apply_progress, is_process_alive, read_importer_state, read_progress
 from .port_allocator import release_port, release_stale_ports
+
+# Statuses whose importer may still be running, and so still holds its port
+ACTIVE_STATUSES = [ImportJobStatus.RUNNING, ImportJobStatus.PENDING, ImportJobStatus.AWAITING_INPUT]
 
 logger = logging.getLogger(__name__)
 
@@ -115,9 +119,10 @@ class LocalJobManager:
         Returns (task_id, host) to match the SLURM interface.
         """
         result = run_import_job.delay(job.id)
-        
+
         job.celery_task_id = result.id
         job.status = ImportJobStatus.PENDING
+        job.worker_pid = None  # the previous run's PID would make the job look alive
         job.save()
 
         logger.info(f"Submitted Celery task {result.id} for job {job.name}")
@@ -166,18 +171,8 @@ class LocalJobManager:
         return self._read_local_file(log_path)
 
     def get_completion_stats(self, job: ClusterJob):
-        """Read progress.json from local filesystem."""
-        progress_path = os.path.join(
-            self.root_path, job.name, 'RMG-Py-output', 'progress.json'
-        )
-        try:
-            with open(progress_path, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return None
-        except Exception as e:
-            logger.warning(f"Could not read progress for {job.name}: {e}")
-            return None
+        """The importer's progress counts (its progress.json), or None."""
+        return read_progress(os.path.join(self.root_path, job.name))
 
     def get_live_progress(self, job: ClusterJob):
         """
@@ -188,7 +183,9 @@ class LocalJobManager:
 
     def refresh_statuses(self):
         """
-        Update status of all jobs based on Celery task state.
+        Update the status of active jobs. Jobs that have a Celery task are checked
+        against Celery; jobs awaiting input, whose task has already freed its worker
+        slot, are checked against their importer process.
         Replaces update_running_jobs_status() which parsed squeue output.
         """
         active_jobs = ClusterJob.objects.filter(
@@ -198,29 +195,91 @@ class LocalJobManager:
 
         for job in active_jobs:
             result = AsyncResult(job.celery_task_id)
+            new_status, fields = job.status, {}
 
-            if result.state == 'PENDING':
-                job.status = ImportJobStatus.PENDING
-            elif result.state == 'STARTED' or result.state == 'RETRY':
+            if result.state in ('PENDING', 'RETRY'):
+                # Celery also answers PENDING for a task it has no record of, e.g. once
+                # the result has expired, so trust a live importer over it. RETRY means
+                # the task is waiting for a free port, before any importer starts.
+                if not (job.status == ImportJobStatus.RUNNING and self._is_pid_running(job.worker_pid)):
+                    new_status = ImportJobStatus.PENDING
+            elif result.state == 'STARTED':
                 if job.worker_pid and not self._is_pid_running(job.worker_pid):
-                    job.status = ImportJobStatus.FAILED
-                    job.completed_at = timezone.now()
+                    new_status = ImportJobStatus.FAILED
+                    fields['completed_at'] = timezone.now()
                     logger.warning(
                         f"Marking job {job.name} as failed: worker PID {job.worker_pid} is not running"
                     )
                 else:
-                    job.status = ImportJobStatus.RUNNING
+                    new_status = ImportJobStatus.RUNNING
             elif result.state == 'SUCCESS':
-                job.status = ImportJobStatus.COMPLETED
-                job.completed_at = timezone.now()
+                new_status = ImportJobStatus.COMPLETED
+                fields['completed_at'] = timezone.now()
             elif result.state in ('FAILURE', 'REVOKED'):
-                job.status = ImportJobStatus.FAILED
-                job.completed_at = timezone.now()
+                new_status = ImportJobStatus.FAILED
+                fields['completed_at'] = timezone.now()
 
-            job.save()
+            self._set_status(job, new_status, **fields)
+
+        for job in ClusterJob.objects.filter(status=ImportJobStatus.AWAITING_INPUT):
+            self._refresh_detached_job(job)
 
         # A worker killed mid-job never reaches its `finally`, so sweep up here
-        release_stale_ports([ImportJobStatus.RUNNING, ImportJobStatus.PENDING])
+        release_stale_ports(ACTIVE_STATUSES)
+
+    def _set_status(self, job, new_status, **fields):
+        """
+        Change a job's status, but only if it still has the status we read. The Celery
+        task and the Kill button also change statuses, and this must not overwrite them.
+        Returns True if the status was changed.
+        """
+        if new_status == job.status:
+            return False
+        changed = ClusterJob.objects.filter(pk=job.pk, status=job.status).update(status=new_status, **fields)
+        if changed:
+            job.status = new_status
+            for name, value in fields.items():
+                setattr(job, name, value)
+        return bool(changed)
+
+    def _refresh_detached_job(self, job):
+        """
+        Check on an importer left running, awaiting input, after its Celery task freed
+        its worker slot. Once it exits, record why, using the state it last reported.
+        """
+        job_path = os.path.join(self.root_path, job.name)
+        state = read_importer_state(job_path)
+        if self._importer_alive(job, state):
+            apply_progress(job, read_progress(job_path))
+            return
+
+        last_state = state.get('state')
+        if last_state == 'finished':
+            new_status, log_type, message = ImportJobStatus.COMPLETED, 'info', 'Import job completed successfully'
+        elif last_state == 'stopped':
+            new_status, log_type, message = (ImportJobStatus.CANCELLED, 'info',
+                                             'Stopped with the Kill job button on the importer page')
+        else:
+            if state.get('error'):
+                reason = f": {state['error']}"
+            elif last_state:
+                reason = f" (the last thing it reported was {last_state!r})"
+            else:
+                reason = ''
+            new_status, log_type = ImportJobStatus.FAILED, 'error'
+            message = (f'The importer stopped unexpectedly while awaiting input{reason}.\n'
+                       f'error.log:\n{_tail_file(os.path.join(job_path, "error.log"), 20)}\n\n'
+                       f'output.log:\n{_tail_file(os.path.join(job_path, "output.log"), 20)}')
+
+        if self._set_status(job, new_status, completed_at=timezone.now()):
+            apply_progress(job, read_progress(job_path))
+            JobLog.objects.create(job=job, log_type=log_type, message=message)
+            release_port(job)
+            logger.info(f"Job {job.name} ended while awaiting input: {new_status}")
+
+    def _importer_alive(self, job, state):
+        """Is this job's importer still running? Prefers the PID the importer reported itself."""
+        return self._is_pid_running(state.get('pid') or job.worker_pid)
 
     # ------------------------------------------------------------------
     # Aliases so views.py can call the same names as SSHJobManager
@@ -235,52 +294,22 @@ class LocalJobManager:
         Read progress.json for a job (running or completed).
         Matches SSHJobManager.get_progress_json() signature.
         """
-        progress_path = os.path.join(self.root_path, job.name, 'progress.json')
-        if not os.path.exists(progress_path):
-            # Also try the RMG-Py-output subdirectory
-            progress_path = os.path.join(
-                self.root_path, job.name, 'RMG-Py-output', 'progress.json'
-            )
-        try:
-            with open(progress_path, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return None
-        except Exception as e:
-            logger.warning(f"Could not read progress for {job.name}: {e}")
-            return None
+        return read_progress(os.path.join(self.root_path, job.name))
 
     def refresh_all_progress(self):
         """
-        Refresh progress for all running jobs from local progress.json files.
+        Refresh progress for all running jobs, and jobs awaiting input, from their
+        local progress.json files.
         Matches SSHJobManager.refresh_all_progress() return signature.
         Returns the count of jobs updated.
         """
         running_jobs = ClusterJob.objects.filter(
-            status=ImportJobStatus.RUNNING
+            status__in=[ImportJobStatus.RUNNING, ImportJobStatus.AWAITING_INPUT]
         ).exclude(host=None)
 
         updated = 0
         for job in running_jobs:
-            progress = self.get_progress_json(job)
-            if progress:
-                job.total_species = progress.get('total', 0)
-                job.processed_species = progress.get('processed', 0)
-                job.unprocessed_species = progress.get('unprocessed', 0)
-                job.confirmed_species = progress.get('confirmed', 0)
-                job.tentative_species = progress.get('tentative', 0)
-                job.unidentified_species = progress.get('unidentified', 0)
-                job.identified_species = (
-                    progress.get('confirmed', 0) + progress.get('tentative', 0)
-                )
-                job.total_reactions = progress.get('totalreactions', 0)
-                job.unmatched_reactions = progress.get('unmatchedreactions', 0)
-                job.matched_reactions = (
-                    progress.get('totalreactions', 0) -
-                    progress.get('unmatchedreactions', 0)
-                )
-                job.thermo_matches_count = progress.get('thermomatches', 0)
-                job.save()
+            if apply_progress(job, self.get_progress_json(job)):
                 updated += 1
         return updated
 
@@ -327,12 +356,8 @@ class LocalJobManager:
             return None
 
     def _is_pid_running(self, pid):
-        """Return True if a local PID currently exists."""
-        try:
-            os.kill(pid, 0)
-        except PermissionError:
-            # Process exists but belongs to another user
-            return True
-        except OSError:
-            return False
-        return True
+        """
+        Return True if `pid` is a running importer: not a zombie, and (on Linux) not
+        a reused PID belonging to some other program.
+        """
+        return is_process_alive(pid, expect_in_cmdline='importChemkin')

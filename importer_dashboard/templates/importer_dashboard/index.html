@@ -96,11 +96,14 @@
                     <a href="{% url 'importer_dashboard:job_detail' job.id %}" class="job-name">
                         {{ job.name }}
                     </a>
+                    {% if job.status == 'awaiting_input' %}
+                    <span class="status-badge status-awaiting_input" title="Waiting for someone to confirm a match on the importer page">Awaiting input</span>
+                    {% endif %}
                 </td>
                 <td>{{ job.port|default:"-" }}</td>
                 <td>{{ job.slurm_job_id|default:"-" }}</td>
                 <td>
-                    {% if job.slurm_job_id %}
+                    {% if job.slurm_job_id or job.status == 'running' or job.status == 'pending' or job.status == 'awaiting_input' %}
                         <form method="post" action="{% url 'importer_dashboard:job_kill' job.id %}" style="display: inline;">
                             {% csrf_token %}
                             <button type="submit" class="btn-link" onclick="return confirm('Are you sure you want to kill this job?');">kill</button>
@@ -114,7 +117,7 @@
                 </td>
                 <td>{{ job.host|default:"-" }}</td>
                 <td>
-                    {% if job.status == 'running' and job.port %}
+                    {% if job.port and job.status == 'running' or job.port and job.status == 'awaiting_input' %}
                         {% if job.host == 'Pending...' %}
                             <a href="{% url 'importer_dashboard:refresh_jobs' %}">refresh</a>
                         {% elif job.host == 'localhost' or job.host == '127.0.0.1' %}
@@ -281,11 +284,12 @@
     (function() {
         // Local state
         let logPaused = false;
-        let eventSource = null;
         let maxLogEntries = 100;
-        let pollBackupTimer = null;
-        let sseWorking = false;
-        const streamUrl = '{% url "importer_dashboard:stream_logs" %}';
+        // The panel polls get_logs for messages newer than the last one shown. It used to
+        // hold a Server-Sent Events connection open, which tied up a server worker per tab.
+        let pollTimer = null;
+        let lastTimestamp = null;
+        const logsUrl = '{% url "importer_dashboard:get_logs" %}';
     
         // Toggle pause function
         function toggleLogPause() {
@@ -408,91 +412,39 @@
             logMessages.scrollTop = logMessages.scrollHeight;
         }
         
-        function connectLogStream() {
-            if (eventSource) {
-                eventSource.close();
+        function pollLogs() {
+            let url = logsUrl + '?count=' + (lastTimestamp ? 100 : 20);
+            if (lastTimestamp) {
+                url += '&after=' + encodeURIComponent(lastTimestamp);
             }
-        
-            console.log('Connecting to log stream:', streamUrl);
-            updateStatusIndicator('connecting');
-            
-            eventSource = new EventSource(streamUrl);
-            
-            eventSource.onopen = function() {
-                console.log('Log stream connected successfully');
-                sseWorking = true;
-                updateStatusIndicator('connected');
-                
-                // Clear the initial "Connecting..." message
-                const logMessages = document.getElementById('logMessages');
-                if (logMessages) {
-                    logMessages.innerHTML = '';
-                }
-            };
-            
-            eventSource.onmessage = function(event) {
-                console.log('Received message:', event.data);
-                try {
-                    const data = JSON.parse(event.data);
-                    // Show connection message and all log messages (including recent history)
-                    if (data.type === 'connected') {
-                        addLogEntry({
-                            timestamp: new Date().toISOString(),
-                            level: 'SUCCESS',
-                            message: '✅ ' + data.message
-                        });
-                    } else {
-                        addLogEntry(data);
-                    }
-                } catch (e) {
-                    console.error('Error parsing log message:', e, event.data);
-                }
-            };
-            
-            eventSource.onerror = function(error) {
-                console.error('Log stream error:', error);
-                console.log('EventSource readyState:', eventSource.readyState);
-                updateStatusIndicator('disconnected');
-                
-                if (eventSource.readyState === EventSource.CLOSED) {
-                    console.log('Connection closed, attempting reconnect...');
-                }
-                
-                eventSource.close();
-                
-                // Show error message
-                if (!logPaused) {
-                    addLogEntry({
-                        timestamp: new Date().toISOString(),
-                        level: 'ERROR',
-                        message: '❌ Log stream disconnected. Reconnecting in 5s...'
+            fetch(url)
+                .then(response => response.json())
+                .then(data => {
+                    updateStatusIndicator('connected');
+                    (data.messages || []).forEach(msg => {
+                        addLogEntry(msg);
+                        if (!lastTimestamp || msg.timestamp > lastTimestamp) {
+                            lastTimestamp = msg.timestamp;
+                        }
                     });
-                }
-                
-                // Try to reconnect after 5 seconds
-                setTimeout(connectLogStream, 5000);
-            };
+                })
+                .catch(error => {
+                    console.error('Log poll error:', error);
+                    updateStatusIndicator('disconnected');
+                });
         }
-    
-        function startPollBackup() {
-            console.log('Starting poll backup...');
-            if (pollBackupTimer) clearInterval(pollBackupTimer);
-            
-            pollBackupTimer = setInterval(function() {
-                if (!sseWorking) {
-                    fetch('{% url "importer_dashboard:get_logs" %}?count=10')
-                        .then(response => response.json())
-                        .then(data => {
-                            if (data.messages && data.messages.length > 0) {
-                                console.log('Fetched logs via polling:', data.messages.length);
-                                data.messages.forEach(msg => addLogEntry(msg));
-                            }
-                        })
-                        .catch(error => console.error('Poll backup error:', error));
-                }
-            }, 3000);  // Poll every 3 seconds
+
+        function startLogPolling() {
+            if (pollTimer) clearInterval(pollTimer);
+            updateStatusIndicator('connecting');
+            const logMessages = document.getElementById('logMessages');
+            if (logMessages) {
+                logMessages.innerHTML = '';
+            }
+            pollLogs();
+            pollTimer = setInterval(pollLogs, 3000);  // every 3 seconds
         }
-        
+
         // Initialize on DOM ready
         function init() {
             console.log('Initializing log stream connection...');
@@ -506,16 +458,8 @@
                 console.warn('Pause button not found');
             }
             
-            // Connect to log stream
-            connectLogStream();
-            
-            // Start backup polling after 10 seconds if SSE hasn't connected
-            setTimeout(function() {
-                if (!sseWorking) {
-                    console.warn('SSE not working, using polling fallback');
-                    startPollBackup();
-                }
-            }, 10000);
+            // Start fetching log messages
+            startLogPolling();
         }
         
         // Minimize/Maximize log viewer
@@ -596,11 +540,8 @@
         
         // Cleanup on page unload
         window.addEventListener('beforeunload', function() {
-            if (eventSource) {
-                eventSource.close();
-            }
-            if (pollBackupTimer) {
-                clearInterval(pollBackupTimer);
+            if (pollTimer) {
+                clearInterval(pollTimer);
             }
         });
         
