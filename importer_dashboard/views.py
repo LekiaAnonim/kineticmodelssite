@@ -193,6 +193,7 @@ def job_detail(request, job_id):
             )
     
     # Now try to fetch live progress if we have a valid host
+    copied_proposals = None  # copied-chemistry proposals waiting on the importer's copied.html page
     if job.status in LIVE_STATUSES and job.host and job.host != 'Pending...' and config:
         try:
             manager = get_job_manager(config=config) if 'manager' not in locals() else manager
@@ -209,6 +210,7 @@ def job_detail(request, job_id):
             )
 
             progress = manager.get_progress_json(job)
+            copied_proposals = (progress or {}).get('copied')
             if apply_progress(job, progress):
                 dashboard_logger.success(
                     f"Updated progress: {job.total_species} species, {job.total_reactions} reactions", 
@@ -333,6 +335,7 @@ def job_detail(request, job_id):
         'identified_species_list': identified_species_list,
         'blocked_matches': blocked_matches,
         'stats': stats,
+        'copied_proposals': copied_proposals,
     }
     
     return render(request, 'importer_dashboard/job_detail.html', context)

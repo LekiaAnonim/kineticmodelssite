@@ -613,6 +613,12 @@
             <a href="/importer/{{ job.port }}/" target="_blank" class="btn btn-primary btn-sm">
                 <i class="bi bi-box-arrow-up-right"></i> Open importer
             </a>
+            {% if copied_proposals %}
+            <a href="/importer/{{ job.port }}/copied.html" target="_blank" class="btn btn-success btn-sm"
+               title="Species whose chemistry this mechanism copied from earlier imports or RMG libraries, to confirm a source at a time">
+                <i class="bi bi-check2-all"></i> Confirm copied chemistry ({{ copied_proposals }})
+            </a>
+            {% endif %}
             {% endif %}
             {% if job.status == 'running' or job.status == 'pending' or job.status == 'awaiting_input' %}
             <form method="post" action="{% url 'importer_dashboard:job_kill' job.id %}" style="display: inline;">
