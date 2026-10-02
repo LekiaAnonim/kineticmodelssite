@@ -106,6 +106,11 @@ def run_import_job(self, job_id):
         'RMG': rmg_py_path,
         'PATH': f'{conda_bin}:{os.environ.get("PATH", "")}',
     }
+    evidence_index = getattr(settings, 'IMPORTER_EVIDENCE_INDEX', '')
+    if evidence_index:
+        # The RMG-database libraries and earlier imports vote too (the importer carries on
+        # without them if the index hasn't been built yet)
+        proc_env['RMG_EVIDENCE_INDEX'] = evidence_index
 
     poll_seconds = getattr(settings, 'IMPORTER_STATE_POLL_SECONDS', 10)
     process = None
@@ -233,6 +238,7 @@ def run_import_job(self, job_id):
     finally:
         if not detached:
             release_port(job)  # a detached importer still serves its page on this port
+            schedule_evidence_index_refresh()  # the import has rewritten its model's libraries
 
 
 def _build_command_from_import_sh(import_sh_path, rmg_py_path, conda_env, job_path):
@@ -359,6 +365,44 @@ def refresh_all_job_statuses():
     if config:
         manager = LocalJobManager(config=config)
         manager.refresh_statuses()
+
+
+def schedule_evidence_index_refresh():
+    """Queue refresh_evidence_index, if the evidence index is turned on."""
+    if getattr(settings, 'IMPORTER_EVIDENCE_INDEX', ''):
+        refresh_evidence_index.delay()
+
+
+@shared_task(name='importer_dashboard.refresh_evidence_index')
+def refresh_evidence_index():
+    """
+    Bring the evidence index up to date: re-read the RMG-database and RMG-models libraries whose
+    files changed since the last build. The first run builds the whole index (about a minute);
+    after that a refresh takes seconds, so it runs after every import, which rewrites that
+    model's libraries, and once a night for RMG-database updates. It runs evidence_index.py in
+    the importers' conda environment, because reading the libraries needs RMG.
+    """
+    index = getattr(settings, 'IMPORTER_EVIDENCE_INDEX', '')
+    if not index:
+        return {'status': 'disabled'}
+    rmg_py_path = getattr(settings, 'RMG_PY_PATH', '/path/to/RMG-Py')
+    python = os.path.join(getattr(settings, 'CONDA_BASE_PATH', '/home/prometheus/miniconda3'), 'envs',
+                          getattr(settings, 'CONDA_ENV_NAME', 'rmg_env'), 'bin', 'python')
+    command = [python, os.path.join(rmg_py_path, 'evidence_index.py'), 'refresh', '--index', index,
+               '--database', os.path.join(getattr(settings, 'RMG_DATABASE_PATH', ''), 'input'),
+               '--models', getattr(settings, 'RMG_MODELS_PATH', '')]
+    try:
+        result = subprocess.run(command, cwd=rmg_py_path, capture_output=True, text=True, timeout=3600,
+                                env={**os.environ, 'PYTHONPATH': rmg_py_path})
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.error(f"Could not refresh the evidence index: {e}")
+        return {'status': 'failed', 'error': str(e)}
+    summary = (result.stderr.strip().splitlines() or [''])[-1]
+    if result.returncode != 0:
+        logger.error(f"Refreshing the evidence index failed:\n{result.stderr[-2000:]}")
+        return {'status': 'failed', 'error': result.stderr[-2000:]}
+    logger.info(summary)
+    return {'status': 'ok', 'summary': summary}
 
 
 @shared_task(name='importer_dashboard.ping')

@@ -21,7 +21,7 @@ from django.utils import timezone
 from celery.result import AsyncResult
 
 from .models import ClusterJob, ImportJobConfig, ImportJobStatus, JobLog
-from .tasks import run_import_job, _tail_file
+from .tasks import run_import_job, schedule_evidence_index_refresh, _tail_file
 from .importer_files import apply_progress, is_process_alive, read_importer_state, read_progress
 from .port_allocator import release_port, release_stale_ports
 
@@ -275,6 +275,7 @@ class LocalJobManager:
             apply_progress(job, read_progress(job_path))
             JobLog.objects.create(job=job, log_type=log_type, message=message)
             release_port(job)
+            schedule_evidence_index_refresh()  # the import has rewritten its model's libraries
             logger.info(f"Job {job.name} ended while awaiting input: {new_status}")
 
     def _importer_alive(self, job, state):

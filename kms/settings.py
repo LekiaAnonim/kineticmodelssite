@@ -323,6 +323,12 @@ CONDA_BASE_PATH = os.getenv('CONDA_BASE_PATH', '/home/prometheus/miniconda3')
 # Ports handed out to running importers' web UIs; must match the nginx /importer/ rule
 IMPORTER_PORT_RANGE = (8100, 8999)
 
+# Evidence index (RMG-Py's evidence_index.py): the RMG-database libraries and every earlier import,
+# which importers use as a second source of votes. It sits next to RMG-models, outside that git
+# repository, and is refreshed after each import. Set it to an empty string to turn this off.
+IMPORTER_EVIDENCE_INDEX = os.getenv('IMPORTER_EVIDENCE_INDEX',
+                                    os.path.join(os.path.dirname(RMG_MODELS_PATH), 'evidence_index.sqlite'))
+
 # 'local' = Celery on office server, 'cluster' = SSH/SLURM on Explorer
 IMPORTER_MODE = 'local'
 
@@ -333,6 +339,11 @@ CELERY_BEAT_SCHEDULE = {
     'refresh-job-statuses': {
         'task': 'importer_dashboard.refresh_all_job_statuses',
         'schedule': 30.0,  # Every 30 seconds
+    },
+    # Imports refresh the evidence index themselves; this picks up RMG-database updates
+    'refresh-evidence-index': {
+        'task': 'importer_dashboard.refresh_evidence_index',
+        'schedule': crontab(hour=3, minute=30),
     },
 }
 
