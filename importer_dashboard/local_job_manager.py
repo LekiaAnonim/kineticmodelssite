@@ -58,6 +58,10 @@ class LocalJobManager:
         """
         Discover import jobs from local filesystem.
         Replaces SSHJobManager.discover_jobs() which used SSH ls commands.
+
+        A model is a folder with an import.sh, either directly under the root
+        (e.g. ANL-Brown, named the way SSHJobManager names it) or one level down
+        (e.g. CombFlame2013/1315-Chang).
         """
         root = Path(self.root_path)
         discovered = []
@@ -66,32 +70,37 @@ class LocalJobManager:
             logger.error(f"Root path does not exist: {self.root_path}")
             return discovered
 
+        model_dirs = []
         for journal_dir in sorted(root.iterdir()):
             if not journal_dir.is_dir() or journal_dir.name.startswith('.'):
                 continue
+            if (journal_dir / 'import.sh').exists():
+                model_dirs.append((journal_dir.name, journal_dir))
             for model_dir in sorted(journal_dir.iterdir()):
-                if not model_dir.is_dir():
-                    continue
-                import_sh = model_dir / 'import.sh'
-                if import_sh.exists():
-                    job_name = f"{journal_dir.name}/{model_dir.name}"
-                    discovered.append(job_name)
+                if model_dir.is_dir() and (model_dir / 'import.sh').exists():
+                    model_dirs.append((f"{journal_dir.name}/{model_dir.name}", model_dir))
 
-                    # Create ClusterJob if it doesn't exist
-                    job, created = ClusterJob.objects.get_or_create(
-                        name=job_name,
-                        defaults={
-                            'status': ImportJobStatus.IDLE,
-                            'config': self.config,
-                        }
-                    )
-                    if created:
-                        # Parse port from import.sh
-                        port = self._parse_port(import_sh)
-                        if port:
-                            job.port = port
-                            job.save()
-                        logger.info(f"Discovered new job: {job_name}")
+        for job_name, model_dir in model_dirs:
+            discovered.append(job_name)
+
+            # Create ClusterJob if it doesn't exist
+            job, created = ClusterJob.objects.get_or_create(
+                name=job_name,
+                defaults={
+                    'status': ImportJobStatus.IDLE,
+                    'config': self.config,
+                }
+            )
+            if created:
+                # Parse port from import.sh. It is only a hint now (the port
+                # allocator reserves one at start), so skip a port another job in
+                # this config already holds rather than violate the unique constraint.
+                port = self._parse_port(model_dir / 'import.sh')
+                if port and not ClusterJob.objects.filter(
+                        config=job.config, port=port).exclude(pk=job.pk).exists():
+                    job.port = port
+                    job.save()
+                logger.info(f"Discovered new job: {job_name}")
 
         return discovered
 
