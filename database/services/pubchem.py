@@ -16,6 +16,7 @@ class PubChemError(Exception):
 
 class PubChemClient:
     base_url = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+    retryable_statuses = {429, 500, 502, 503, 504}
 
     def __init__(self):
         self.session = requests.Session()
@@ -33,15 +34,31 @@ class PubChemClient:
                 )
                 if response.status_code == 404:
                     return None
-                if response.status_code in (429, 500, 502, 503, 504) and attempt < 2:
-                    time.sleep(2 ** attempt)
+                if response.status_code in self.retryable_statuses and attempt < 2:
+                    time.sleep(2 ** (attempt + 1))
                     continue
+                if response.status_code >= 400:
+                    detail = ""
+                    try:
+                        payload = response.json()
+                        fault = payload.get("Fault", {}) if isinstance(payload, dict) else {}
+                        if isinstance(fault, dict):
+                            detail = " ".join(str(fault.get("Message", "")).split())[:240]
+                    except ValueError:
+                        pass
+                    raise PubChemError(
+                        f"PubChem HTTP {response.status_code} on {path}"
+                        f" after {attempt + 1} attempt(s)" + (f": {detail}" if detail else ".")
+                    )
                 response.raise_for_status()
                 return response.json()
             except (requests.RequestException, ValueError) as exc:
                 if attempt == 2:
-                    raise PubChemError("PubChem lookup failed; retry the command later.") from exc
-                time.sleep(2 ** attempt)
+                    reason = type(exc).__name__
+                    raise PubChemError(
+                        f"PubChem {reason} on {path} after {attempt + 1} attempts."
+                    ) from exc
+                time.sleep(2 ** (attempt + 1))
 
     def resolve(self, smiles):
         identity = canonical_smiles(smiles)
@@ -64,8 +81,12 @@ class PubChemClient:
                 return None
             match = matches[0]
             cid = int(match["CID"])
-            iupac_name = match["IUPACName"]
-            if not isinstance(iupac_name, str) or not iupac_name.strip() or cid <= 0:
+            # Some valid compounds (e.g. CID 22750579) have structure data but
+            # no computed IUPAC name. This is missing coverage, not an API failure.
+            iupac_name = match.get("IUPACName")
+            if iupac_name is None:
+                iupac_name = ""
+            if not isinstance(iupac_name, str) or cid <= 0:
                 raise ValueError("Missing compound identity")
             synonyms = self._get(f"compound/cid/{cid}/synonyms/JSON")
             names = []
@@ -75,6 +96,8 @@ class PubChemClient:
                         names.extend(item.get("Synonym", []))
             names = sorted({name.strip() for name in names
                             if isinstance(name, str) and 0 < len(name.strip()) <= 500})
+            if not iupac_name.strip() and not names:
+                return None
             return {"cid": cid, "iupac_name": iupac_name.strip(), "synonyms": names}
         except (KeyError, TypeError, ValueError) as exc:
             raise PubChemError("PubChem returned an incomplete compound record.") from exc

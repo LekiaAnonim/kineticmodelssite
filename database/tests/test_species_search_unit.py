@@ -183,7 +183,7 @@ class PubChemTests(SimpleTestCase):
     @patch("database.services.pubchem.time.sleep")
     def test_timeout_is_retried_and_reported(self, sleep):
         self.client.session.get.side_effect = requests.Timeout()
-        with self.assertRaises(PubChemError):
+        with self.assertRaisesRegex(PubChemError, "Timeout.*after 3 attempts"):
             self.client.resolve("C")
         self.assertEqual(self.client.session.get.call_count, 3)
 
@@ -199,6 +199,51 @@ class PubChemTests(SimpleTestCase):
         with self.assertRaises(PubChemError):
             self.client.resolve("C")
 
+    @patch("database.services.pubchem.time.sleep")
+    def test_compound_without_names_is_not_a_failed_lookup(self, sleep):
+        # Actual response for local structure 26991: valid CID/SMILES, no IUPACName.
+        self.client.session.get.side_effect = [
+            self.response({"PropertyTable": {"Properties": [
+                {"CID": 22750579, "SMILES": "CC(CC=C=O)O"}]}}),
+            self.response({}, status=404),
+        ]
+        self.assertIsNone(self.client.resolve("CC(O)CC=C=O"))
+
+    @patch("database.services.pubchem.time.sleep")
+    def test_synonyms_remain_searchable_when_iupac_name_is_missing(self, sleep):
+        self.client.session.get.side_effect = [
+            self.response({"PropertyTable": {"Properties": [{"CID": 297, "SMILES": "C"}]}}),
+            self.response({"InformationList": {"Information": [
+                {"CID": 297, "Synonym": ["marsh gas"]}]}}),
+        ]
+        result = self.client.resolve("C")
+        self.assertEqual(result, {"cid": 297, "iupac_name": "", "synonyms": ["marsh gas"]})
+
+    @patch("database.services.pubchem.time.sleep")
+    def test_missing_cid_still_counts_as_malformed(self, sleep):
+        self.client.session.get.return_value = self.response({"PropertyTable": {"Properties": [
+            {"SMILES": "C", "IUPACName": "methane"}]}})
+        with self.assertRaises(PubChemError):
+            self.client.resolve("C")
+
+    @patch("database.services.pubchem.time.sleep")
+    def test_permanent_http_error_includes_reason_without_retrying(self, sleep):
+        self.client.session.get.return_value = self.response({
+            "Fault": {"Message": "Unable to standardize the given structure"},
+        }, status=400)
+        with self.assertRaisesRegex(PubChemError, "HTTP 400.*Unable to standardize"):
+            self.client.resolve("C")
+        self.assertEqual(self.client.session.get.call_count, 1)
+
+    @patch("database.services.pubchem.time.sleep")
+    def test_exhausted_service_error_reports_http_status(self, sleep):
+        response = self.response({}, status=503)
+        response.json.side_effect = ValueError("HTML error page")
+        self.client.session.get.return_value = response
+        with self.assertRaisesRegex(PubChemError, "HTTP 503.*after 3 attempt"):
+            self.client.resolve("C")
+        self.assertEqual(self.client.session.get.call_count, 3)
+
 
 class EnrichSpeciesNamesTests(TestCase):
     def setUp(self):
@@ -210,7 +255,15 @@ class EnrichSpeciesNamesTests(TestCase):
         self.result = {"cid": 297, "iupac_name": "methane", "synonyms": ["methane", "marsh gas"]}
 
     def run_command(self, **options):
-        call_command("enrich_species_names", stdout=io.StringIO(), **options)
+        self.output = io.StringIO()
+        self.errors = io.StringIO()
+        call_command("enrich_species_names", stdout=self.output, stderr=self.errors, **options)
+
+    def another_structure(self, smiles):
+        return Structure.objects.create(
+            isomer=self.structure.isomer, smiles=smiles,
+            adjacency_list=f"fixture {smiles}", multiplicity=1,
+        )
 
     @patch("database.management.commands.enrich_species_names.PubChemClient.resolve")
     def test_saves_names_and_skips_completed_structures(self, resolve):
@@ -243,12 +296,79 @@ class EnrichSpeciesNamesTests(TestCase):
         resolve.assert_not_called()
 
     @patch("database.management.commands.enrich_species_names.PubChemClient.resolve")
+    def test_no_name_available_is_marked_checked_and_not_retried_by_default(self, resolve):
+        resolve.return_value = None
+        self.run_command()
+        self.structure.refresh_from_db()
+        self.assertIsNotNone(self.structure.names_checked_at)
+        self.assertEqual(self.structure.iupac_name, "")
+        self.assertFalse(self.structure.names.exists())
+        self.assertIn("failed 0", self.output.getvalue())
+        self.run_command()
+        resolve.assert_called_once()
+
+    @patch("database.management.commands.enrich_species_names.PubChemClient.resolve")
     def test_api_failure_leaves_record_retryable(self, resolve):
         resolve.side_effect = PubChemError("temporary failure")
         with self.assertRaises(CommandError):
             self.run_command()
         self.structure.refresh_from_db()
         self.assertIsNone(self.structure.names_checked_at)
+
+    @patch("database.management.commands.enrich_species_names.PubChemClient.resolve")
+    def test_continues_after_isolated_failure_and_resume_only_retries_failed_row(self, resolve):
+        later = self.another_structure("CC")
+        resolve.side_effect = [PubChemError("HTTP 503"), self.result]
+        with self.assertRaisesRegex(CommandError, "Finished with 1 failed"):
+            self.run_command()
+        later.refresh_from_db()
+        self.structure.refresh_from_db()
+        self.assertIsNotNone(later.names_checked_at)
+        self.assertIsNone(self.structure.names_checked_at)
+        self.assertIn(f"Structure {self.structure.pk}: HTTP 503", self.errors.getvalue())
+        self.assertIn("failed 1", self.output.getvalue())
+        resolve.reset_mock(side_effect=True)
+        resolve.return_value = self.result
+        self.run_command()
+        resolve.assert_called_once_with("C")
+
+    @patch("database.management.commands.enrich_species_names.PubChemClient.resolve")
+    def test_stops_after_consecutive_failures_without_trying_remaining_rows(self, resolve):
+        self.another_structure("CC")
+        self.another_structure("CCC")
+        resolve.side_effect = PubChemError("HTTP 503")
+        with self.assertRaisesRegex(CommandError, "after 2 consecutive failures"):
+            self.run_command(max_consecutive_errors=2)
+        self.assertEqual(resolve.call_count, 2)
+        self.assertFalse(Structure.objects.filter(names_checked_at__isnull=False).exists())
+
+    @patch("database.management.commands.enrich_species_names.PubChemClient.resolve")
+    def test_success_resets_consecutive_failure_count(self, resolve):
+        self.another_structure("CC")
+        self.another_structure("CCC")
+        resolve.side_effect = [PubChemError("HTTP 503"), None, PubChemError("Timeout")]
+        with self.assertRaisesRegex(CommandError, "Finished with 2 failed"):
+            self.run_command(max_consecutive_errors=2)
+        self.assertEqual(resolve.call_count, 3)
+
+    @patch("database.management.commands.enrich_species_names.PubChemClient.resolve")
+    def test_failed_refresh_preserves_existing_names(self, resolve):
+        self.structure.iupac_name = "methane"
+        self.structure.names_checked_at = timezone.now()
+        self.structure.save(update_fields=["iupac_name", "names_checked_at"])
+        StructureName.objects.create(structure=self.structure, name="marsh gas")
+        resolve.side_effect = PubChemError("Timeout")
+        with self.assertRaises(CommandError):
+            self.run_command(refresh=True)
+        self.structure.refresh_from_db()
+        self.assertEqual(self.structure.iupac_name, "methane")
+        self.assertTrue(self.structure.names.filter(name="marsh gas").exists())
+
+    @patch("database.management.commands.enrich_species_names.PubChemClient.resolve")
+    def test_invalid_error_threshold_does_not_start_lookups(self, resolve):
+        with self.assertRaisesRegex(CommandError, "must be a positive integer"):
+            self.run_command(max_consecutive_errors=0)
+        resolve.assert_not_called()
 
     @patch("database.management.commands.enrich_species_names.PubChemClient.resolve")
     def test_refresh_replaces_stale_synonyms(self, resolve):

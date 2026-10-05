@@ -289,6 +289,16 @@ python manage.py loaddata fixtures/full_database.json
 
 ---
 
+## Temporary Public Access
+
+The site's web pages and tools, including importer job controls and data editing,
+currently work without signing in. Anonymous importer actions are logged as
+`anonymous`, and jobs started anonymously have no `started_by` user.
+
+Set `SITE_REQUIRE_LOGIN=True` in the deployment environment and restart the web
+service to restore the previous login requirements. Django admin and REST API
+write permissions remain separately enforced. POST actions still require CSRF tokens.
+
 ## Project Structure
 
 ```

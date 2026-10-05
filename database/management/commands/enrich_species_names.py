@@ -18,10 +18,16 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true", help="Resolve without saving changes")
         parser.add_argument("--refresh", action="store_true", help="Recheck resolved rows")
         parser.add_argument("--index-only", action="store_true", help="Index without API requests")
+        parser.add_argument(
+            "--max-consecutive-errors", type=int, default=5,
+            help="Stop after this many consecutive API failures (default: 5; use 1 to fail fast)",
+        )
 
     def handle(self, *args, **options):
         if options["limit"] is not None and options["limit"] < 1:
             raise CommandError("--limit must be a positive integer")
+        if options["max_consecutive_errors"] < 1:
+            raise CommandError("--max-consecutive-errors must be a positive integer")
         queryset = Structure.objects.filter(pk__gt=options["after_id"]).order_by("pk")
         if not options["refresh"]:
             if options["index_only"]:
@@ -33,7 +39,8 @@ class Command(BaseCommand):
 
         client = PubChemClient()
         resolve = lru_cache(maxsize=256)(client.resolve)
-        indexed = named = skipped = 0
+        indexed = named = skipped = failed = consecutive_errors = 0
+        stopped_at = None
         for structure in queryset.iterator(chunk_size=100):
             identity = canonical_smiles(structure.smiles)
             if not identity:
@@ -49,7 +56,16 @@ class Command(BaseCommand):
                 try:
                     result = resolve(identity)
                 except PubChemError as exc:
-                    raise CommandError(f"Stopped at structure {structure.pk}: {exc}") from exc
+                    failed += 1
+                    consecutive_errors += 1
+                    self.stderr.write(
+                        f"Structure {structure.pk}: {exc} Left unchanged for retry."
+                    )
+                    if consecutive_errors >= options["max_consecutive_errors"]:
+                        stopped_at = structure.pk
+                        break
+                    continue
+                consecutive_errors = 0
 
             if not options["dry_run"]:
                 with transaction.atomic():
@@ -77,6 +93,22 @@ class Command(BaseCommand):
             indexed += 1
             if result:
                 named += 1
-                self.stdout.write(f"Structure {structure.pk}: {result['iupac_name']}")
+                label = result["iupac_name"] or (
+                    f"{len(result['synonyms'])} synonyms (no IUPAC name)"
+                )
+                self.stdout.write(f"Structure {structure.pk}: {label}")
         mode = "Would index" if options["dry_run"] else "Indexed"
-        self.stdout.write(f"{mode} {indexed} structures; named {named}; skipped {skipped}.")
+        self.stdout.write(
+            f"{mode} {indexed} structures; named {named}; skipped {skipped}; failed {failed}."
+        )
+        if failed:
+            status = (
+                f"Stopped at structure {stopped_at} "
+                f"after {consecutive_errors} consecutive failures."
+                if stopped_at is not None else f"Finished with {failed} failed lookup(s)."
+            )
+            self.stderr.write("Previously saved progress has been preserved.")
+            raise CommandError(
+                f"{status} Rerun enrich_species_names to retry unresolved records"
+                " (include --refresh again if this was a refresh run)."
+            )

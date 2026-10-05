@@ -51,14 +51,24 @@ and model-specific names are preserved.
 Returned SMILES must match the local canonical identity before names are saved.
 Unmatched, standardized-to-a-different-structure, or absent PubChem compounds keep
 their existing identifiers and model names; no chemical names are invented.
+Some valid PubChem compounds have no IUPAC name. Their synonyms are retained if
+available; if neither is available, the lookup is marked checked without assigning
+a name. This is missing naming coverage, not a failed request. Use `--refresh`
+to check these records again later.
 PubChem does not cover every combustion radical or electronic state. SMILES
 alone does not encode spin multiplicity; use the stored augmented InChI or
 structure ID when that distinction matters.
 
 Requests have timeouts, retry transient failures, and are limited to four per
 second per command process. Run one enrichment worker at a time. Completed
-lookups are skipped on subsequent runs. API failures stop with the failing
-structure ID and leave that row eligible for retry. Use `--limit N` for batches,
+lookups are skipped on subsequent runs. Isolated API failures are logged with
+the structure ID and HTTP status or error type, and the command continues with
+the next structure. Failed rows are left unchanged and eligible for retry.
+After five consecutive API failures the command stops; use
+`--max-consecutive-errors N` to change that threshold (or `1` to fail fast).
+Any run with failed lookups exits with a nonzero status after printing a summary;
+previously saved progress is preserved. Rerun the command to retry unresolved
+records, keeping `--refresh` if retrying a refresh run. Use `--limit N` for batches,
 `--after-id N` to start after a particular structure, and `--refresh` to recheck
 completed lookups (including compounds previously not found). A refresh replaces
 the cached PubChem names; it does not alter imported model-specific names.
