@@ -7,6 +7,7 @@ Handles SSH connections to the cluster and job management via SLURM.
 import re
 import logging
 import json
+import shlex
 from typing import List, Dict, Optional, Tuple
 from django.utils import timezone
 
@@ -370,10 +371,11 @@ done
         
         logger.info(f"Killed job {job.name} (SLURM ID: {job.slurm_job_id})")
     
-    def get_log_tail(self, job: ClusterJob, lines: int = 50):
-        """Get the tail of the RMG log file"""
+    def get_log_tail(self, job: ClusterJob, lines: Optional[int] = 50):
+        """Get the RMG log tail, or the complete log when lines is None."""
         log_path = f'{self.config.root_path}/{job.name}/RMG-Py-output/RMG.log'
-        command = f'tail -n{lines} {log_path}'
+        quoted_path = shlex.quote(log_path)
+        command = f'cat -- {quoted_path}' if lines is None else f'tail -n{lines} -- {quoted_path}'
         
         stdout, stderr = self.exec_command(command)
         

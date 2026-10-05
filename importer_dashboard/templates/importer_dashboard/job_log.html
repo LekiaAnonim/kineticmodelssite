@@ -19,6 +19,6 @@
         </div>
     </div>
     
-    <div class="log-viewer">{{ log_content|default:"No log content available" }}</div>
+    <div class="log-viewer" tabindex="0" role="region" aria-label="Job log">{{ log_content|default:"No log content available" }}</div>
 </div>
 {% endblock %}

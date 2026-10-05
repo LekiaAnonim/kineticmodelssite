@@ -527,11 +527,11 @@ def job_kill(request, job_id):
 @login_required
 def job_log_view(request, job_id):
     """
-    View the RMG log tail for a job
+    View the complete RMG log for a job
     """
     job = get_object_or_404(ClusterJob, id=job_id)
     dashboard_logger.info(
-        "Fetching log tail", 
+        "Fetching RMG log",
         "dashboard",
         job_id=job.id,
         job_name=job.name,
@@ -552,7 +552,10 @@ def job_log_view(request, job_id):
         )
         manager = get_job_manager(config=config)
         
-        log_path = f"{config.root_path}/{job.name}/RMG.log" if config and job.name else "unknown"
+        log_path = (
+            f"{config.root_path}/{job.name}/RMG-Py-output/RMG.log"
+            if config and job.name else "unknown"
+        )
         dashboard_logger.info(
             f"Reading RMG.log from {job.host or 'server'}", 
             "dashboard",
@@ -563,7 +566,7 @@ def job_log_view(request, job_id):
                 'host': job.host or 'localhost'
             }
         )
-        log_content = manager.get_log_tail(job)
+        log_content = manager.get_log_tail(job, lines=None)
         
         line_count = len(log_content.split('\n')) if log_content else 0
         file_size = len(log_content) if log_content else 0

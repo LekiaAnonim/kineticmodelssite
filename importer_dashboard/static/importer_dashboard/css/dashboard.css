@@ -859,8 +859,9 @@ td a:focus-visible {
     overflow-x: auto;
     white-space: pre-wrap;
     word-wrap: break-word;
-    max-height: 500px;
+    max-height: 65vh;
     overflow-y: auto;
+    scrollbar-gutter: stable;
     margin-top: 15px;
 }
 
@@ -941,7 +942,6 @@ td a:focus-visible {
 .log-viewer {
     background: #1e1e1e;
     border-radius: 4px;
-    overflow: hidden;
     border: 1px solid #3a3a3a;
 }
 
