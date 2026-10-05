@@ -10,7 +10,7 @@ from django.conf import settings
 from typing import Optional
 
 from django.contrib import messages
-from django.contrib.auth.mixins import LoginRequiredMixin
+from kms.access import SiteLoginRequiredMixin
 from django.db.models import Count, Avg, Min, Max, Q, F
 from django.http import JsonResponse, HttpResponseRedirect, HttpResponse
 from django.utils import timezone
@@ -1799,7 +1799,7 @@ class FuelModelMappingPreviewView(View):
         })
 
 
-class RebuildFuelMapView(LoginRequiredMixin, View):
+class RebuildFuelMapView(SiteLoginRequiredMixin, View):
     """Trigger a fuel map rebuild via the UI."""
 
     def post(self, request):

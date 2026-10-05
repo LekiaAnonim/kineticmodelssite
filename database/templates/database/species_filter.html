@@ -1,48 +1,64 @@
 {% extends "base.html" %}
 
-{% load crispy_forms_tags %}
 {% load utils %}
 {% load renders %}
 
 {% block content %}
 <!-- Compact Page Header -->
 <div class="page-header-compact">
-    <div class="d-flex justify-content-between align-items-center">
+    <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center">
         <div>
             <h1 class="h4 mb-0">Species Search</h1>
         </div>
         <div class="d-flex align-items-center gap-2">
             <span class="text-muted small">{{ page_obj.paginator.count|default:0 }} results</span>
-            <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" 
-                    data-bs-target="#searchPanel" aria-expanded="false" aria-controls="searchPanel">
-                <i class="bi bi-funnel me-1"></i>Filters
-            </button>
         </div>
     </div>
 </div>
 
-<!-- Collapsible Search Panel -->
-<div class="collapse mb-3" id="searchPanel">
+<!-- One search field, always visible on desktop and mobile -->
+<div class="mb-3" id="searchPanel">
     <div class="search-panel">
-        <form method="get" id="species-search-form">
-            {{ filter.form.media }}
-            <div class="row g-2 align-items-end">
-                {{ filter.form|crispy }}
-                <div class="col-auto">
-                    <button type="submit" class="btn btn-primary btn-sm">
-                        <i class="bi bi-search"></i> Search
+        <form method="get" action="{% url 'species-search' %}" id="species-search-form" role="search">
+            <label for="{{ filter.form.q.id_for_label }}" class="form-label fw-semibold">Search species</label>
+            <div class="species-search-controls">
+                {{ filter.form.q }}
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-search" aria-hidden="true"></i> Search
                     </button>
-                    <a href="{% url 'species-search' %}" class="btn btn-outline-secondary btn-sm">
+                    <a href="{% url 'species-search' %}" class="btn btn-outline-secondary">
                         Clear
                     </a>
                 </div>
             </div>
+            {% for field in filter.form %}
+                {% for error in field.errors %}<p class="text-danger small mt-2" role="alert">{{ error }}</p>{% endfor %}
+            {% endfor %}
+            <p class="text-muted small mt-2 mb-1" id="species-search-help">
+                Search by name, formula, CAS number, PrIMe ID, database ID, SMILES, or InChI.
+                A formula finds all matching isomers; a name or structure narrows the results.
+            </p>
+            <div class="small d-flex flex-wrap gap-2 align-items-center">
+                <span class="text-muted">Try:</span>
+                <a href="?q=methane">methane</a>
+                <a href="?q=CH4">CH₄</a>
+                <a href="?q=C2H6O">C₂H₆O</a>
+                <a href="?q=smiles%3ACCO">smiles:CCO</a>
+            </div>
+            <p class="text-muted small mt-2 mb-0">
+                For ambiguous text, use <code>formula:CO</code> or <code>smiles:CO</code>.
+                Use <code>isomer:123</code> or <code>structure:123</code> to look up those IDs.
+            </p>
+            {% if legacy_filters %}
+            <p class="small mt-2 mb-0">Saved filters are active. Submit a new search or select Clear to replace them.</p>
+            {% endif %}
         </form>
     </div>
 </div>
 
 <!-- Results Table -->
-<div class="table-container">
+<div class="table-container" tabindex="0" role="region" aria-label="Species search results">
     <table class="table table-hover table-sm mb-0">
         <thead>
             <tr>
@@ -58,18 +74,18 @@
             <tr class="clickable-row" data-href="{% url 'species-detail' species.pk %}">
                 <td class="text-muted small">{{ species.pk }}</td>
                 <td>
-                    {% if species.structures %}
-                    {% with species.structures|to_list|first as structure %}
+                    {% if species.search_structure %}
+                    {% with species.search_structure as structure %}
                     <img src="{% url 'draw-structure' structure.pk %}" alt="" class="structure-thumb" loading="lazy">
                     {% endwith %}
                     {% else %}
                     <span class="text-muted">—</span>
                     {% endif %}
                 </td>
-                <td><strong class="formula">{{ species.formula }}</strong></td>
+                <td><a href="{% url 'species-detail' species.pk %}" class="formula fw-semibold">{{ species.search_formula|default:"View species" }}</a></td>
                 <td class="text-muted small">
-                    {% if species.names %}
-                    {% with species.names|to_list as names_list %}
+                    {% if species.search_names %}
+                    {% with species.search_names as names_list %}
                     {{ names_list.0 }}
                     {% if names_list|length > 1 %}
                     <span class="text-muted">(+{{ names_list|length|add:"-1" }})</span>
@@ -78,13 +94,13 @@
                     {% else %}—{% endif %}
                 </td>
                 <td class="text-end font-monospace small">
-                    {% if species.enthalpy_formation %}{{ species.enthalpy_formation }}{% else %}—{% endif %}
+                    {% if species.search_enthalpy %}{{ species.search_enthalpy }}{% else %}—{% endif %}
                 </td>
             </tr>
             {% empty %}
             <tr>
                 <td colspan="5" class="text-center text-muted py-4">
-                    <i class="bi bi-search me-1"></i>No species found. Try adjusting your filters.
+                    <i class="bi bi-search me-1" aria-hidden="true"></i>No species found. Try another name, formula, or structure.
                 </td>
             </tr>
             {% endfor %}
@@ -119,7 +135,7 @@
     background: var(--color-white);
     border: 1px solid var(--color-gray-200);
     border-radius: var(--radius-md);
-    overflow: hidden;
+    overflow-x: auto;
 }
 
 .table {
@@ -175,19 +191,20 @@
     background: var(--color-gray-50);
 }
 
-/* Compact crispy forms */
-.search-panel .form-group {
-    margin-bottom: 0;
+.species-search-controls {
+    display: flex;
+    gap: 0.5rem;
 }
 
-.search-panel label {
-    font-size: 0.75rem;
-    margin-bottom: 0.25rem;
+.species-search-controls .form-control {
+    flex: 1;
+    min-width: 0;
 }
 
-.search-panel .form-control {
-    font-size: 0.875rem;
-    padding: 0.375rem 0.5rem;
+@media (max-width: 575.98px) {
+    .species-search-controls { flex-direction: column; }
+    .species-search-controls .btn { flex: 1; }
+    .table { min-width: 540px; }
 }
 </style>
 {% endblock %}
@@ -196,14 +213,11 @@
 <script>
 // Make table rows clickable
 document.querySelectorAll('.clickable-row').forEach(row => {
-    row.addEventListener('click', function() {
+    row.addEventListener('click', function(event) {
+        if (event.target.closest('a') || window.getSelection().toString()) return;
         window.location.href = this.dataset.href;
     });
 });
 
-// Auto-expand search panel if filters are active
-{% if request.GET %}
-document.getElementById('searchPanel').classList.add('show');
-{% endif %}
 </script>
 {% endblock %}

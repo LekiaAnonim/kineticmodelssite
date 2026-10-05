@@ -5,10 +5,11 @@ from collections import defaultdict
 from dal import autocomplete
 from django.contrib import messages
 from django.contrib.auth import login
-from django.contrib.auth.mixins import LoginRequiredMixin
+from kms.access import SiteLoginRequiredMixin
 from django.http import HttpResponseRedirect
 from django.urls import reverse, reverse_lazy
 from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage
+from django.db.models import Prefetch
 from django.views import View
 from django.views.generic import TemplateView, DetailView, ListView
 from django.views.generic.edit import FormView, CreateView, UpdateView, DeleteView
@@ -134,7 +135,36 @@ class KineticModelFilterView(ListView):
 class SpeciesFilterView(FilterView):
     filterset_class = SpeciesFilter
     paginate_by = 25
-    queryset = Species.objects.order_by("id")
+    queryset = Species.objects.order_by("id").prefetch_related(
+        Prefetch("isomers", queryset=models.Isomer.objects.select_related("formula").prefetch_related(
+            Prefetch("structure_set", queryset=Structure.objects.order_by("pk"))
+        )),
+        "speciesname_set",
+        Prefetch("thermo_set", queryset=Thermo.objects.order_by("pk")),
+    )
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        # Build result summaries from page-sized prefetches, avoiding per-row queries.
+        for species in context["object_list"]:
+            isomers = list(species.isomers.all())
+            structures = [s for isomer in isomers for s in isomer.structure_set.all()]
+            species.search_formula = isomers[0].formula.formula if isomers else ""
+            species.search_structure = structures[0] if structures else None
+            iupac_names = sorted({s.iupac_name for s in structures if s.iupac_name})
+            model_names = sorted({n.name for n in species.speciesname_set.all() if n.name})
+            species.search_names = iupac_names + [n for n in model_names if n not in iupac_names]
+            thermo = next(iter(species.thermo_set.all()), None)
+            species.search_enthalpy = None
+            if thermo:
+                try:
+                    species.search_enthalpy = f"{thermo.enthalpy298:,.0f}"
+                except (ValueError, TypeError):
+                    pass
+        context["legacy_filters"] = any(self.request.GET.get(key) for key in (
+            "prime_id", "cas_number", "speciesname__name", "isomers", "isomers__structures"
+        ))
+        return context
 
 
 @SidebarLookup
@@ -355,7 +385,7 @@ class DrawStructure(View):
         return response
 
 
-class RegistrationView(LoginRequiredMixin, FormView):
+class RegistrationView(SiteLoginRequiredMixin, FormView):
     template_name = "database/register.html"
     form_class = RegistrationForm
     success_url = "/"
@@ -418,7 +448,7 @@ class StructureAutocompleteView(AutocompleteView):
 # Source CRUD Views
 # =============================================================================
 
-class SourceCreateView(LoginRequiredMixin, CreateView):
+class SourceCreateView(SiteLoginRequiredMixin, CreateView):
     """Create a new Source (publication)."""
     model = Source
     form_class = SourceForm
@@ -467,7 +497,7 @@ class SourceCreateView(LoginRequiredMixin, CreateView):
         return reverse('source-detail', kwargs={'pk': self.object.pk})
 
 
-class SourceUpdateView(LoginRequiredMixin, UpdateView):
+class SourceUpdateView(SiteLoginRequiredMixin, UpdateView):
     """Update an existing Source."""
     model = Source
     form_class = SourceForm
@@ -514,7 +544,7 @@ class SourceUpdateView(LoginRequiredMixin, UpdateView):
         return reverse('source-detail', kwargs={'pk': self.object.pk})
 
 
-class SourceDeleteView(LoginRequiredMixin, DeleteView):
+class SourceDeleteView(SiteLoginRequiredMixin, DeleteView):
     """Delete a Source."""
     model = Source
     template_name = 'database/confirm_delete.html'
@@ -538,7 +568,7 @@ class SourceDeleteView(LoginRequiredMixin, DeleteView):
 # KineticModel CRUD Views
 # =============================================================================
 
-class KineticModelCreateView(LoginRequiredMixin, CreateView):
+class KineticModelCreateView(SiteLoginRequiredMixin, CreateView):
     """Create a new KineticModel."""
     model = KineticModel
     form_class = KineticModelForm
@@ -559,7 +589,7 @@ class KineticModelCreateView(LoginRequiredMixin, CreateView):
         return reverse('kinetic-model-detail', kwargs={'pk': self.object.pk})
 
 
-class KineticModelUpdateView(LoginRequiredMixin, UpdateView):
+class KineticModelUpdateView(SiteLoginRequiredMixin, UpdateView):
     """Update an existing KineticModel."""
     model = KineticModel
     form_class = KineticModelForm
@@ -580,7 +610,7 @@ class KineticModelUpdateView(LoginRequiredMixin, UpdateView):
         return reverse('kinetic-model-detail', kwargs={'pk': self.object.pk})
 
 
-class KineticModelDeleteView(LoginRequiredMixin, DeleteView):
+class KineticModelDeleteView(SiteLoginRequiredMixin, DeleteView):
     """Delete a KineticModel."""
     model = KineticModel
     template_name = 'database/confirm_delete.html'
@@ -638,7 +668,7 @@ class AuthorListView(ListView):
         return context
 
 
-class AuthorCreateView(LoginRequiredMixin, CreateView):
+class AuthorCreateView(SiteLoginRequiredMixin, CreateView):
     """Create a new Author."""
     model = Author
     form_class = AuthorForm
@@ -659,7 +689,7 @@ class AuthorCreateView(LoginRequiredMixin, CreateView):
         return reverse('author-list')
 
 
-class AuthorUpdateView(LoginRequiredMixin, UpdateView):
+class AuthorUpdateView(SiteLoginRequiredMixin, UpdateView):
     """Update an existing Author."""
     model = Author
     form_class = AuthorForm
@@ -680,7 +710,7 @@ class AuthorUpdateView(LoginRequiredMixin, UpdateView):
         return reverse('author-list')
 
 
-class AuthorDeleteView(LoginRequiredMixin, DeleteView):
+class AuthorDeleteView(SiteLoginRequiredMixin, DeleteView):
     """Delete an Author."""
     model = Author
     template_name = 'database/confirm_delete.html'

@@ -55,6 +55,7 @@ plugins:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
+  - Species search: species-search.md
   - Authentication: authentication.md
   - API guide:
       - Overview: api/overview.md

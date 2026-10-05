@@ -18,7 +18,7 @@
         <span class="badge bg-secondary">ID: {{ kinetic_model.pk }}</span>
         {% if thermo_transport.paginator.count %}<span class="badge bg-primary-subtle text-primary"><i class="bi bi-droplet me-1"></i>{{ thermo_transport.paginator.count }} species</span>{% endif %}
         {% if kinetics_data.paginator.count %}<span class="badge bg-success-subtle text-success"><i class="bi bi-arrow-left-right me-1"></i>{{ kinetics_data.paginator.count }} reactions</span>{% endif %}
-        {% if user.is_authenticated %}
+        {% if site_access_allowed %}
         <a href="{% url 'kinetic-model-update' kinetic_model.pk %}" class="btn btn-outline-primary btn-sm ms-auto" title="Edit">
             <i class="bi bi-pencil me-1"></i>Edit
         </a>

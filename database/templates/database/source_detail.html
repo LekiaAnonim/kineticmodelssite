@@ -22,7 +22,7 @@
             <span class="badge bg-primary-subtle text-primary small">Publication</span>
             <div class="d-flex align-items-center gap-2">
                 <span class="small text-muted">ID: {{ source.pk }}</span>
-                {% if user.is_authenticated %}
+                {% if site_access_allowed %}
                 <a href="{% url 'source-update' source.pk %}" class="btn btn-outline-primary btn-sm" title="Edit">
                     <i class="bi bi-pencil"></i>
                 </a>

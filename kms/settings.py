@@ -93,6 +93,7 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "kms.access.site_access",
             ],
         },
     },
@@ -288,6 +289,9 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 100 * 1024 * 1024  # 100 MB
 FILE_UPLOAD_MAX_MEMORY_SIZE = 100 * 1024 * 1024  # 100 MB
 
 # Authentication URLs
+# Public web access for now; set SITE_REQUIRE_LOGIN=True to restore login gates.
+# Django admin and API write permissions have their own authorization policies.
+SITE_REQUIRE_LOGIN = os.getenv('SITE_REQUIRE_LOGIN', 'False').lower() == 'true'
 LOGIN_URL = '/login/'
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/login/'

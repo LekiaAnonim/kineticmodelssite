@@ -5,7 +5,7 @@ Provides web interface for managing import jobs on the cluster.
 """
 
 from django.shortcuts import render, redirect, get_object_or_404
-from django.contrib.auth.decorators import login_required
+from kms.access import actor_name, site_login_required
 from django.contrib import messages
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.http import require_http_methods
@@ -33,7 +33,7 @@ logger = setup_dashboard_logging('importer_dashboard', 'dashboard')
 standard_logger = logging.getLogger(__name__)
 
 
-@login_required
+@site_login_required
 def dashboard_index(request):
     """
     Main dashboard view showing all import jobs
@@ -106,7 +106,7 @@ def dashboard_index(request):
     return render(request, 'importer_dashboard/index.html', context)
 
 
-@login_required
+@site_login_required
 def job_detail(request, job_id):
     """
     Detailed view of a specific import job
@@ -353,7 +353,7 @@ def job_detail(request, job_id):
 # dashboard and avoid maintaining unused code paths.
 
 
-@login_required
+@site_login_required
 @require_http_methods(["POST"])
 def job_start(request, job_id):
     """
@@ -372,7 +372,7 @@ def job_start(request, job_id):
         "dashboard",
         job_id=job.id,
         job_name=job.name,
-        details={'user': request.user.username, 'action': 'start'}
+        details={'user': actor_name(request), 'action': 'start'}
     )
     
     config = job.config or ImportJobConfig.objects.filter(is_default=True).first()
@@ -411,13 +411,13 @@ def job_start(request, job_id):
             job.celery_task_id = task_id
         else:
             job.slurm_job_id = task_id
-        job.started_by = request.user
+        job.started_by = request.user if request.user.is_authenticated else None
         job.mark_as_running(host=host)
         
         JobLog.objects.create(
             job=job,
             log_type='info',
-            message=f'Job started by {request.user.username} (ID: {task_id})'
+            message=f'Job started by {actor_name(request)} (ID: {task_id})'
         )
         
         dashboard_logger.success(
@@ -428,7 +428,7 @@ def job_start(request, job_id):
             details={
                 'task_id': task_id,
                 'host': host,
-                'user': request.user.username
+                'user': actor_name(request)
             }
         )
         messages.success(request, f'Job started successfully (ID: {task_id})')
@@ -448,7 +448,7 @@ def job_start(request, job_id):
     return redirect('importer_dashboard:index')
 
 
-@login_required
+@site_login_required
 @require_http_methods(["POST"])
 def job_kill(request, job_id):
     """
@@ -460,7 +460,7 @@ def job_kill(request, job_id):
         "dashboard",
         job_id=job.id,
         job_name=job.name,
-        details={'slurm_job_id': job.slurm_job_id, 'user': request.user.username}
+        details={'slurm_job_id': job.slurm_job_id, 'user': actor_name(request)}
     )
     
     config = job.config or ImportJobConfig.objects.filter(is_default=True).first()
@@ -503,7 +503,7 @@ def job_kill(request, job_id):
         JobLog.objects.create(
             job=job,
             log_type='info',
-            message=f'Job cancelled by {request.user.username}'
+            message=f'Job cancelled by {actor_name(request)}'
         )
         
         dashboard_logger.success(
@@ -511,7 +511,7 @@ def job_kill(request, job_id):
             "dashboard",
             job_id=job.id,
             job_name=job.name,
-            details={'user': request.user.username}
+            details={'user': actor_name(request)}
         )
         
         messages.success(request, 'Job cancelled successfully')
@@ -524,7 +524,7 @@ def job_kill(request, job_id):
     return redirect('importer_dashboard:index')
 
 
-@login_required
+@site_login_required
 def job_log_view(request, job_id):
     """
     View the complete RMG log for a job
@@ -536,7 +536,7 @@ def job_log_view(request, job_id):
         job_id=job.id,
         job_name=job.name,
         details={
-            'user': request.user.username,
+            'user': actor_name(request),
             'log_type': 'RMG.log'
         }
     )
@@ -610,7 +610,7 @@ def job_log_view(request, job_id):
     return render(request, 'importer_dashboard/job_log.html', context)
 
 
-@login_required
+@site_login_required
 def job_console_output_view(request, job_id):
     """
     View the console output (output.log) - shows complete job execution
@@ -622,7 +622,7 @@ def job_console_output_view(request, job_id):
         job_id=job.id,
         job_name=job.name,
         details={
-            'user': request.user.username,
+            'user': actor_name(request),
             'log_type': 'console_output'
         }
     )
@@ -691,7 +691,7 @@ def job_console_output_view(request, job_id):
     return render(request, 'importer_dashboard/job_log.html', context)
 
 
-@login_required
+@site_login_required
 def job_error_log_view(request, job_id):
     """
     View comprehensive error information for a job (live from cluster)
@@ -703,7 +703,7 @@ def job_error_log_view(request, job_id):
         job_id=job.id,
         job_name=job.name,
         details={
-            'user': request.user.username,
+            'user': actor_name(request),
             'log_type': 'error_log'
         }
     )
@@ -829,7 +829,7 @@ def job_error_log_view(request, job_id):
     return render(request, 'importer_dashboard/job_error_log.html', context)
 
 
-@login_required
+@site_login_required
 def refresh_jobs(request):
     """
     Refresh the list of jobs from the cluster
@@ -838,7 +838,7 @@ def refresh_jobs(request):
         "Starting job refresh", 
         "dashboard",
         details={
-            'user': request.user.username,
+            'user': actor_name(request),
             'action': 'refresh_jobs'
         }
     )
@@ -850,7 +850,7 @@ def refresh_jobs(request):
             "No default configuration found", 
             "dashboard",
             details={
-                'user': request.user.username,
+                'user': actor_name(request),
                 'error_type': 'ConfigurationError'
             }
         )
@@ -926,7 +926,7 @@ def refresh_jobs(request):
             details={
                 'error': str(e),
                 'error_type': type(e).__name__,
-                'user': request.user.username
+                'user': actor_name(request)
             }
         )
         logger.error(f"Failed to refresh jobs: {str(e)}")
@@ -935,7 +935,7 @@ def refresh_jobs(request):
     return redirect('importer_dashboard:index')
 
 
-@login_required
+@site_login_required
 def refresh_progress(request):
     """
     Refresh progress information for all running jobs
@@ -944,7 +944,7 @@ def refresh_progress(request):
         "Starting progress refresh", 
         "dashboard",
         details={
-            'user': request.user.username,
+            'user': actor_name(request),
             'action': 'refresh_progress'
         }
     )
@@ -956,7 +956,7 @@ def refresh_progress(request):
             "No default configuration found", 
             "dashboard",
             details={
-                'user': request.user.username,
+                'user': actor_name(request),
                 'error_type': 'ConfigurationError'
             }
         )
@@ -1109,7 +1109,7 @@ def refresh_progress(request):
             details={
                 'error': str(e),
                 'error_type': type(e).__name__,
-                'user': request.user.username
+                'user': actor_name(request)
             }
         )
         logger.error(f"Failed to refresh progress: {str(e)}")
@@ -1118,7 +1118,7 @@ def refresh_progress(request):
     return redirect('importer_dashboard:index')
 
 
-@login_required
+@site_login_required
 def settings_view(request):
     """
     View and edit dashboard settings
@@ -1154,7 +1154,7 @@ def settings_view(request):
     return render(request, 'importer_dashboard/settings.html', context)
 
 
-@login_required
+@site_login_required
 @require_http_methods(["POST"])
 def reconnect(request):
     """Reconnect / verify the job backend connection"""
@@ -1178,7 +1178,7 @@ def reconnect(request):
     return redirect('importer_dashboard:index')
 
 
-@login_required
+@site_login_required
 @require_http_methods(["POST"])
 def git_pull(request):
     """Pull updates from GitHub repository"""
@@ -1202,7 +1202,7 @@ def git_pull(request):
     return redirect('importer_dashboard:index')
 
 
-@login_required
+@site_login_required
 @require_http_methods(["POST"])
 def job_pause(request, job_id):
     """Pause a running job"""
@@ -1220,7 +1220,7 @@ def job_pause(request, job_id):
         JobLog.objects.create(
             job=job,
             level='info',
-            message=f"Job paused by {request.user.username}"
+            message=f"Job paused by {actor_name(request)}"
         )
         
         messages.success(request, f"Job {job.name} paused")
@@ -1235,7 +1235,7 @@ def job_pause(request, job_id):
 # Log Streaming Views
 # --------------------------------------------------------------------------------------
 
-@login_required
+@site_login_required
 def stream_logs(request):
     """
     Kept for dashboard pages opened before the log panel switched to polling get_logs.
@@ -1251,7 +1251,7 @@ def stream_logs(request):
     return response
 
 
-@login_required
+@site_login_required
 def get_logs(request):
     """
     Polling endpoint for getting recent log messages (fallback for SSE)
@@ -1272,7 +1272,7 @@ def get_logs(request):
     })
 
 
-@login_required
+@site_login_required
 @require_http_methods(["POST"])
 def clear_logs(request):
     """
@@ -1280,10 +1280,10 @@ def clear_logs(request):
     """
     dashboard_logger.clear()
     dashboard_logger.info(
-        f"Logs cleared by {request.user.username}", 
+        f"Logs cleared by {actor_name(request)}",
         "dashboard",
         details={
-            'user': request.user.username,
+            'user': actor_name(request),
             'action': 'clear_logs'
         }
     )
@@ -1291,7 +1291,7 @@ def clear_logs(request):
     return redirect('importer_dashboard:index')
 
 
-@login_required
+@site_login_required
 def jobs_stats_api(request):
     """
     API endpoint to get current stats for running jobs.

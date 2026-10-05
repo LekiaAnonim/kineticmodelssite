@@ -2,7 +2,7 @@ from functools import lru_cache
 import math
 
 import rmgpy
-from django.db import models
+from django.db import models, transaction
 from rmgpy.molecule import Molecule
 from . import KineticModel, Kinetics
 
@@ -34,6 +34,10 @@ class Structure(models.Model):
     smiles = models.CharField("SMILES", blank=True, max_length=500)
     multiplicity = models.IntegerField()
     isomer = models.ForeignKey(Isomer, on_delete=models.CASCADE)
+    canonical_smiles = models.CharField(max_length=500, blank=True, db_index=True)
+    iupac_name = models.TextField(blank=True)
+    pubchem_cid = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
+    names_checked_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.adjacency_list
@@ -52,6 +56,60 @@ class Structure(models.Model):
 
     def to_rmg(self):
         return Molecule().from_adjacency_list(self._clean_adjacency_list())
+
+    def save(self, *args, **kwargs):
+        # Keep local structure identity current without making network calls on save.
+        from database.services.chemical_identity import canonical_smiles
+
+        update_fields = kwargs.get("update_fields")
+        identity_fields = {"smiles", "adjacency_list", "multiplicity", "isomer", "isomer_id"}
+        reset_names = False
+        if update_fields is None or identity_fields & set(update_fields):
+            previous = None
+            if not self._state.adding:
+                previous = type(self).objects.filter(pk=self.pk).values(
+                    "smiles", "adjacency_list", "multiplicity", "isomer_id"
+                ).first()
+            if previous:
+                written_fields = set(previous) if update_fields is None else set(update_fields)
+                if "isomer" in written_fields:
+                    written_fields.add("isomer_id")
+                reset_names = any(previous[field] != getattr(self, field)
+                                  for field in set(previous) & written_fields)
+            self.canonical_smiles = canonical_smiles(self.smiles) or ""
+            if not self.canonical_smiles and self.adjacency_list:
+                try:
+                    self.canonical_smiles = canonical_smiles(self.to_rmg().to_smiles()) or ""
+                except Exception:
+                    # Existing imports may contain unsupported adjacency-list tokens.
+                    pass
+            if update_fields is not None:
+                kwargs["update_fields"] = set(update_fields) | {"canonical_smiles"}
+        if reset_names:
+            self.iupac_name = ""
+            self.pubchem_cid = None
+            self.names_checked_at = None
+            if update_fields is not None:
+                kwargs["update_fields"] |= {"iupac_name", "pubchem_cid", "names_checked_at"}
+        with transaction.atomic():
+            super().save(*args, **kwargs)
+            if reset_names:
+                self.names.all().delete()
+
+
+class StructureName(models.Model):
+    """A PubChem synonym tied to an exact structure, never to a whole formula."""
+
+    structure = models.ForeignKey(Structure, related_name="names", on_delete=models.CASCADE)
+    name = models.CharField(max_length=500, db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("structure", "name"), name="unique_structure_name")
+        ]
+
+    def __str__(self):
+        return self.name
 
 
 class Species(models.Model):

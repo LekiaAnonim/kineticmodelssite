@@ -137,7 +137,7 @@
                             <span class="visually-hidden">on GitHub (opens in a new tab)</span>
                         </a>
                     </li>
-                    {% if user.is_authenticated %}
+                    {% if site_access_allowed %}
                     <!-- Importer Dashboard -->
                     <li class="nav-item">
                         <a class="nav-link {% if 'importer' in request.resolver_match.namespace %}active{% endif %}" href="{% url 'importer_dashboard:index' %}">
@@ -166,6 +166,8 @@
                             <li><a class="dropdown-item" href="{% url 'author-list' %}"><i class="bi bi-people me-2"></i>Authors</a></li>
                         </ul>
                     </li>
+                    {% endif %}
+                    {% if user.is_authenticated %}
                     <!-- User Menu -->
                     <li class="nav-item dropdown">
                         <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" 

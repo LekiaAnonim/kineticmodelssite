@@ -39,6 +39,12 @@
                         </div>
                         <div class="flex-grow-1 p-2">
                             <table class="table table-sm table-borderless mb-0">
+                                {% if structure.iupac_name %}
+                                <tr><td class="text-muted small">IUPAC name</td><td class="small">{{ structure.iupac_name }}</td></tr>
+                                {% endif %}
+                                {% if structure.pubchem_cid %}
+                                <tr><td class="text-muted small">Names source</td><td class="small"><a href="https://pubchem.ncbi.nlm.nih.gov/compound/{{ structure.pubchem_cid }}" target="_blank" rel="noopener noreferrer">PubChem CID {{ structure.pubchem_cid }}<span class="visually-hidden"> (opens in a new tab)</span></a></td></tr>
+                                {% endif %}
                                 {% if structure.isomer.inchi %}
                                 <tr><td class="text-muted small" style="width:80px;">InChI</td><td><code class="small text-break">{{ structure.isomer.inchi }}</code>
                                     <button class="btn btn-sm btn-link p-0 ms-1 copy-btn" data-copy="{{ structure.isomer.inchi }}"><i class="bi bi-clipboard"></i></button>

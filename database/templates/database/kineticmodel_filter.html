@@ -13,7 +13,7 @@
         </div>
         <div class="d-flex align-items-center gap-2">
             <span class="text-muted small">{{ page_obj.paginator.count|default:0 }} models</span>
-            {% if user.is_authenticated %}
+            {% if site_access_allowed %}
             <a href="{% url 'kinetic-model-create' %}" class="btn btn-sm btn-success">
                 <i class="bi bi-plus-lg me-1"></i>Add Model
             </a>
