@@ -92,10 +92,14 @@ class Command(BaseCommand):
                             ])
             indexed += 1
             if result:
-                named += 1
-                label = result["iupac_name"] or (
-                    f"{len(result['synonyms'])} synonyms (no IUPAC name)"
-                )
+                if result["iupac_name"] or result["synonyms"]:
+                    named += 1
+                if result["iupac_name"]:
+                    label = result["iupac_name"]
+                elif result["synonyms"]:
+                    label = f"{len(result['synonyms'])} synonyms (no IUPAC name)"
+                else:
+                    label = f"PubChem CID {result['cid']} (no name available)"
                 self.stdout.write(f"Structure {structure.pk}: {label}")
         mode = "Would index" if options["dry_run"] else "Indexed"
         self.stdout.write(

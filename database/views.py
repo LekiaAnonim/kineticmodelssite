@@ -151,6 +151,7 @@ class SpeciesFilterView(FilterView):
             structures = [s for isomer in isomers for s in isomer.structure_set.all()]
             species.search_formula = isomers[0].formula.formula if isomers else ""
             species.search_structure = structures[0] if structures else None
+            species.search_pubchem_cids = sorted({s.pubchem_cid for s in structures if s.pubchem_cid})
             iupac_names = sorted({s.iupac_name for s in structures if s.iupac_name})
             model_names = sorted({n.name for n in species.speciesname_set.all() if n.name})
             species.search_names = iupac_names + [n for n in model_names if n not in iupac_names]

@@ -3,6 +3,10 @@
 The species page (`/species_search/`) has one search field. Searches use local
 records and do not wait for a chemical naming service.
 
+The **PubChem** column links each species to its verified compound IDs (CIDs).
+If its structures map to several records, each distinct CID is listed. “No linked
+record” means no association has been saved; it does not imply absence from PubChem.
+
 | Search | Result |
 | --- | --- |
 | `methane`, `CH4`, `74-82-8`, `smiles:C` | The same methane species, once names have been enriched |
@@ -52,8 +56,9 @@ Returned SMILES must match the local canonical identity before names are saved.
 Unmatched, standardized-to-a-different-structure, or absent PubChem compounds keep
 their existing identifiers and model names; no chemical names are invented.
 Some valid PubChem compounds have no IUPAC name. Their synonyms are retained if
-available; if neither is available, the lookup is marked checked without assigning
-a name. This is missing naming coverage, not a failed request. Use `--refresh`
+available; if neither is available, the lookup is marked checked and its verified
+CID is saved without assigning a name. This is missing naming coverage, not a failed request.
+Use `--refresh`
 to check these records again later.
 PubChem does not cover every combustion radical or electronic state. SMILES
 alone does not encode spin multiplicity; use the stored augmented InChI or

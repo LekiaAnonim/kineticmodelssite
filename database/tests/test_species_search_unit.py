@@ -137,6 +137,24 @@ class SpeciesSearchTests(TestCase):
         self.assertEqual(len(single), len(multiple))
         self.assertLessEqual(len(multiple), 10)
 
+    def test_pubchem_links_follow_species_structures_and_are_deduplicated(self):
+        Structure.objects.filter(pk=self.ethanol_structure.pk).update(pubchem_cid=702)
+        Structure.objects.filter(pk=self.ether_structure.pk).update(pubchem_cid=8254)
+        Structure.objects.create(
+            isomer=self.ethanol_structure.isomer, smiles="OCC", multiplicity=1,
+            adjacency_list="duplicate ethanol representation", pubchem_cid=702,
+        )
+        self.ethanol.isomers.add(self.ether_structure.isomer)
+        response = self.client.get(reverse("species-search"), {"q": "C2H6O"})
+        mappings = {s.pk: s.search_pubchem_cids for s in response.context["object_list"]}
+        self.assertEqual(mappings[self.ethanol.pk], [702, 8254])
+        self.assertEqual(mappings[self.ether.pk], [8254])
+        self.assertContains(response, 'href="https://pubchem.ncbi.nlm.nih.gov/compound/702"', count=1)
+        self.assertContains(response, 'href="https://pubchem.ncbi.nlm.nih.gov/compound/8254"', count=2)
+        unmatched = self.client.get(reverse("species-search"), {"q": "CH4"})
+        self.assertContains(unmatched, "No linked record")
+        self.assertNotContains(unmatched, "pubchem.ncbi.nlm.nih.gov/compound/")
+
     def test_pagination_preserves_query(self):
         with patch("database.views.SpeciesFilterView.cls.paginate_by", 1):
             response = self.client.get(reverse("species-search"), {"q": "C2H6O"})
@@ -207,7 +225,9 @@ class PubChemTests(SimpleTestCase):
                 {"CID": 22750579, "SMILES": "CC(CC=C=O)O"}]}}),
             self.response({}, status=404),
         ]
-        self.assertIsNone(self.client.resolve("CC(O)CC=C=O"))
+        self.assertEqual(self.client.resolve("CC(O)CC=C=O"), {
+            "cid": 22750579, "iupac_name": "", "synonyms": [],
+        })
 
     @patch("database.services.pubchem.time.sleep")
     def test_synonyms_remain_searchable_when_iupac_name_is_missing(self, sleep):
@@ -306,6 +326,17 @@ class EnrichSpeciesNamesTests(TestCase):
         self.assertIn("failed 0", self.output.getvalue())
         self.run_command()
         resolve.assert_called_once()
+
+    @patch("database.management.commands.enrich_species_names.PubChemClient.resolve")
+    def test_verified_cid_is_saved_even_without_names(self, resolve):
+        resolve.return_value = {"cid": 297, "iupac_name": "", "synonyms": []}
+        self.run_command()
+        self.structure.refresh_from_db()
+        self.assertEqual(self.structure.pubchem_cid, 297)
+        self.assertEqual(self.structure.iupac_name, "")
+        self.assertIsNotNone(self.structure.names_checked_at)
+        self.assertIn("named 0", self.output.getvalue())
+        self.assertIn("PubChem CID 297 (no name available)", self.output.getvalue())
 
     @patch("database.management.commands.enrich_species_names.PubChemClient.resolve")
     def test_api_failure_leaves_record_retryable(self, resolve):

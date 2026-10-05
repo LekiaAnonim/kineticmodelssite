@@ -96,8 +96,7 @@ class PubChemClient:
                         names.extend(item.get("Synonym", []))
             names = sorted({name.strip() for name in names
                             if isinstance(name, str) and 0 < len(name.strip()) <= 500})
-            if not iupac_name.strip() and not names:
-                return None
+            # Retain the verified compound link even when naming data is absent.
             return {"cid": cid, "iupac_name": iupac_name.strip(), "synonyms": names}
         except (KeyError, TypeError, ValueError) as exc:
             raise PubChemError("PubChem returned an incomplete compound record.") from exc
