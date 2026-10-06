@@ -102,6 +102,9 @@
         </script>
         {% endif %}
 
+        {% include 'database/model_counterparts.html' %}
+        {% include 'database/model_shared_chemistry.html' %}
+
         <!-- Species (Thermo & Transport) -->
         {% if thermo_transport %}
         <div class="data-section mb-3">
@@ -203,7 +206,6 @@
                                 <th>Reaction</th>
                                 <th>ID</th>
                                 <th>Type</th>
-                                <th>Source</th>
                                 <th>Notes</th>
                                 <th>Kinetics</th>
                             </tr>
@@ -220,13 +222,6 @@
                                 <td class="text-muted">
                                     {% if kinetics_comment.kinetics.data %}
                                         {{ kinetics_comment.kinetics.data.kinetics_type }}
-                                    {% else %}
-                                        —
-                                    {% endif %}
-                                </td>
-                                <td class="text-muted">
-                                    {% if kinetics_comment.kinetics.source %}
-                                        {{ kinetics_comment.kinetics.source.name|truncatewords:3 }}
                                     {% else %}
                                         —
                                     {% endif %}

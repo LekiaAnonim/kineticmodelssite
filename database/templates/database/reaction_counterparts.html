@@ -1,0 +1,55 @@
+<div class="data-section mb-3">
+    <div class="section-header">
+        <h6 class="mb-0"><i class="bi bi-diagram-3 me-2"></i>RMG-database counterparts and NIST</h6>
+    </div>
+    <div class="section-body">
+        {% if nist %}
+        <div class="small mb-3">
+            <span class="fw-semibold">Search NIST Chemical Kinetics:</span>
+            {% for link in nist.links %}<a href="{{ link.url }}" target="_blank" rel="noopener noreferrer">{{ link.label }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}
+            {% if nist.links %} · {% endif %}<a href="{{ nist.form }}" target="_blank" rel="noopener noreferrer">{% if nist.links %}Search form{% else %}Search form, by formula{% endif %}</a>
+            <i class="bi bi-box-arrow-up-right"></i>
+            {% if nist.missing %}
+            <div class="text-muted mt-1">NIST identifies species by CAS number, and none was found for
+                {% for s in nist.missing %}{{ s.formula }}{% if s.webbook %} (<a href="{{ s.webbook }}" target="_blank" rel="noopener noreferrer">look it up on the NIST WebBook</a>){% endif %}{% if not forloop.last %}, {% endif %}{% endfor %}.
+                {% if nist.links %}The searches above use the species that have one.{% endif %}</div>
+            {% endif %}
+            <details class="mt-1"><summary class="text-muted">CAS numbers used</summary>
+                <ul class="mb-0 ps-3">{% for s in nist.species %}<li>{{ s.formula }}: {% if s.cas %}{{ s.cas }} <span class="text-muted">({{ s.cas_source }})</span>{% else %}<span class="text-muted">none found</span>{% endif %}{% if s.webbook %} · <a href="{{ s.webbook }}" target="_blank" rel="noopener noreferrer">WebBook</a>{% endif %}</li>{% endfor %}</ul>
+                <span class="text-muted">Nothing is fetched from NIST. Cite NIST as it asks: <a href="{{ nist.citation }}" target="_blank" rel="noopener noreferrer">citation</a>.</span>
+            </details>
+        </div>
+        {% endif %}
+        {% if rmg_family == "-" %}
+        <p class="small mb-2">No <a href="{% url 'rmg-family-list' %}">RMG reaction family</a> generates this reaction.</p>
+        {% elif rmg_family == "?" %}
+        <p class="small mb-2">RMG's families could not be applied to these species.</p>
+        {% elif rmg_family %}
+        <p class="small mb-2">RMG family <a class="fw-semibold" href="{% url 'rmg-family-detail' rmg_family %}">{{ rmg_family }}</a>{% if reaction.rmg_template %}, template <span class="font-monospace">{{ reaction.rmg_template }}</span>{% endif %}.</p>
+        {% endif %}
+        {% if rmg_records %}
+        <div class="table-responsive">
+        <table class="table table-sm small mb-0">
+            <thead><tr><th>Source</th><th>Entry</th><th>Type</th><th>Direction</th><th>Same rate as</th></tr></thead>
+            <tbody>
+            {% for item in rmg_records %}
+            <tr>
+                <td>{{ item.record.get_provider_display }}:
+                    {% if item.record.provider == "rmg_library" %}<a href="{% url 'rmg-library-detail' 'kinetics' item.record.library %}">{{ item.record.library }}</a>
+                    {% elif item.record.provider == "rmg_family" %}<a href="{% url 'rmg-family-detail' item.record.library %}">{{ item.record.library }}</a>
+                    {% elif item.record.source_url %}<a href="{{ item.record.source_url }}" target="_blank" rel="noopener noreferrer">{{ item.record.library }}</a>
+                    {% else %}{{ item.record.library }}{% endif %}</td>
+                <td>{% if item.entry_url %}<a href="{{ item.entry_url }}" target="_blank" rel="noopener noreferrer">{{ item.record.label }} <i class="bi bi-box-arrow-up-right"></i></a>{% else %}{{ item.record.label }}{% endif %}</td>
+                <td>{{ item.record.type }}</td>
+                <td>{% if item.same_direction %}as written{% else %}reverse (not plotted){% endif %}</td>
+                <td>{% for m in item.identical_models %}<a href="{% url 'kinetic-model-detail' m.pk %}">{{ m.model_name }}</a>{% if not forloop.last %}, {% endif %}{% empty %}–{% endfor %}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        </div>
+        {% elif not rmg_family %}
+        <p class="small text-muted mb-0">No RMG-database library has this reaction{% if not reaction.canonical_key %} (this reaction is not indexed yet){% endif %}.</p>
+        {% endif %}
+    </div>
+</div>

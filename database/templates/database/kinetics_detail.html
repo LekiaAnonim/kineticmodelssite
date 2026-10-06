@@ -14,19 +14,18 @@
 <h2>PrIMe ID: {{ kinetics.prime_id }}</h2>
 <br>
 {% endif %}
-{% if kinetics.data.min_temp and kinetics.data.max_temp %}
-{% if kinetics.data.min_pressure or kinetics.data.max_pressure %}
+{% if kinetics.min_temp or kinetics.min_pressure %}
 <ul class="list-group">
-    {% if kinetics.data.min_temp and kinetics.data.max_temp %}
-    <li class="list-group-item"><strong>Temperature Range (K):</strong> {{ kinetics.data.min_temp }} - {{ kinetics.data.max_temp }}</li>
+    {% if kinetics.min_temp and kinetics.max_temp %}
+    <li class="list-group-item"><strong>Temperature Range (K):</strong> {{ kinetics.min_temp }} - {{ kinetics.max_temp }}</li>
     {% endif %}
-    {% if kinetics.data.min_pressure and kinetics.data.max_pressure %}
-    <li class="list-group-item"><strong>Pressure Range (Pa):</strong> {{ kinetics.data.min_pressure }} - {{ kinetics.data.max_pressure }}</li>
+    {% if kinetics.min_pressure and kinetics.max_pressure %}
+    <li class="list-group-item"><strong>Pressure Range (Pa):</strong> {{ kinetics.min_pressure }} - {{ kinetics.max_pressure }}</li>
     {% endif %}
 </ul>
 <br>
 {% endif %}
-{% endif %}
+{% include 'database/rate_plot.html' %}
 {% for header, heads, bodies in table_data %}
 {% if header %}<h2>{{ header }}</h2>{% endif %}
 <table class="table table-bordered">
@@ -84,4 +83,11 @@
     </a>
     {% endfor %}
 </div>
+{% endblock %}
+
+{% block extra_js %}
+{% if rate_plot.series %}
+{% include 'database/plot_scripts.html' %}
+<script>renderRatePlot("rate-plot", "rate-plot-data", "rate-plot-pressure", "rate-plot-table");</script>
+{% endif %}
 {% endblock %}

@@ -49,6 +49,9 @@
                                 <tr><td class="text-muted small" style="width:80px;">InChI</td><td><code class="small text-break">{{ structure.isomer.inchi }}</code>
                                     <button class="btn btn-sm btn-link p-0 ms-1 copy-btn" data-copy="{{ structure.isomer.inchi }}"><i class="bi bi-clipboard"></i></button>
                                 </td></tr>
+                                {% if structure.isomer.webbook_url %}
+                                <tr><td class="text-muted small">NIST</td><td class="small"><a href="{{ structure.isomer.webbook_url }}" target="_blank" rel="noopener noreferrer">NIST Chemistry WebBook<span class="visually-hidden"> (opens in a new tab)</span></a></td></tr>
+                                {% endif %}
                                 {% endif %}
                                 {% if structure.smiles %}
                                 <tr><td class="text-muted small">SMILES</td><td><code class="small">{{ structure.smiles }}</code></td></tr>
@@ -67,6 +70,13 @@
         {% endif %}
 
         <!-- Thermodynamic Data -->
+        <div class="data-section">
+            <div class="section-header"><h6 class="mb-0">Thermochemistry sources</h6></div>
+            <div class="section-body p-0">
+                {% include 'database/thermo_records.html' %}
+            </div>
+        </div>
+        {% include 'database/thermo_plot.html' %}
         {% if thermo_list %}
         <div class="data-section">
             <div class="section-header" data-bs-toggle="collapse" data-bs-target="#thermoSection">
@@ -133,7 +143,11 @@
                     <tr><td class="text-muted">Database ID</td><td class="text-end fw-medium">{{ species.pk }}</td></tr>
                     <tr><td class="text-muted">Formula</td><td class="text-end font-monospace fw-medium">{{ species.formula }}</td></tr>
                     {% if species.molecular_weight %}<tr><td class="text-muted">Molecular Weight</td><td class="text-end">{{ species.molecular_weight }} g/mol</td></tr>{% endif %}
-                    {% if species.enthalpy_formation %}<tr><td class="text-muted">ΔH°f (298 K)</td><td class="text-end">{{ species.enthalpy_formation }} J/mol</td></tr>{% endif %}
+                    {% if sidebar_enthalpy %}
+                    <tr><td class="text-muted">ΔH°f (298.15 K)</td><td class="text-end">{{ sidebar_enthalpy }} J/mol
+                        <div class="small"><a href="{% url 'thermo-detail' sidebar_thermo.pk %}"{% if sidebar_thermo_models %} title="{{ sidebar_thermo_models }}"{% endif %}>{{ sidebar_thermo_source }}</a></div>
+                    </td></tr>
+                    {% endif %}
                     {% if structures %}<tr><td class="text-muted">Structures</td><td class="text-end">{{ structures|length }}</td></tr>{% endif %}
                 </table>
             </div>
@@ -159,7 +173,9 @@
                                     </summary>
                                     <div class="ps-3 pt-1 small">
                                         {% for model_name, model_id in models %}
+                                        {% if model_id %}
                                         <a href="{% url 'kinetic-model-detail' model_id %}" class="d-block text-muted py-1">{{ model_name }}</a>
+                                        {% else %}<span class="text-muted">Species reference name</span>{% endif %}
                                         {% endfor %}
                                     </div>
                                 </details>
@@ -247,6 +263,10 @@
 {% endblock %}
 
 {% block extra_js %}
+{% if thermo_plot.curves %}
+{% include 'database/plot_scripts.html' %}
+<script>renderThermoPlot("thermo-plot", "thermo-plot-data", "thermo-plot-controls", "thermo-plot-table");</script>
+{% endif %}
 <script>
 document.querySelectorAll('.copy-btn').forEach(btn => {
     btn.addEventListener('click', function() {

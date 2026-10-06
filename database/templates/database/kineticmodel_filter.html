@@ -44,7 +44,7 @@
                 <td class="text-center text-muted">{{ model.kinetics.count|default:"—" }}</td>
                 <td class="text-muted small">
                     {% if model.source %}
-                    {{ model.source.source_title|truncatewords:6 }}
+                    <a href="{% url 'source-detail' model.source.pk %}">{{ model.source.source_title|truncatewords:6 }}</a>
                     {% else %}—{% endif %}
                 </td>
                 <td class="text-end"><i class="bi bi-chevron-right text-muted"></i></td>
@@ -124,7 +124,8 @@
 {% block extra_js %}
 <script>
 document.querySelectorAll('.clickable-row').forEach(row => {
-    row.addEventListener('click', function() {
+    row.addEventListener('click', function(event) {
+        if (event.target.closest('a')) return;  // a link inside the row goes to its own page
         window.location.href = this.dataset.href;
     });
 });

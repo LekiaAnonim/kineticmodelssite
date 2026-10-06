@@ -80,6 +80,9 @@
     </div>
 </div>
 
+{% include 'database/rate_plot.html' %}
+{% include 'database/reaction_counterparts.html' %}
+
 <!-- Kinetics Data -->
 <div class="data-section">
     <div class="section-header" data-bs-toggle="collapse" data-bs-target="#kineticsSection">
@@ -92,14 +95,9 @@
             <div class="kinetics-entry {% if not forloop.last %}border-bottom{% endif %}">
                 <div class="d-flex justify-content-between align-items-start p-2 bg-light border-bottom">
                     <div>
-                        <a href="{% url 'kinetics-detail' k.pk %}" class="fw-medium text-decoration-none">
-                            {% if k.source and k.source.source_title %}
-                                {{ k.source.source_title|truncatewords:10 }}
-                            {% else %}
-                                Kinetics #{{ k.pk }}
-                            {% endif %}
-                        </a>
+                        <a href="{% url 'kinetics-detail' k.pk %}" class="fw-medium text-decoration-none">Kinetics #{{ k.pk }}</a>
                         <span class="badge bg-secondary-subtle text-secondary small ms-2">{{ k.type }}</span>
+                        {% if k.source %}<div class="small">Reference: <a href="{% url 'source-detail' k.source.pk %}">{{ k.source.source_title|truncatewords:12 }}</a></div>{% endif %}
                     </div>
                     <span class="small text-muted">ID: {{ k.pk }}</span>
                 </div>
@@ -132,8 +130,8 @@
                 {% if model_names %}
                 <div class="p-2 small">
                     <span class="text-muted">Models:</span>
-                    {% for model_name in model_names %}
-                    <span class="badge bg-light text-dark me-1">{{ model_name }}</span>
+                    {% for model in model_names %}
+                    <a class="badge bg-light text-dark me-1 text-decoration-none" href="{% url 'kinetic-model-detail' model.pk %}">{{ model.model_name }}</a>
                     {% endfor %}
                 </div>
                 {% endif %}
@@ -186,6 +184,10 @@
 {% endblock %}
 
 {% block extra_js %}
+{% if rate_plot.series %}
+{% include 'database/plot_scripts.html' %}
+<script>renderRatePlot("rate-plot", "rate-plot-data", "rate-plot-pressure", "rate-plot-table");</script>
+{% endif %}
 <script>
 document.querySelectorAll('.clickable-row').forEach(row => {
     row.addEventListener('click', function() {
