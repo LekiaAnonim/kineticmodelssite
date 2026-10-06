@@ -24,6 +24,9 @@ postgres/
 ignore/*
 errors.txt
 importer.log
+var/thermo/
+var/backups/
+logs/thermo-*
 
 # Deployment files
 .env

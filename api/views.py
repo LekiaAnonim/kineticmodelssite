@@ -63,9 +63,27 @@ class ReactionViewSet(PermissionsViewSet):
 
 @extend_schema(tags=["thermo-transport"])
 class ThermoViewSet(PermissionsViewSet):
-    queryset = models.Thermo.objects.all()
+    queryset = models.Thermo.objects.select_related("provider_record").all()
     serializer_class = serializers.ThermoSerializer
     ordering_fields = ["id"]
+
+
+@extend_schema(tags=["thermo-transport"])
+class ThermoRecordViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [ReadOnly]
+    queryset = models.ThermoRecord.objects.all()
+    serializer_class = serializers.ThermoRecordSerializer
+    filterset_fields = ["provider", "species", "structure", "source_version", "external_id"]
+    ordering_fields = ["id", "retrieved_at"]
+
+
+@extend_schema(tags=["thermo-transport"])
+class ThermoEnrichmentJobViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [ReadOnly]
+    queryset = models.ThermoEnrichmentJob.objects.all()
+    serializer_class = serializers.ThermoEnrichmentJobSerializer
+    filterset_fields = ["provider", "structure", "status"]
+    ordering_fields = ["id", "updated_at", "attempts"]
 
 
 @extend_schema(tags=["thermo-transport"])

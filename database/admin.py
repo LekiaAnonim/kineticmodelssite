@@ -27,6 +27,41 @@ from .models import (
     TransportComment,
 )
 from .models.kinetic_data import Efficiency
+from .models import ThermoRecord, ThermoEnrichmentJob, ThermoProviderStatus, SubMechanism
+
+
+@admin.register(ThermoEnrichmentJob)
+class ThermoEnrichmentJobAdmin(admin.ModelAdmin):
+    list_display = ("structure_id", "provider", "status", "attempts", "next_attempt_at", "updated_at")
+    list_filter = ("provider", "status")
+    search_fields = ("structure__smiles", "message")
+    readonly_fields = tuple(field.name for field in ThermoEnrichmentJob._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(ThermoProviderStatus)
+class ThermoProviderStatusAdmin(admin.ModelAdmin):
+    list_display = ("provider", "retry_after", "message")
+    readonly_fields = tuple(field.name for field in ThermoProviderStatus._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(ThermoRecord)
+class ThermoRecordAdmin(admin.ModelAdmin):
+    list_display = ("label", "provider", "external_id", "source_version", "species", "retrieved_at")
+    list_filter = ("provider", "phase")
+    search_fields = ("label", "external_id")
+    readonly_fields = tuple(field.name for field in ThermoRecord._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 # =============================================================================
@@ -371,3 +406,14 @@ class EfficiencyAdmin(admin.ModelAdmin):
     list_display = ('id', 'species', 'kinetics', 'efficiency')
     search_fields = ('species__prime_id', 'kinetics__prime_id')
     autocomplete_fields = ['species', 'kinetics']
+
+
+@admin.register(SubMechanism)
+class SubMechanismAdmin(admin.ModelAdmin):
+    """Rename sub-mechanisms (e.g. 'Aramco C1'); everything else comes from analyze_shared_chemistry."""
+    list_display = ('id', 'default_name', 'name', 'layer', 'model_count', 'variant_count', 'reactions', 'core')
+    list_editable = ('name',)
+    list_filter = ('layer',)
+    search_fields = ('name', 'default_name', 'origin__model_name')
+    fields = ('name', 'default_name', 'layer', 'origin', 'model_count', 'variant_count', 'reactions', 'core', 'cohesion')
+    readonly_fields = ('default_name', 'layer', 'origin', 'model_count', 'variant_count', 'reactions', 'core', 'cohesion')

@@ -78,9 +78,25 @@ class ReactionSerializer(NestedModelSerializer):
 
 
 class ThermoSerializer(FlexFieldsModelSerializer):
+    provider_record = serializers.PrimaryKeyRelatedField(read_only=True)
+
     class Meta:
         model = models.Thermo
         fields = "__all__"
+
+
+class ThermoRecordSerializer(serializers.ModelSerializer):
+    provider_name = serializers.CharField(source="get_provider_display", read_only=True)
+
+    class Meta:
+        model = models.ThermoRecord
+        fields = "__all__"
+
+
+class ThermoEnrichmentJobSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.ThermoEnrichmentJob
+        exclude = ["lease_token"]
 
 
 class TransportSerializer(FlexFieldsModelSerializer):

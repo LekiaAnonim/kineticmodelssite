@@ -320,6 +320,18 @@ CELERY_WORKER_MAX_MEMORY_PER_CHILD = 40_000_000  # Kill worker if it exceeds ~40
 # RMG/Importer paths on the office server
 RMG_PY_PATH = os.getenv('RMGpy', '/home/prometheus/Importer/RMG-Py')
 RMG_DATABASE_PATH = os.getenv('RMG_DATABASE_PATH', '/home/prometheus/Importer/RMG-database')
+ATCT_API_BASE_URL = os.getenv("ATCT_API_BASE_URL", "https://atct.anl.gov/api/v1")
+ATCT_API_KEY = os.getenv("ATCT_API_KEY", "")
+ATCT_USER_AGENT = os.getenv("ATCT_USER_AGENT", "Mozilla/5.0 (compatible; ATcT-Python/1.0.0)")
+THERMO_RMG_DATABASE_PATH = os.getenv("THERMO_RMG_DATABASE_PATH", "") or None
+THERMO_ATCT_SNAPSHOT_PATH = os.getenv("THERMO_ATCT_SNAPSHOT_PATH", os.path.join(BASE_DIR, "var", "thermo", "atct-catalog.json"))
+THERMO_BURCAT_LIBRARY = os.getenv("THERMO_BURCAT_LIBRARY", "")
+THERMO_ENRICHMENT_BATCH_SIZE = int(os.getenv("THERMO_ENRICHMENT_BATCH_SIZE", "100"))
+THERMO_JOB_TIMEOUT_SECONDS = int(os.getenv("THERMO_JOB_TIMEOUT_SECONDS", "120"))
+CELERY_TASK_ROUTES = {
+    "database.enrich_species_thermo": {"queue": "thermo"},
+    "database.sync_atct_catalog": {"queue": "thermo"},
+}
 RMG_MODELS_PATH = os.getenv('RMGMODELSPATH', '/home/prometheus/Importer/RMG-models')
 CONDA_ENV_NAME = os.getenv('CONDA_ENV_NAME', 'rmg_env')
 CONDA_BASE_PATH = os.getenv('CONDA_BASE_PATH', '/home/prometheus/miniconda3')
@@ -340,6 +352,16 @@ IMPORTER_MODE = 'local'
 from celery.schedules import crontab
 
 CELERY_BEAT_SCHEDULE = {
+    'sync-atct-thermo': {
+        'task': 'database.sync_atct_catalog',
+        'schedule': crontab(hour=2, minute=15),
+        'options': {'expires': 3600},
+    },
+    'enrich-species-thermo': {
+        'task': 'database.enrich_species_thermo',
+        'schedule': 300.0,
+        'options': {'expires': 300},
+    },
     'refresh-job-statuses': {
         'task': 'importer_dashboard.refresh_all_job_statuses',
         'schedule': 30.0,  # Every 30 seconds

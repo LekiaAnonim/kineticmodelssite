@@ -1,6 +1,7 @@
+import logging
+import math
 import os
 import re
-import logging
 import hashlib
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,8 @@ import habanero
 from django.db import transaction, IntegrityError
 from dateutil import parser
 from rmgpy import kinetics, constants
-from rmgpy.data.kinetics.library import KineticsLibrary
+from rmgpy.quantity import RateCoefficient
+from database.scripts.rmg_libraries import TolerantKineticsLibrary
 from rmgpy.data.thermo import ThermoLibrary
 from rmgpy.thermo import NASA, ThermoData, Wilhoit, NASAPolynomial
 
@@ -196,6 +198,20 @@ def get_reaction_hash(stoich_data):
     return hashlib.md5(bytes(reaction_fingerprint, "UTF-8")).hexdigest()
 
 
+def index_new_rows(models, reaction=None, kinetics=None):
+    """Keep the shared chemical identity current for new rows. Skipped when an old data
+    migration runs this importer with historical models, which lack these fields."""
+    from database.models import Reaction
+    if getattr(models, "Reaction", None) is not Reaction:
+        return
+    from database.services import chemistry_index
+    if reaction is not None:
+        chemistry_index.index_reaction(reaction)
+    if kinetics is not None:
+        kinetics.rate_fingerprint = chemistry_index.kinetics_fingerprint(kinetics)
+        kinetics.save(update_fields=["rate_fingerprint"])
+
+
 def get_or_create_reaction(kinetic_model, rmg_reaction, models):
     """
     Create and save a reaction from an RMG reaction
@@ -241,6 +257,7 @@ def get_or_create_reaction(kinetic_model, rmg_reaction, models):
                 models.Stoichiometry.objects.create(
                     reaction=reaction, species=species, coeff=stoich_coeff
                 )
+            index_new_rows(models, reaction=reaction)
 
         stoich_reactants = reaction.stoichiometry_set.filter(coeff__lte=0)
         stoich_products = reaction.stoichiometry_set.filter(coeff__gte=0)
@@ -291,8 +308,9 @@ def create_pdep_arrhenius(rmg_kinetics_data):
     return kd.PDepArrhenius(
         type="pdep_arrhenius",
         pressure_set=[
-            kd.Pressure(arrhenius=create_arrhenius(a), pressure=p)
-            for a, p in zip(rmg_kinetics_data.pressures.value_si, rmg_kinetics_data.arrhenius)
+            kd.Pressure(arrhenius=create_multi_arrhenius(a) if isinstance(a, kinetics.MultiArrhenius)
+                        else create_arrhenius(a), pressure=p)
+            for p, a in zip(rmg_kinetics_data.pressures.value_si, rmg_kinetics_data.arrhenius)
         ],
     )
 
@@ -305,9 +323,12 @@ def create_multi_pdep_arrhenius(rmg_kinetics_data):
 
 
 def create_chebyshev(rmg_kinetics_data):
+    # RMG adds log10 of the kunits-to-SI factor to coeffs[0, 0]; store them as written, in kunits.
+    coeffs = rmg_kinetics_data.coeffs.value_si.copy()
+    coeffs[0, 0] -= math.log10(RateCoefficient(1.0, rmg_kinetics_data.kunits).value_si)
     return kd.Chebyshev(
         type="chebyshev",
-        coefficient_matrix=rmg_kinetics_data.coeffs.tolist(),
+        coefficient_matrix=coeffs.tolist(),
         units=rmg_kinetics_data.kunits,
     )
 
@@ -399,8 +420,9 @@ def create_kinetics_data(kinetic_model, rmg_kinetics_data, models):
     return kinetics_data
 
 
-def import_kinetics(kinetics_path, kinetic_model, models):
-    local_context = {
+def kinetics_local_context():
+    """The names an RMG-format reactions.py may use for its kinetics."""
+    return {
         "KineticsData": kinetics.KineticsData,
         "Arrhenius": kinetics.Arrhenius,
         "ArrheniusEP": kinetics.ArrheniusEP,
@@ -413,10 +435,24 @@ def import_kinetics(kinetics_path, kinetic_model, models):
         "Troe": kinetics.Troe,
         "R": constants.R,
     }
-    library = KineticsLibrary(label=kinetic_model.model_name)
+
+
+def import_kinetics(kinetics_path, kinetic_model, models, only_types=None):
+    """Import a model's kinetics library; only_types limits it to RMG kinetics class names.
+
+    Returns counts of imported, skipped and failed entries."""
+    local_context = kinetics_local_context()
+    # Older RMG accepted reactions that RMG 4 refuses; skip just those, not the whole library.
+    library = TolerantKineticsLibrary(label=kinetic_model.model_name)
     library.SKIP_DUPLICATES = True
     library.load(kinetics_path, local_context=local_context)
+    counts = {"imported": 0, "skipped": 0, "failed": 0, "rejected": len(library.rejected)}
+    for label, reason in library.rejected:
+        logger.warning(f"RMG cannot load reaction {label} ({reason}); skipped")
     for entry in library.entries.values():
+        if only_types is not None and entry.data.__class__.__name__ not in only_types:
+            counts["skipped"] += 1
+            continue
         try:
             with transaction.atomic():
                 rmg_kinetics_data = entry.data
@@ -429,22 +465,24 @@ def import_kinetics(kinetics_path, kinetic_model, models):
                 kinetics_instance, created = models.Kinetics.objects.get_or_create(
                     reaction=reaction, raw_data=kinetics_data, defaults=base_fields
                 )
-                if created and kinetics_data.get("type") not in [
-                    "arrhenius",
-                    "arrhenius_ep",
-                    "multi_arrhenius",
-                ]:
+                # PLOG and Chebyshev kinetics have no collider efficiencies.
+                if created and getattr(rmg_kinetics_data, "efficiencies", None):
                     create_and_save_efficiencies(
                         kinetic_model, kinetics_instance, rmg_kinetics_data, models
                     )
+                if created:
+                    index_new_rows(models, kinetics=kinetics_instance)
 
                 models.KineticsComment.objects.get_or_create(
                     kinetics=kinetics_instance,
                     kinetic_model=kinetic_model,
                     defaults={"comment": comment},
                 )
+            counts["imported"] += 1
         except Exception:
+            counts["failed"] += 1
             logger.exception(f"Failed to import reaction {entry.label}")
+    return counts
 
 
 def import_thermo(thermo_path, kinetic_model, models):

@@ -1,4 +1,4 @@
-from typing import List, Optional, Literal, ClassVar
+from typing import List, Optional, Literal, ClassVar, Union
 
 import rmgpy.kinetics as kinetics
 from titlecase import titlecase
@@ -127,9 +127,9 @@ class ArrheniusEP(BaseModel):
     type: Literal["arrhenius_ep"]
     a: float
     a_si: float
-    a_units: float
+    a_units: str
     n: float
-    alpha: float # Add missing alpha field
+    alpha: float
     e0: float
     e0_si: float
     e0_units: str
@@ -142,7 +142,7 @@ class ArrheniusEP(BaseModel):
     def e0_units_common(cls, v):
         return validate_energy_units(v)
 
-    def to_rmg(self):
+    def to_rmg(self, *args):
         return kinetics.ArrheniusEP(
             A=ScalarQuantity(self.a, self.a_units),
             n=self.n,
@@ -158,43 +158,6 @@ class ArrheniusEP(BaseModel):
                 [("", [self.a_si, self.n, self.alpha, self.e0_si])],
             )
         ]
-
-
-@register
-class Pressure(BaseModel):
-    arrhenius: Arrhenius
-    pressure: float
-
-
-@register
-class PDepArrhenius(BaseModel):
-    type: Literal["pdep_arrhenius"]
-    pressure_set: List[Pressure]
-
-    def to_rmg(self, min_temp, max_temp, min_pressure, max_pressure, *args):
-        return kinetics.PDepArrhenius(
-            pressures=ArrayQuantity([p.pressure for p in self.pressure_set], "Pa"),
-            arrhenius=[
-                p.arrhenius.to_rmg(min_temp, max_temp, min_pressure, max_pressure)
-                for p in self.pressure_set
-            ],
-            Tmin=ScalarQuantity(min_temp, "K"),
-            Tmax=ScalarQuantity(max_temp, "K"),
-            Pmin=ScalarQuantity(min_pressure, "Pa"),
-            Pmax=ScalarQuantity(max_pressure, "Pa"),
-        )
-
-    def table_data(self):
-        table_heads = [
-            r"$P$ $(\textit{Pa})$",
-            *self.pressure_set[0].arrhenius.table_data()[0][1],
-        ]
-        table_bodies = []
-        for p in self.pressure_set.all():
-            _, _, bodies = p.arrhenius.table_data()[0]
-            table_bodies.append((p.pressure, bodies[0][1]))
-
-        return [("", table_heads, table_bodies)]
 
 
 @register
@@ -222,16 +185,53 @@ class MultiArrhenius(BaseModel):
 
 
 @register
+class Pressure(BaseModel):
+    # Duplicate PLOG lines at one pressure arrive from RMG as MultiArrhenius.
+    arrhenius: Union[Arrhenius, MultiArrhenius]
+    pressure: float
+
+
+@register
+class PDepArrhenius(BaseModel):
+    type: Literal["pdep_arrhenius"]
+    pressure_set: List[Pressure]
+
+    def to_rmg(self, min_temp, max_temp, min_pressure, max_pressure, *args):
+        return kinetics.PDepArrhenius(
+            pressures=ArrayQuantity([p.pressure for p in self.pressure_set], "Pa"),
+            arrhenius=[
+                p.arrhenius.to_rmg(min_temp, max_temp, min_pressure, max_pressure)
+                for p in self.pressure_set
+            ],
+            Tmin=ScalarQuantity(min_temp, "K"),
+            Tmax=ScalarQuantity(max_temp, "K"),
+            Pmin=ScalarQuantity(min_pressure, "Pa"),
+            Pmax=ScalarQuantity(max_pressure, "Pa"),
+        )
+
+    def table_data(self):
+        table_heads = [
+            r"$P$ $(\textit{Pa})$",
+            *self.pressure_set[0].arrhenius.table_data()[0][1],
+        ]
+        table_bodies = []
+        for p in self.pressure_set:
+            _, _, bodies = p.arrhenius.table_data()[0]
+            table_bodies.extend((p.pressure, values) for _, values in bodies)
+
+        return [("", table_heads, table_bodies)]
+
+
+@register
 class MultiPDepArrhenius(BaseModel):
     type: Literal["multi_pdep_arrhenius"]
     pdep_arrhenius_set: List[PDepArrhenius]
 
     def to_rmg(self, min_temp, max_temp, min_pressure, max_pressure, *args):
-        return kinetics.MultiPdepArrhenius(
+        return kinetics.MultiPDepArrhenius(
             arrhenius=[
-                p.arrhenius.to_rmg(min_temp, max_temp, min_pressure, max_pressure)
+                pda.to_rmg(min_temp, max_temp, min_pressure, max_pressure)
                 for pda in self.pdep_arrhenius_set
-                for p in pda.pressure_set
             ],
             Tmin=ScalarQuantity(min_temp, "K"),
             Tmax=ScalarQuantity(max_temp, "K"),
@@ -264,6 +264,15 @@ class Chebyshev(BaseModel):
             Pmin=ScalarQuantity(min_pressure, "Pa"),
             Pmax=ScalarQuantity(max_pressure, "Pa"),
         )
+
+    def table_data(self):
+        columns = len(self.coefficient_matrix[0]) if self.coefficient_matrix else 0
+        return [(
+            f"Coefficients ({self.units})",
+            # A corner head for the row labels, so headings line up with their columns.
+            [r"$i \backslash j$", *[f"$j={j}$" for j in range(columns)]],
+            [(f"$i={i}$", row) for i, row in enumerate(self.coefficient_matrix)],
+        )]
 
 
 @register
@@ -446,6 +455,8 @@ class Kinetics(models.Model):
     max_pressure = models.FloatField(
         "Upper Pressure Bound", help_text="units: Pa", null=True, blank=True
     )
+    # log10 k (SI) at 500, 1000 and 1500 K and 1 bar, as written; the importer's copied-rate test.
+    rate_fingerprint = models.JSONField(null=True, blank=True)
 
     class Meta:
         verbose_name_plural = "Kinetics"
@@ -467,6 +478,11 @@ class Kinetics(models.Model):
         )
 
         return rmg_reaction
+
+    def rmg_kinetics(self):
+        """The RMG kinetics object alone, with collider efficiencies; no reaction needed."""
+        efficiencies = list(self.efficiency_set.select_related("species"))
+        return self.data.to_rmg(self.min_temp, self.max_temp, self.min_pressure, self.max_pressure, efficiencies)
 
     def to_chemkin(self):
         """

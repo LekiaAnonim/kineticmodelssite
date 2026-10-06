@@ -28,6 +28,11 @@ class Isomer(models.Model):
     def __str__(self):
         return f"{self.inchi}"
 
+    @property
+    def webbook_url(self):
+        from database.services.nist import webbook_url
+        return webbook_url(self.inchi)
+
 
 class Structure(models.Model):
     adjacency_list = models.TextField("Adjacency List", unique=True)
@@ -35,9 +40,15 @@ class Structure(models.Model):
     multiplicity = models.IntegerField()
     isomer = models.ForeignKey(Isomer, on_delete=models.CASCADE)
     canonical_smiles = models.CharField(max_length=500, blank=True, db_index=True)
+    # InChIKey plus multiplicity: shared by resonance forms, distinct for spin states.
+    structure_key = models.CharField(max_length=64, blank=True, db_index=True)
     iupac_name = models.TextField(blank=True)
     pubchem_cid = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
     names_checked_at = models.DateTimeField(null=True, blank=True)
+    # CAS numbers among the synonyms of the PubChem compounds with this structure's standard
+    # InChIKey (enrich_structure_cas); used to link reactions to NIST's kinetics search.
+    cas_numbers = models.JSONField(default=list, blank=True)
+    cas_checked_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.adjacency_list
@@ -59,7 +70,7 @@ class Structure(models.Model):
 
     def save(self, *args, **kwargs):
         # Keep local structure identity current without making network calls on save.
-        from database.services.chemical_identity import canonical_smiles
+        from database.services.chemical_identity import canonical_smiles, structure_key
 
         update_fields = kwargs.get("update_fields")
         identity_fields = {"smiles", "adjacency_list", "multiplicity", "isomer", "isomer_id"}
@@ -83,9 +94,16 @@ class Structure(models.Model):
                 except Exception:
                     # Existing imports may contain unsupported adjacency-list tokens.
                     pass
+            try:
+                self.structure_key = structure_key(self.to_rmg()) if self.adjacency_list else ""
+            except Exception:
+                self.structure_key = ""
             if update_fields is not None:
-                kwargs["update_fields"] = set(update_fields) | {"canonical_smiles"}
+                kwargs["update_fields"] = set(update_fields) | {"canonical_smiles", "structure_key"}
         if reset_names:
+            if self.thermo_records.exists():
+                from django.core.exceptions import ValidationError
+                raise ValidationError("This structure has source thermochemistry records. Create a new structure to change its identity.")
             self.iupac_name = ""
             self.pubchem_cid = None
             self.names_checked_at = None
@@ -163,6 +181,16 @@ class Reaction(models.Model):
     species = models.ManyToManyField("Species", through="Stoichiometry")
     prime_id = models.CharField("PrIMe ID", blank=True, max_length=10)
     reversible = models.BooleanField()
+    # Direction-insensitive identity: a reaction and its reverse share canonical_key, and
+    # canonical_direction (+1/-1) says which way this row is written. 0 = not indexed yet.
+    canonical_key = models.CharField(max_length=1000, blank=True, db_index=True)
+    canonical_direction = models.SmallIntegerField(default=0)
+    # Sub-mechanism layer of the non-collider species: H2/O2, C1 ... C≥4, tagged +N, +S, +Hal.
+    layer = models.CharField(max_length=40, blank=True, db_index=True)
+    # RMG reaction family that generates this reaction (classify_reaction_families), with the
+    # template; "-" when no family does, blank when not classified yet.
+    rmg_family = models.CharField(max_length=100, blank=True, db_index=True)
+    rmg_template = models.CharField(max_length=500, blank=True)
 
     class Meta:
         ordering = ("prime_id",)
