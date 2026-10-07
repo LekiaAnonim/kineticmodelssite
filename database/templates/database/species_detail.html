@@ -49,9 +49,6 @@
                                 <tr><td class="text-muted small" style="width:80px;">InChI</td><td><code class="small text-break">{{ structure.isomer.inchi }}</code>
                                     <button class="btn btn-sm btn-link p-0 ms-1 copy-btn" data-copy="{{ structure.isomer.inchi }}"><i class="bi bi-clipboard"></i></button>
                                 </td></tr>
-                                {% if structure.isomer.webbook_url %}
-                                <tr><td class="text-muted small">NIST</td><td class="small"><a href="{{ structure.isomer.webbook_url }}" target="_blank" rel="noopener noreferrer">NIST Chemistry WebBook<span class="visually-hidden"> (opens in a new tab)</span></a></td></tr>
-                                {% endif %}
                                 {% endif %}
                                 {% if structure.smiles %}
                                 <tr><td class="text-muted small">SMILES</td><td><code class="small">{{ structure.smiles }}</code></td></tr>

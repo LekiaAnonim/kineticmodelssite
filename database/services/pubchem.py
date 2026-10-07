@@ -100,21 +100,3 @@ class PubChemClient:
             return {"cid": cid, "iupac_name": iupac_name.strip(), "synonyms": names}
         except (KeyError, TypeError, ValueError) as exc:
             raise PubChemError("PubChem returned an incomplete compound record.") from exc
-
-    def cas_numbers(self, inchikey):
-        """CAS numbers among the synonyms of the compounds with this standard InChIKey, in
-        PubChem's order (most relevant synonyms first)."""
-        from .nist import CAS, valid_cas
-        payload = self._get(f"compound/inchikey/{inchikey}/synonyms/JSON")
-        if payload is None:
-            return []
-        try:
-            synonyms = [name for item in payload["InformationList"]["Information"] for name in item.get("Synonym", [])]
-        except (KeyError, TypeError) as exc:
-            raise PubChemError("PubChem returned an incomplete synonym record.") from exc
-        found = {}
-        for name in synonyms:
-            match = CAS.match(name.strip()) if isinstance(name, str) else None
-            if match and valid_cas(match.group(1)):
-                found.setdefault(match.group(1))
-        return list(found)

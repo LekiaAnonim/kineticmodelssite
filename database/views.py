@@ -20,7 +20,7 @@ from django.utils.html import format_html
 from rmgpy.molecule.draw import MoleculeDrawer
 
 from database import models
-from database.services import chemistry_index, curves, nist, rmg_matching, shared_chemistry, sub_mechanisms
+from database.services import chemistry_index, curves, rmg_matching, shared_chemistry, sub_mechanisms
 from database.services.chemical_identity import rates_match
 from .models import (
     Species,
@@ -321,7 +321,6 @@ class ReactionDetail(DetailView):
                 records.append({"record": record, "same_direction": same, "identical_models": identical,
                                 "entry_url": rmg_matching.entry_url(record)})
         context["rmg_records"] = records
-        context["nist"] = nist.search_links(reaction)
         context["rmg_family"] = reaction.rmg_family
         context["reverse_reactions"] = (
             Reaction.objects.filter(canonical_key=reaction.canonical_key).exclude(pk=reaction.pk).order_by("pk")

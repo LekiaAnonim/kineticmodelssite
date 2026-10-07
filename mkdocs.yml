@@ -58,7 +58,6 @@ nav:
   - Species search: species-search.md
   - Thermochemistry sources: thermochemistry.md
   - Comparing chemistry: chemistry-comparison.md
-  - NIST kinetics: nist-kinetics.md
   - Authentication: authentication.md
   - API guide:
       - Overview: api/overview.md

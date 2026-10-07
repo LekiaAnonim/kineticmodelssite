@@ -28,11 +28,6 @@ class Isomer(models.Model):
     def __str__(self):
         return f"{self.inchi}"
 
-    @property
-    def webbook_url(self):
-        from database.services.nist import webbook_url
-        return webbook_url(self.inchi)
-
 
 class Structure(models.Model):
     adjacency_list = models.TextField("Adjacency List", unique=True)
@@ -45,10 +40,6 @@ class Structure(models.Model):
     iupac_name = models.TextField(blank=True)
     pubchem_cid = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
     names_checked_at = models.DateTimeField(null=True, blank=True)
-    # CAS numbers among the synonyms of the PubChem compounds with this structure's standard
-    # InChIKey (enrich_structure_cas); used to link reactions to NIST's kinetics search.
-    cas_numbers = models.JSONField(default=list, blank=True)
-    cas_checked_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.adjacency_list

@@ -1,6 +1,6 @@
 # Comparing chemistry across models and sources
 
-These features answer four questions: which models share chemistry, what RMG-database has for a reaction or species, how sources compare as curves, and where to find a reaction in NIST's database ([NIST kinetics](nist-kinetics.md)). All of them rest on one shared identity.
+These features answer three questions: which models share chemistry, what RMG-database has for a reaction or species, and how sources compare as curves. All of them rest on one shared identity.
 
 ## Shared identity
 

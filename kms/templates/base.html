@@ -82,6 +82,17 @@
                         </a>
                     </li>
                     
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle" href="#" id="rmgDropdown" role="button"
+                           data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="bi bi-diagram-3 me-1"></i>RMG Sources
+                        </a>
+                        <ul class="dropdown-menu" aria-labelledby="rmgDropdown">
+                            <li><a class="dropdown-item" href="{% url 'rmg-family-list' %}">Reaction families</a></li>
+                            <li><a class="dropdown-item" href="{% url 'rmg-library-list' %}">Thermo &amp; kinetics libraries</a></li>
+                        </ul>
+                    </li>
+
                     <!-- Quick Lookup Dropdown -->
                     <li class="nav-item dropdown">
                         <a class="nav-link dropdown-toggle" href="#" id="lookupDropdown" role="button" 

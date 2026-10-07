@@ -207,7 +207,7 @@
         });
         const legend = legendFor(colors, "Other models");
         // Each kind of outside source gets one legend entry; hover still names every source.
-        const SOURCE_NAME = {rmg_library: "RMG-database libraries", rmg_family: "RMG rate-rule estimate"};
+        const SOURCE_NAME = {rmg_library: "RMG-database libraries", rmg_family: "RMG family rate-rule estimate"};
         const firstOfKind = {};
         data.series.forEach(function (s, i) {
             if (s.kind === "model") return;

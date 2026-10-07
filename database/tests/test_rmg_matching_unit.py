@@ -89,7 +89,7 @@ class LibraryMatchingTests(TestCase):
         overlap = models.ModelLibraryOverlap.objects.get()
         self.assertEqual((overlap.library, overlap.model_total, overlap.shared, overlap.identical), ("Test", 1, 1, 1))
         page = self.client.get(reverse("reaction-detail", args=[forward.pk]))
-        self.assertContains(page, "RMG-database counterparts and NIST")
+        self.assertContains(page, "RMG-database counterparts")
         self.assertContains(page, "Copied model")
         library_url = reverse("rmg-library-detail", args=["kinetics", "Test"])
         self.assertContains(page, f'href="{library_url}"')
