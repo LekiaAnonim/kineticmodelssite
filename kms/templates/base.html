@@ -82,62 +82,6 @@
                         </a>
                     </li>
                     
-                    <li class="nav-item dropdown">
-                        <a class="nav-link dropdown-toggle" href="#" id="rmgDropdown" role="button"
-                           data-bs-toggle="dropdown" aria-expanded="false">
-                            <i class="bi bi-diagram-3 me-1"></i>RMG Sources
-                        </a>
-                        <ul class="dropdown-menu" aria-labelledby="rmgDropdown">
-                            <li><a class="dropdown-item" href="{% url 'rmg-family-list' %}">Reaction families</a></li>
-                            <li><a class="dropdown-item" href="{% url 'rmg-library-list' %}">Thermo &amp; kinetics libraries</a></li>
-                        </ul>
-                    </li>
-
-                    <!-- Quick Lookup Dropdown -->
-                    <li class="nav-item dropdown">
-                        <a class="nav-link dropdown-toggle" href="#" id="lookupDropdown" role="button" 
-                           data-bs-toggle="dropdown" aria-expanded="false">
-                            <i class="bi bi-search me-1"></i>Quick Lookup
-                        </a>
-                        <div class="dropdown-menu dropdown-menu-end p-3" style="min-width: 280px;">
-                            <h6 class="dropdown-header px-0">
-                                <i class="bi bi-lightning me-1"></i>Direct ID Lookup
-                            </h6>
-                            
-                            <!-- Species Lookup -->
-                            <form action="" method="get" class="mb-3">
-                                <label class="form-label small fw-semibold">Species ID</label>
-                                <div class="input-group input-group-sm">
-                                    <span class="input-group-text"><i class="bi bi-droplet"></i></span>
-                                    <input type="number" name="species_pk" class="form-control" placeholder="Enter ID" min="1">
-                                    <button class="btn btn-primary" type="submit">Go</button>
-                                </div>
-                                {% if species_invalid %}<small class="text-danger">{{ species_invalid }}</small>{% endif %}
-                            </form>
-                            
-                            <!-- Reaction Lookup -->
-                            <form action="" method="get" class="mb-3">
-                                <label class="form-label small fw-semibold">Reaction ID</label>
-                                <div class="input-group input-group-sm">
-                                    <span class="input-group-text"><i class="bi bi-arrow-left-right"></i></span>
-                                    <input type="number" name="reaction_pk" class="form-control" placeholder="Enter ID" min="1">
-                                    <button class="btn btn-primary" type="submit">Go</button>
-                                </div>
-                                {% if reaction_invalid %}<small class="text-danger">{{ reaction_invalid }}</small>{% endif %}
-                            </form>
-                            
-                            <!-- Source Lookup -->
-                            <form action="" method="get">
-                                <label class="form-label small fw-semibold">Source ID</label>
-                                <div class="input-group input-group-sm">
-                                    <span class="input-group-text"><i class="bi bi-journal"></i></span>
-                                    <input type="number" name="source_pk" class="form-control" placeholder="Enter ID" min="1">
-                                    <button class="btn btn-primary" type="submit">Go</button>
-                                </div>
-                                {% if source_invalid %}<small class="text-danger">{{ source_invalid }}</small>{% endif %}
-                            </form>
-                        </div>
-                    </li>
                 </ul>
                 
                 <!-- Right-side items -->
