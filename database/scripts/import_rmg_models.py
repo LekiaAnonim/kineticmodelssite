@@ -9,15 +9,16 @@ from types import SimpleNamespace
 
 import habanero
 from django.db import transaction, IntegrityError
+from django.db.models import Q
 from dateutil import parser
 from rmgpy import kinetics, constants
 from rmgpy.quantity import RateCoefficient
-from database.scripts.rmg_libraries import TolerantKineticsLibrary
-from rmgpy.data.thermo import ThermoLibrary
+from database.scripts.rmg_libraries import TolerantKineticsLibrary, TolerantThermoLibrary
 from rmgpy.thermo import NASA, ThermoData, Wilhoit, NASAPolynomial
 
 from django.conf import settings
 from database.models import kinetic_data as kd
+from database.services.chemical_identity import structure_key
 
 
 """
@@ -178,16 +179,82 @@ def get_or_create_species(kinetic_model, name, molecules, models):
                 defaults={"smiles": smiles, "multiplicity": multiplicity, "isomer": isomer},
             )
 
-    species_hash = get_species_hash(isomers)
-    species, species_created = models.Species.objects.get_or_create(hash=species_hash)
-    if species_created:
-        species.isomers.add(*isomers)
-
-    models.SpeciesName.objects.get_or_create(
-        name=name, species=species, kinetic_model=kinetic_model
-    )
+    species = species_record(isomers, molecules, models)
+    add_species_name(species, kinetic_model, name, models)
 
     return species
+
+
+def molecule_key(molecule):
+    """The structure key, or None when RMG cannot make an InChIKey for the molecule."""
+    try:
+        return structure_key(molecule)
+    except Exception:
+        return None
+
+
+def has_structure_keys(models):
+    """False for the historical models of old data migrations, which predate structure_key."""
+    return any(field.name == "structure_key" for field in models.Structure._meta.get_fields())
+
+
+def species_record(isomers, molecules, models):
+    """The one species record for these molecules.
+
+    A thermo entry gives one resonance form of a radical and a reaction gives all of them, so
+    the isomer sets differ. The record is therefore found by structure key (InChIKey plus
+    multiplicity: shared by resonance forms, different for spin states) or by a shared isomer,
+    and missing resonance forms are added to it. The hash stays the isomer-set fingerprint
+    (signals.py keeps it current).
+    """
+    keys = {molecule_key(molecule) for molecule in molecules}
+    if not has_structure_keys(models) or len(keys) != 1 or None in keys:
+        # Old data migrations, or molecules that are not resonance forms of one structure.
+        species, created = models.Species.objects.get_or_create(hash=get_species_hash(isomers))
+        if created:
+            species.isomers.add(*isomers)
+        return species
+
+    isomer_ids = {isomer.id for isomer in isomers}
+    candidates = models.Species.objects.filter(
+        Q(isomers__in=isomer_ids) | Q(isomers__structure__structure_key__in=keys)
+    ).distinct()
+    held = {species: set(species.isomers.values_list("id", flat=True)) for species in candidates}
+    if not held:
+        species, created = models.Species.objects.get_or_create(hash=get_species_hash(isomers))
+        if created:
+            species.isomers.add(*isomers)
+        return species
+    # Older imports left one record per resonance set. Prefer a record that already holds
+    # every form here, then the most complete record, then the oldest.
+    covering = [s for s, ids in held.items() if isomer_ids <= ids]
+    species = min(covering or held, key=lambda s: (-len(held[s]), s.pk))
+    missing = [isomer for isomer in isomers if isomer.id not in held[species]]
+    if missing:
+        species.isomers.add(*missing)
+    return species
+
+
+def add_species_name(species, kinetic_model, name, models):
+    """Record what the kinetic model calls this species.
+
+    An empty name only links a species to the model until its label is known: it is never
+    written next to a real name, and a real name replaces it.
+    """
+    names = models.SpeciesName.objects.filter(species=species, kinetic_model=kinetic_model)
+    if not name:
+        if not names.exists():
+            models.SpeciesName.objects.create(name="", species=species, kinetic_model=kinetic_model)
+        return
+    if not names.filter(name=name).exists():
+        placeholder = names.filter(name="").order_by("pk").first()
+        if placeholder is None:
+            models.SpeciesName.objects.create(
+                name=name, species=species, kinetic_model=kinetic_model)
+        else:
+            placeholder.name = name
+            placeholder.save(update_fields=["name"])
+    names.filter(name="").delete()
 
 
 def get_reaction_hash(stoich_data):
@@ -234,10 +301,11 @@ def get_or_create_reaction(kinetic_model, rmg_reaction, models):
             species_map[name] = s
 
     with transaction.atomic():
-        for rmg_species in species_map.values():
+        for name, rmg_species in species_map.items():
+            # The label is the species name in the mechanism (from the library dictionary).
             species = get_or_create_species(
                 kinetic_model,
-                "",
+                name or "",
                 rmg_species.molecule,
                 models,
             )
@@ -373,9 +441,25 @@ def create_general_kinetics_data(rmg_kinetics_data):
     )
 
 
-def create_and_save_efficiencies(kinetic_model, kinetics_instance, rmg_kinetics_data, models):
+def labels_by_structure_key(species_dict):
+    """Structure key -> label for the species of a library dictionary.
+
+    Collider efficiencies are written as SMILES, so this is how their species get the
+    mechanism's name. A key shared by two labels (OH and OH*) names neither.
+    """
+    labels = {}
+    for label, rmg_species in (species_dict or {}).items():
+        for key in {molecule_key(molecule) for molecule in rmg_species.molecule} - {None}:
+            labels[key] = None if labels.get(key, label) != label else label
+    return {key: label for key, label in labels.items() if label}
+
+
+def create_and_save_efficiencies(
+    kinetic_model, kinetics_instance, rmg_kinetics_data, models, labels=None
+):
     for rmg_molecule, efficiency in rmg_kinetics_data.efficiencies.items():
-        species = get_or_create_species(kinetic_model, "", [rmg_molecule], models)
+        name = (labels or {}).get(molecule_key(rmg_molecule), "")
+        species = get_or_create_species(kinetic_model, name, [rmg_molecule], models)
         efficiency = models.Efficiency.objects.create(
             species=species, kinetics=kinetics_instance, efficiency=efficiency
         )
@@ -446,6 +530,7 @@ def import_kinetics(kinetics_path, kinetic_model, models, only_types=None):
     library = TolerantKineticsLibrary(label=kinetic_model.model_name)
     library.SKIP_DUPLICATES = True
     library.load(kinetics_path, local_context=local_context)
+    labels = labels_by_structure_key(getattr(library, "species_dict", None))
     counts = {"imported": 0, "skipped": 0, "failed": 0, "rejected": len(library.rejected)}
     for label, reason in library.rejected:
         logger.warning(f"RMG cannot load reaction {label} ({reason}); skipped")
@@ -468,7 +553,7 @@ def import_kinetics(kinetics_path, kinetic_model, models, only_types=None):
                 # PLOG and Chebyshev kinetics have no collider efficiencies.
                 if created and getattr(rmg_kinetics_data, "efficiencies", None):
                     create_and_save_efficiencies(
-                        kinetic_model, kinetics_instance, rmg_kinetics_data, models
+                        kinetic_model, kinetics_instance, rmg_kinetics_data, models, labels=labels
                     )
                 if created:
                     index_new_rows(models, kinetics=kinetics_instance)
@@ -486,54 +571,72 @@ def import_kinetics(kinetics_path, kinetic_model, models, only_types=None):
 
 
 def import_thermo(thermo_path, kinetic_model, models):
+    """Import a model's thermo library.
+
+    Returns counts of imported and failed entries, and `skipped_duplicates`: the entries left
+    out because an earlier entry has the same label or structure (see TolerantThermoLibrary).
+    """
     local_context = {
         "ThermoData": ThermoData,
         "Wilhoit": Wilhoit,
         "NASAPolynomial": NASAPolynomial,
         "NASA": NASA,
     }
-    library = ThermoLibrary(label=kinetic_model.model_name)
-    # NOTE: In order for this feature to run we have to be on "rmg-py/importer" branch, may require reinstall # noqa: E501
-    library.SKIP_DUPLICATES = True
+    library = TolerantThermoLibrary(label=kinetic_model.model_name)
     library.load(thermo_path, local_context=local_context)
+    counts = {"imported": 0, "failed": 0, "skipped_duplicates": list(library.skipped)}
+    for skipped in library.skipped:
+        logger.warning(f"Thermo entry {skipped['label']} skipped: {skipped['reason']}")
     for species_name, entry in library.entries.items():
         logger.info(f"Importing Thermo entry for {species_name}")
         try:
-            species = get_or_create_species(kinetic_model, species_name, [entry.item], models)
-            thermo_data = entry.data
-            poly1, poly2 = thermo_data.polynomials
-
-            # Sanitise temperature ranges: some RMG entries have 0 K break
-            # temperatures or poly2.Tmin < poly1.Tmax (overlapping ranges).
-            t_min_1 = poly1.Tmin.value_si
-            t_max_1 = poly1.Tmax.value_si
-            t_min_2 = poly2.Tmin.value_si
-            t_max_2 = poly2.Tmax.value_si
-
-            if t_max_1 == 0:
-                t_max_1 = 1000.0
-            if t_min_2 == 0:
-                t_min_2 = 1000.0
-            if t_min_2 < t_max_1:
-                t_min_2 = t_max_1
-
-            thermo, _ = models.Thermo.objects.get_or_create(
-                species=species,
-                coeffs_poly1=poly1.coeffs.tolist(),
-                coeffs_poly2=poly2.coeffs.tolist(),
-                temp_min_1=t_min_1,
-                temp_max_1=t_max_1,
-                temp_min_2=t_min_2,
-                temp_max_2=t_max_2,
-            )
-            thermo_comment = models.ThermoComment.objects.create(
-                kinetic_model=kinetic_model, thermo=thermo
-            )
-            thermo_comment.comment = entry.long_desc or entry.short_desc or thermo_comment.comment
-            thermo.save()
-            thermo_comment.save()
+            with transaction.atomic():
+                import_thermo_entry(kinetic_model, species_name, entry, models)
+            counts["imported"] += 1
         except Exception:
-            logger.exception("Failed to import entry")
+            counts["failed"] += 1
+            logger.exception(f"Failed to import thermo entry {species_name}")
+    return counts
+
+
+def import_thermo_entry(kinetic_model, species_name, entry, models):
+    species = get_or_create_species(kinetic_model, species_name, [entry.item], models)
+    thermo_data = entry.data
+    poly1, poly2 = thermo_data.polynomials
+
+    # Sanitise temperature ranges: some RMG entries have 0 K break
+    # temperatures or poly2.Tmin < poly1.Tmax (overlapping ranges).
+    t_min_1 = poly1.Tmin.value_si
+    t_max_1 = poly1.Tmax.value_si
+    t_min_2 = poly2.Tmin.value_si
+    t_max_2 = poly2.Tmax.value_si
+
+    if t_max_1 == 0:
+        t_max_1 = 1000.0
+    if t_min_2 == 0:
+        t_min_2 = 1000.0
+    if t_min_2 < t_max_1:
+        t_min_2 = t_max_1
+
+    thermo, _ = models.Thermo.objects.get_or_create(
+        species=species,
+        coeffs_poly1=poly1.coeffs.tolist(),
+        coeffs_poly2=poly2.coeffs.tolist(),
+        temp_min_1=t_min_1,
+        temp_max_1=t_max_1,
+        temp_min_2=t_min_2,
+        temp_max_2=t_max_2,
+    )
+    # One link per model and thermo row, so importing a model again adds no second link.
+    comment = entry.long_desc or entry.short_desc or ""
+    thermo_comment = models.ThermoComment.objects.filter(
+        kinetic_model=kinetic_model, thermo=thermo).first()
+    if thermo_comment is None:
+        models.ThermoComment.objects.create(
+            kinetic_model=kinetic_model, thermo=thermo, comment=comment)
+    elif comment and not thermo_comment.comment:
+        thermo_comment.comment = comment
+        thermo_comment.save(update_fields=["comment"])
 
 
 def create_and_save_authorships(source, author_data, models):
