@@ -294,6 +294,8 @@ class Command(BaseCommand):
                 for skipped in thermo_counts["skipped_duplicates"]:
                     self.stdout.write(self.style.WARNING(
                         f"     skipped thermo entry {skipped['label']}: {skipped['reason']}"))
+                for label, state in thermo_counts["excited_states"].items():
+                    self.stdout.write(f"     electronic state of {label}: {state}")
             except Exception as e:
                 self.stderr.write(f"   ⚠️ Thermo import failed: {e}")
         

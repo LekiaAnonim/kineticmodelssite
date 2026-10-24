@@ -127,6 +127,10 @@ class Species(models.Model):
     prime_id = models.CharField("PrIMe ID", blank=True, max_length=9)
     cas_number = models.CharField("CAS Registry Number", blank=True, max_length=400)
     isomers = models.ManyToManyField("Isomer")
+    # Blank for the ground state. InChI and SMILES cannot express an electronic excitation,
+    # so OH(A2Sigma+) shares its structures with OH; this field keeps the two species apart.
+    # The term symbol when the source gives one (A^2S+), otherwise "excited".
+    electronic_state = models.CharField(max_length=50, blank=True, default="", db_index=True)
     external_identifiers = GenericRelation("provenance.ExternalIdentifier")
 
     def __str__(self):
