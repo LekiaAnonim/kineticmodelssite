@@ -74,9 +74,12 @@ def structure_key(molecule):
     return f"{molecule.to_inchi_key()}-{molecule.multiplicity}"
 
 
-def species_key(structure_keys):
-    """One key per species; a resonance collection's structures normally share one key."""
-    return "|".join(sorted(set(key for key in structure_keys if key)))
+def species_key(structure_keys, electronic_state=""):
+    """One key per species; a resonance collection's structures normally share one key.
+
+    An excited state (OH*) has its ground state's structures, so its state is appended."""
+    key = "|".join(sorted(set(key for key in structure_keys if key)))
+    return f"{key}@{electronic_state}" if key and electronic_state else key
 
 
 def inchikey_of(key):
@@ -86,11 +89,13 @@ def inchikey_of(key):
 
 def inchikey_species_map():
     """Standard InChIKey -> species id, read from Structure.structure_key, which is the
-    source of truth for species identifiers. The lowest species id wins a shared key."""
+    source of truth for species identifiers. The lowest species id wins a shared key.
+    An InChIKey denotes the ground state, so excited-state species are left out."""
     from database.models import Structure
 
     mapping = {}
     rows = (Structure.objects.exclude(structure_key="").exclude(isomer__species=None)
+            .filter(isomer__species__electronic_state="")
             .order_by("isomer__species").values_list("structure_key", "isomer__species"))
     for key, species_id in rows:
         inchikey = inchikey_of(key)

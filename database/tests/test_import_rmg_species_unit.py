@@ -15,7 +15,8 @@ from database.scripts.import_rmg_models import (
     import_thermo,
     species_record,
 )
-from database.scripts.rmg_libraries import TolerantThermoLibrary
+from database.scripts.rmg_libraries import TolerantThermoLibrary, smiles_txt_states
+from database.services.chemical_identity import inchikey_species_map, species_key
 from rmgpy.thermo import NASA, NASAPolynomial, ThermoData, Wilhoit
 
 MODELS = SimpleNamespace(**{name: getattr(db, name) for name in (
@@ -43,6 +44,8 @@ ADJ = {
     "H2O": "1 O u0 p2 c0 {2,S} {3,S}\n2 H u0 p0 c0 {1,S}\n3 H u0 p0 c0 {1,S}",
     "AR": "1 Ar u0 p4 c0",
 }
+# Labels written with the ground-state adjacency list (no term symbol line).
+SAME_AS = {"OHV": "OH", "OHX": "OH"}
 
 THERMO_CONTEXT = {"ThermoData": ThermoData, "Wilhoit": Wilhoit, "NASAPolynomial": NASAPolynomial, "NASA": NASA}
 
@@ -50,7 +53,7 @@ THERMO_CONTEXT = {"ThermoData": ThermoData, "Wilhoit": Wilhoit, "NASAPolynomial"
 def thermo_library_text(labels):
     entries = []
     for index, label in enumerate(labels):
-        adjacency = ADJ[label.rstrip("V")] if label == "OHV" else ADJ[label]
+        adjacency = ADJ[SAME_AS.get(label, label)]
         entries.append(f'''entry(
     index = {index},
     label = "{label}",
@@ -68,7 +71,7 @@ def thermo_library_text(labels):
 
 def kinetics_library_files(directory):
     with open(os.path.join(directory, "dictionary.txt"), "w") as handle:
-        for label in ("H", "O2", "O", "OH", "H2O", "HCCO", "CO", "AR"):
+        for label in ("H", "O2", "O", "OH", "OH*", "H2O", "HCCO", "CO", "AR"):
             handle.write(f"{label}\n{ADJ[label]}\n\n")
     with open(os.path.join(directory, "reactions.py"), "w") as handle:
         handle.write('''name = "test"
@@ -98,11 +101,38 @@ entry(
     kinetics = Arrhenius(A=(1.0e+14,'cm^3/(mol*s)'), n=0, Ea=(0,'cal/mol'), T0=(1,'K')),
     shortDesc = """The chemkin file reaction is HCCO + O <=> H + CO + CO""",
 )
+
+entry(
+    index = 3,
+    label = "OH* + AR <=> OH + AR",
+    degeneracy = 1.0,
+    kinetics = Arrhenius(A=(2.17e+10,'cm^3/(mol*s)'), n=0.5, Ea=(2060,'cal/mol'), T0=(1,'K')),
+    shortDesc = """The chemkin file reaction is OH* + AR <=> OH + AR""",
+)
 ''')
 
 
+def model_folder(root, name, thermo_labels, smiles_txt=None, kinetics=False):
+    """<root>/<name>/ laid out like an RMG-models folder."""
+    folder = os.path.join(root, name)
+    os.makedirs(os.path.join(folder, "RMG-Py-thermo-library"))
+    thermo_path = os.path.join(folder, "RMG-Py-thermo-library", "ThermoLibrary.py")
+    with open(thermo_path, "w") as handle:
+        handle.write(thermo_library_text(thermo_labels))
+    if smiles_txt is not None:
+        with open(os.path.join(folder, "SMILES.txt"), "w") as handle:
+            handle.write(smiles_txt)
+    kinetics_path = None
+    if kinetics:
+        os.makedirs(os.path.join(folder, "RMG-Py-kinetics-library"))
+        kinetics_library_files(os.path.join(folder, "RMG-Py-kinetics-library"))
+        kinetics_path = os.path.join(folder, "RMG-Py-kinetics-library", "reactions.py")
+    return thermo_path, kinetics_path
+
+
 def molecule(label):
-    return Molecule().from_adjacency_list(ADJ[label])
+    adjacency = ADJ[SAME_AS.get(label, label)].replace("molecularTermSymbol A^2S+\n", "")
+    return Molecule().from_adjacency_list(adjacency)
 
 
 def resonance_forms(label):
@@ -116,28 +146,46 @@ class TolerantThermoLibraryTests(SimpleTestCase):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory)
 
-    def load(self, labels):
+    def load(self, labels, declared_states=None):
         path = os.path.join(self.directory, "ThermoLibrary.py")
         with open(path, "w") as handle:
             handle.write(thermo_library_text(labels))
         library = TolerantThermoLibrary(label="test")
+        library.declared_states = declared_states
         library.load(path, local_context=dict(THERMO_CONTEXT))
         return library
 
-    def test_keeps_first_entry_of_a_structure_and_reports_the_rest(self):
+    def test_term_symbol_keeps_excited_and_ground_state_apart(self):
         library = self.load(["OH*", "OH", "OHV", "CO", "CO"])
-        self.assertEqual(list(library.entries), ["OH*", "CO"])
+        self.assertEqual(list(library.entries), ["OH*", "OH", "CO"])
+        self.assertEqual(library.states, {"OH*": "A^2S+", "OH": "", "CO": ""})
         skipped = {(s["label"], s["kept"]) for s in library.skipped}
-        self.assertEqual(skipped, {("OH", "OH*"), ("OHV", "OH*"), ("CO", "CO")})
-        oh = next(s for s in library.skipped if s["label"] == "OH")
-        self.assertIn("the kept entry OH* is the one with a term symbol", oh["reason"])
-        repeated = next(s for s in library.skipped if s["label"] == "CO")
-        self.assertEqual(repeated["reason"], "label repeated")
+        self.assertEqual(skipped, {("OHV", "OH"), ("CO", "CO")})
+        ohv = next(s for s in library.skipped if s["label"] == "OHV")
+        self.assertEqual(ohv["reason"], "same structure, multiplicity and electronic state as OH")
 
-    def test_term_symbol_of_a_skipped_entry_is_reported(self):
-        library = self.load(["OH", "OH*"])
-        self.assertEqual(list(library.entries), ["OH"])
-        self.assertIn("OH* had an electronic term symbol", library.skipped[0]["reason"])
+    def test_declared_state_keeps_an_entry_without_term_symbol(self):
+        library = self.load(["OHX", "OH"], declared_states={"OHX": "excited"})
+        self.assertEqual(list(library.entries), ["OHX", "OH"])
+        self.assertEqual(library.states["OHX"], "excited")
+        self.assertEqual(library.skipped, [])
+
+    def test_undeclared_excited_entry_is_a_reported_duplicate(self):
+        library = self.load(["OHX", "OH"])
+        self.assertEqual(list(library.entries), ["OHX"])
+        self.assertEqual([(s["label"], s["kept"]) for s in library.skipped], [("OH", "OHX")])
+
+    def test_smiles_txt_states(self):
+        with open(os.path.join(self.directory, "SMILES.txt"), "w") as handle:
+            handle.write("OH\t[OH]\nOHX\texcited[OH]\t! Confirmed by someone\n"
+                         "! Deleted by someone: CH*\texcited[CH]\nCH\t[CH]\n")
+        self.assertEqual(smiles_txt_states(self.directory), {"OHX": "excited"})
+
+    def test_species_key_and_hash_carry_the_state(self):
+        self.assertEqual(species_key(["KEY-2"], "excited"), "KEY-2@excited")
+        self.assertEqual(species_key(["KEY-2"]), "KEY-2")
+        isomers = [SimpleNamespace(id=7)]
+        self.assertNotEqual(get_species_hash(isomers, "excited"), get_species_hash(isomers))
 
 
 class SpeciesIdentityTests(TestCase):
@@ -174,6 +222,23 @@ class SpeciesIdentityTests(TestCase):
         b = get_or_create_species(self.model, "CH2(S)", [singlet], MODELS)
         self.assertNotEqual(a.pk, b.pk)
 
+    def test_excited_state_is_its_own_record(self):
+        ground = get_or_create_species(self.model, "OH", [molecule("OH")], MODELS)
+        excited = get_or_create_species(self.model, "OH*", [molecule("OH")], MODELS,
+                                        electronic_state="A^2S+")
+        again = get_or_create_species(None, "", [molecule("OH")], MODELS, electronic_state="A^2S+")
+        self.assertNotEqual(ground.pk, excited.pk)
+        self.assertEqual(excited.pk, again.pk)
+        self.assertEqual((ground.electronic_state, excited.electronic_state), ("", "A^2S+"))
+        self.assertEqual(set(ground.isomers.all()), set(excited.isomers.all()))
+        excited.refresh_from_db()
+        ground.refresh_from_db()
+        self.assertNotEqual(ground.hash, excited.hash)
+        self.assertEqual(self.names(ground), ["OH"])
+        self.assertEqual(self.names(excited), ["OH*"])
+        # An InChIKey is a ground state.
+        self.assertEqual(set(inchikey_species_map().values()), {ground.pk})
+
     def test_existing_split_records_are_reused_not_multiplied(self):
         # Records an older import left behind: one resonance form, and the whole set.
         forms = resonance_forms("HCCO")
@@ -202,18 +267,21 @@ class SpeciesIdentityTests(TestCase):
         get_or_create_species(self.model, "OH", [molecule("OH")], MODELS)
         self.assertEqual(self.names(species), ["OH"])
 
-    def test_two_names_for_one_structure_are_both_kept(self):
+    def test_two_ground_state_names_for_one_structure_are_both_kept(self):
         species = get_or_create_species(self.model, "OH", [molecule("OH")], MODELS)
-        get_or_create_species(self.model, "OH*", [molecule("OH")], MODELS)
-        self.assertEqual(self.names(species), ["OH", "OH*"])
+        get_or_create_species(self.model, "HYDROXYL", [molecule("OH")], MODELS)
+        self.assertEqual(self.names(species), ["HYDROXYL", "OH"])
 
     def test_historical_models_keep_the_isomer_set_identity(self):
         legacy = SimpleNamespace(**vars(MODELS))
         legacy.Structure = SimpleNamespace(_meta=SimpleNamespace(get_fields=lambda: []))
+        legacy.Species = SimpleNamespace(objects=db.Species.objects,
+                                         _meta=SimpleNamespace(get_fields=lambda: []))
         forms = resonance_forms("HCCO")
         one = get_or_create_species(None, "", forms[:1], MODELS)
         isomers = list(one.isomers.all())
-        other = species_record(isomers + [isomers[0]], forms[:1], legacy)
+        other = species_record(isomers + [isomers[0]], forms[:1], legacy, electronic_state="excited")
+        self.assertEqual(other.pk, one.pk)
         self.assertEqual(other.hash, get_species_hash(isomers))
 
 
@@ -222,45 +290,61 @@ class LibraryImportTests(TestCase):
         self.directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.directory)
         self.model = db.KineticModel.objects.create(model_name="test model")
-        self.thermo_path = os.path.join(self.directory, "ThermoLibrary.py")
-        with open(self.thermo_path, "w") as handle:
-            handle.write(thermo_library_text(["H", "O", "O2", "OH*", "OH", "H2O", "HCCO", "CO", "AR"]))
-        kinetics_directory = os.path.join(self.directory, "kinetics")
-        os.mkdir(kinetics_directory)
-        kinetics_library_files(kinetics_directory)
-        self.kinetics_path = os.path.join(kinetics_directory, "reactions.py")
+        self.thermo_path, self.kinetics_path = model_folder(
+            self.directory, "model", ["H", "O", "O2", "OH*", "OH", "H2O", "HCCO", "CO", "AR"],
+            kinetics=True)
 
-    def test_thermo_import_reports_skipped_entries(self):
+    def record(self, name, model=None):
+        return db.Species.objects.get(speciesname__kinetic_model=model or self.model,
+                                      speciesname__name=name)
+
+    def test_thermo_import_keeps_ground_and_excited_state(self):
         counts = import_thermo(self.thermo_path, self.model, MODELS)
         self.assertEqual(counts["failed"], 0)
-        self.assertEqual([(s["label"], s["kept"]) for s in counts["skipped_duplicates"]], [("OH", "OH*")])
+        self.assertEqual(counts["skipped_duplicates"], [])
+        self.assertEqual(counts["excited_states"], {"OH*": "A^2S+"})
+        self.assertNotEqual(self.record("OH").pk, self.record("OH*").pk)
+        self.assertEqual(self.record("OH*").thermo_set.count(), 1)
+        self.assertEqual(self.record("OH").thermo_set.count(), 1)
 
     def test_importing_twice_adds_no_second_thermo_link(self):
         import_thermo(self.thermo_path, self.model, MODELS)
         import_thermo(self.thermo_path, self.model, MODELS)
         links = db.ThermoComment.objects.filter(kinetic_model=self.model)
-        self.assertEqual(links.count(), 8)
-        self.assertEqual(links.values("thermo").distinct().count(), 8)
+        self.assertEqual(links.count(), 9)
+        self.assertEqual(links.values("thermo").distinct().count(), 9)
 
     def test_reaction_and_collider_species_are_named(self):
         import_thermo(self.thermo_path, self.model, MODELS)
         counts = import_kinetics(self.kinetics_path, self.model, MODELS)
         self.assertEqual(counts["failed"], 0)
-        self.assertEqual(counts["imported"], 3)
+        self.assertEqual(counts["imported"], 4)
         names = db.SpeciesName.objects.filter(kinetic_model=self.model)
         self.assertFalse(names.filter(name="").exists())
         per_record = {}
         for row in names:
             per_record.setdefault(row.species_id, set()).add(row.name)
-        self.assertIn({"OH", "OH*"}, per_record.values())
+        self.assertIn({"OH"}, per_record.values())
+        self.assertIn({"OH*"}, per_record.values())
         self.assertIn({"HCCO"}, per_record.values())
         efficiency_names = {
             name for name in db.SpeciesName.objects.filter(
                 kinetic_model=self.model, species__efficiency__isnull=False).values_list("name", flat=True)}
         self.assertEqual(efficiency_names, {"H2O", "AR"})
-        hcco = db.Species.objects.get(speciesname__name="HCCO")
+        hcco = self.record("HCCO")
         self.assertGreater(hcco.isomers.count(), 1)
         self.assertEqual(db.Species.objects.filter(isomers__formula__formula="C2HO").distinct().count(), 1)
+
+    def test_quenching_reaction_keeps_two_species(self):
+        import_thermo(self.thermo_path, self.model, MODELS)
+        import_kinetics(self.kinetics_path, self.model, MODELS)
+        oh, oh_star, ar = self.record("OH"), self.record("OH*"), self.record("AR")
+        reaction = db.Reaction.objects.get(stoichiometry__species=oh_star)
+        rows = set(reaction.stoichiometry_set.values_list("species_id", "coeff"))
+        self.assertEqual(rows, {(oh_star.pk, -1.0), (ar.pk, -1.0), (oh.pk, 1.0), (ar.pk, 1.0)})
+        left, right = reaction.canonical_key.split(" = ")
+        self.assertNotEqual(left, right)
+        self.assertIn("@A^2S+", reaction.canonical_key)
 
     def test_kinetics_without_thermo_still_names_species(self):
         import_kinetics(self.kinetics_path, self.model, MODELS)
@@ -268,4 +352,16 @@ class LibraryImportTests(TestCase):
         self.assertFalse(names.filter(name="").exists())
         self.assertEqual(
             set(names.values_list("name", flat=True)),
-            {"H", "O2", "O", "OH", "H2O", "HCCO", "CO", "AR"})
+            {"H", "O2", "O", "OH", "OH*", "H2O", "HCCO", "CO", "AR"})
+        self.assertEqual(self.record("OH*").electronic_state, "A^2S+")
+
+    def test_smiles_txt_marks_an_excited_state_without_term_symbol(self):
+        thermo_path, _ = model_folder(self.directory, "konnov-like", ["OHX", "OH"],
+                                      smiles_txt="OHX\texcited[OH]\nOH\t[OH]\n")
+        model = db.KineticModel.objects.create(model_name="konnov-like")
+        counts = import_thermo(thermo_path, model, MODELS)
+        self.assertEqual(counts["skipped_duplicates"], [])
+        self.assertEqual(counts["excited_states"], {"OHX": "excited"})
+        ohx, oh = self.record("OHX", model), self.record("OH", model)
+        self.assertNotEqual(ohx.pk, oh.pk)
+        self.assertEqual(ohx.electronic_state, "excited")

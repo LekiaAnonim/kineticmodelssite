@@ -285,9 +285,10 @@ class Command(BaseCommand):
         if Molecule is None:
             return
 
-        # Distinct species across the selected models.
+        # Distinct species across the selected models. An InChIKey, PubChem or ChEBI entry is
+        # a ground state, so excited-state species (OH*) get no exactMatch to one.
         species_ids = list(
-            SpeciesName.objects.filter(kinetic_model_id__in=model_ids)
+            SpeciesName.objects.filter(kinetic_model_id__in=model_ids, species__electronic_state="")
             .values_list("species_id", flat=True)
             .distinct()
         )

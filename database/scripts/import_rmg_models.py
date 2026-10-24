@@ -13,7 +13,8 @@ from django.db.models import Q
 from dateutil import parser
 from rmgpy import kinetics, constants
 from rmgpy.quantity import RateCoefficient
-from database.scripts.rmg_libraries import TolerantKineticsLibrary, TolerantThermoLibrary
+from database.scripts.rmg_libraries import (
+    TolerantKineticsLibrary, TolerantThermoLibrary, smiles_txt_states)
 from rmgpy.thermo import NASA, ThermoData, Wilhoit, NASAPolynomial
 
 from django.conf import settings
@@ -141,13 +142,16 @@ def filter_fields(fields, filter_value=None):
     return {k: v for k, v in fields.items() if v != filter_value}
 
 
-def get_species_hash(isomers):
+def get_species_hash(isomers, electronic_state=""):
     isomer_fingerprint = "".join(sorted(set(str(isomer.id) for isomer in isomers)))
+    if electronic_state:
+        # An excited state has the same isomers as the ground state.
+        isomer_fingerprint += f"@{electronic_state}"
 
     return hashlib.md5(bytes(isomer_fingerprint, "UTF-8")).hexdigest()
 
 
-def get_or_create_species(kinetic_model, name, molecules, models):
+def get_or_create_species(kinetic_model, name, molecules, models, electronic_state=""):
     formula = molecules[0].get_formula()
     formula_obj, _ = models.Formula.objects.get_or_create(formula=formula)
     isomers = []
@@ -179,7 +183,7 @@ def get_or_create_species(kinetic_model, name, molecules, models):
                 defaults={"smiles": smiles, "multiplicity": multiplicity, "isomer": isomer},
             )
 
-    species = species_record(isomers, molecules, models)
+    species = species_record(isomers, molecules, models, electronic_state)
     add_species_name(species, kinetic_model, name, models)
 
     return species
@@ -193,38 +197,52 @@ def molecule_key(molecule):
         return None
 
 
+def has_field(model, name):
+    """False for the historical models of old data migrations, which predate newer fields."""
+    return any(field.name == name for field in model._meta.get_fields())
+
+
 def has_structure_keys(models):
-    """False for the historical models of old data migrations, which predate structure_key."""
-    return any(field.name == "structure_key" for field in models.Structure._meta.get_fields())
+    return has_field(models.Structure, "structure_key")
 
 
-def species_record(isomers, molecules, models):
-    """The one species record for these molecules.
+def new_species(isomers, models, electronic_state):
+    if not has_field(models.Species, "electronic_state"):
+        species, created = models.Species.objects.get_or_create(hash=get_species_hash(isomers))
+    else:
+        species, created = models.Species.objects.get_or_create(
+            hash=get_species_hash(isomers, electronic_state),
+            defaults={"electronic_state": electronic_state})
+    if created:
+        species.isomers.add(*isomers)
+    return species
+
+
+def species_record(isomers, molecules, models, electronic_state=""):
+    """The one species record for these molecules in this electronic state.
 
     A thermo entry gives one resonance form of a radical and a reaction gives all of them, so
     the isomer sets differ. The record is therefore found by structure key (InChIKey plus
     multiplicity: shared by resonance forms, different for spin states) or by a shared isomer,
-    and missing resonance forms are added to it. The hash stays the isomer-set fingerprint
-    (signals.py keeps it current).
+    and missing resonance forms are added to it. An excited state (OH*) has the structures of
+    its ground state, so the electronic state is part of the identity too. The hash stays the
+    isomer-set fingerprint plus the state (signals.py keeps it current).
     """
     keys = {molecule_key(molecule) for molecule in molecules}
     if not has_structure_keys(models) or len(keys) != 1 or None in keys:
         # Old data migrations, or molecules that are not resonance forms of one structure.
-        species, created = models.Species.objects.get_or_create(hash=get_species_hash(isomers))
-        if created:
-            species.isomers.add(*isomers)
-        return species
+        return new_species(isomers, models, electronic_state)
 
     isomer_ids = {isomer.id for isomer in isomers}
     candidates = models.Species.objects.filter(
         Q(isomers__in=isomer_ids) | Q(isomers__structure__structure_key__in=keys)
-    ).distinct()
-    held = {species: set(species.isomers.values_list("id", flat=True)) for species in candidates}
+    )
+    if has_field(models.Species, "electronic_state"):
+        candidates = candidates.filter(electronic_state=electronic_state)
+    held = {species: set(species.isomers.values_list("id", flat=True))
+            for species in candidates.distinct()}
     if not held:
-        species, created = models.Species.objects.get_or_create(hash=get_species_hash(isomers))
-        if created:
-            species.isomers.add(*isomers)
-        return species
+        return new_species(isomers, models, electronic_state)
     # Older imports left one record per resonance set. Prefer a record that already holds
     # every form here, then the most complete record, then the oldest.
     covering = [s for s, ids in held.items() if isomer_ids <= ids]
@@ -279,7 +297,7 @@ def index_new_rows(models, reaction=None, kinetics=None):
         kinetics.save(update_fields=["rate_fingerprint"])
 
 
-def get_or_create_reaction(kinetic_model, rmg_reaction, models):
+def get_or_create_reaction(kinetic_model, rmg_reaction, models, states=None):
     """
     Create and save a reaction from an RMG reaction
 
@@ -287,6 +305,7 @@ def get_or_create_reaction(kinetic_model, rmg_reaction, models):
     If a reaction already exists, it is looked up and returned.
     The uniqueness of a reaction consists of a set of species
     and respective stoichiometric coefficients.
+    `states` maps species labels to electronic states (see model_states).
     """
 
     reversible = rmg_reaction.reversible
@@ -308,6 +327,7 @@ def get_or_create_reaction(kinetic_model, rmg_reaction, models):
                 name or "",
                 rmg_species.molecule,
                 models,
+                electronic_state=(states or {}).get(name, ""),
             )
             reactant_coeff = sum(-1 for reactant in reactants if reactant == rmg_species)
             product_coeff = sum(1 for product in products if product == rmg_species)
@@ -441,14 +461,17 @@ def create_general_kinetics_data(rmg_kinetics_data):
     )
 
 
-def labels_by_structure_key(species_dict):
-    """Structure key -> label for the species of a library dictionary.
+def labels_by_structure_key(species_dict, states=None):
+    """Structure key -> label for the ground-state species of a library dictionary.
 
     Collider efficiencies are written as SMILES, so this is how their species get the
-    mechanism's name. A key shared by two labels (OH and OH*) names neither.
+    mechanism's name. A SMILES is a ground state, so excited labels (OH*) are left out; a key
+    shared by two ground-state labels names neither.
     """
     labels = {}
     for label, rmg_species in (species_dict or {}).items():
+        if (states or {}).get(label):
+            continue
         for key in {molecule_key(molecule) for molecule in rmg_species.molecule} - {None}:
             labels[key] = None if labels.get(key, label) != label else label
     return {key: label for key, label in labels.items() if label}
@@ -521,16 +544,28 @@ def kinetics_local_context():
     }
 
 
-def import_kinetics(kinetics_path, kinetic_model, models, only_types=None):
+def model_states(library_path):
+    """label -> electronic state declared in the model's SMILES.txt (the `excited` prefix).
+
+    The RMG-Py libraries sit in <model>/RMG-Py-*-library/, and SMILES.txt in <model>/.
+    """
+    return smiles_txt_states(os.path.dirname(os.path.dirname(os.path.abspath(library_path))))
+
+
+def import_kinetics(kinetics_path, kinetic_model, models, only_types=None, states=None):
     """Import a model's kinetics library; only_types limits it to RMG kinetics class names.
 
-    Returns counts of imported, skipped and failed entries."""
+    `states` (label -> electronic state) defaults to the model's SMILES.txt; a term symbol in
+    the library dictionary wins over it. Returns counts of imported, skipped and failed
+    entries."""
     local_context = kinetics_local_context()
     # Older RMG accepted reactions that RMG 4 refuses; skip just those, not the whole library.
     library = TolerantKineticsLibrary(label=kinetic_model.model_name)
     library.SKIP_DUPLICATES = True
     library.load(kinetics_path, local_context=local_context)
-    labels = labels_by_structure_key(getattr(library, "species_dict", None))
+    states = {**(model_states(kinetics_path) if states is None else states),
+              **getattr(library, "term_symbols", {})}
+    labels = labels_by_structure_key(getattr(library, "species_dict", None), states)
     counts = {"imported": 0, "skipped": 0, "failed": 0, "rejected": len(library.rejected)}
     for label, reason in library.rejected:
         logger.warning(f"RMG cannot load reaction {label} ({reason}); skipped")
@@ -543,7 +578,7 @@ def import_kinetics(kinetics_path, kinetic_model, models, only_types=None):
                 rmg_kinetics_data = entry.data
                 comment = entry.short_desc
                 rmg_reaction = entry.item
-                reaction = get_or_create_reaction(kinetic_model, rmg_reaction, models)
+                reaction = get_or_create_reaction(kinetic_model, rmg_reaction, models, states)
                 kinetics_data = create_kinetics_data(kinetic_model, rmg_kinetics_data, models)
                 base_fields = get_base_kinetics_data_fields(rmg_kinetics_data)
 
@@ -570,11 +605,13 @@ def import_kinetics(kinetics_path, kinetic_model, models, only_types=None):
     return counts
 
 
-def import_thermo(thermo_path, kinetic_model, models):
+def import_thermo(thermo_path, kinetic_model, models, states=None):
     """Import a model's thermo library.
 
-    Returns counts of imported and failed entries, and `skipped_duplicates`: the entries left
-    out because an earlier entry has the same label or structure (see TolerantThermoLibrary).
+    `states` (label -> electronic state) defaults to the model's SMILES.txt; an entry's term
+    symbol wins over it. Returns counts of imported and failed entries, `excited_states`
+    (label -> state) and `skipped_duplicates`: the entries left out because an earlier entry
+    has the same label, or the same structure in the same state (see TolerantThermoLibrary).
     """
     local_context = {
         "ThermoData": ThermoData,
@@ -583,15 +620,18 @@ def import_thermo(thermo_path, kinetic_model, models):
         "NASA": NASA,
     }
     library = TolerantThermoLibrary(label=kinetic_model.model_name)
+    library.declared_states = model_states(thermo_path) if states is None else states
     library.load(thermo_path, local_context=local_context)
-    counts = {"imported": 0, "failed": 0, "skipped_duplicates": list(library.skipped)}
+    counts = {"imported": 0, "failed": 0, "skipped_duplicates": list(library.skipped),
+              "excited_states": {label: state for label, state in library.states.items() if state}}
     for skipped in library.skipped:
         logger.warning(f"Thermo entry {skipped['label']} skipped: {skipped['reason']}")
     for species_name, entry in library.entries.items():
         logger.info(f"Importing Thermo entry for {species_name}")
         try:
             with transaction.atomic():
-                import_thermo_entry(kinetic_model, species_name, entry, models)
+                import_thermo_entry(kinetic_model, species_name, entry, models,
+                                    library.states.get(species_name, ""))
             counts["imported"] += 1
         except Exception:
             counts["failed"] += 1
@@ -599,8 +639,9 @@ def import_thermo(thermo_path, kinetic_model, models):
     return counts
 
 
-def import_thermo_entry(kinetic_model, species_name, entry, models):
-    species = get_or_create_species(kinetic_model, species_name, [entry.item], models)
+def import_thermo_entry(kinetic_model, species_name, entry, models, electronic_state=""):
+    species = get_or_create_species(
+        kinetic_model, species_name, [entry.item], models, electronic_state=electronic_state)
     thermo_data = entry.data
     poly1, poly2 = thermo_data.polynomials
 
