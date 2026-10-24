@@ -48,11 +48,14 @@ def species_tables(species_ids=None):
     for isomer_id, key in Structure.objects.filter(isomer_id__in=isomer_ids).values_list("isomer_id", "structure_key"):
         keys_of_isomer[isomer_id].append(key)
     formula_of_isomer = dict(Isomer.objects.filter(id__in=isomer_ids).values_list("id", "formula__formula"))
+    states = dict(Species.objects.filter(id__in=isomers_of).exclude(electronic_state="")
+                  .values_list("id", "electronic_state"))
     keys, formulas = {}, {}
     for species_id, isomers in isomers_of.items():
         structure_keys = [key for isomer in isomers for key in keys_of_isomer.get(isomer, [])]
         # A species with an unkeyed structure has no reliable identity yet.
-        keys[species_id] = species_key(structure_keys) if structure_keys and all(structure_keys) else ""
+        keys[species_id] = (species_key(structure_keys, states.get(species_id, ""))
+                            if structure_keys and all(structure_keys) else "")
         formulas[species_id] = formula_of_isomer.get(min(isomers))
     return keys, formulas
 

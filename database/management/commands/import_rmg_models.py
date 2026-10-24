@@ -288,9 +288,14 @@ class Command(BaseCommand):
         if thermo_path:
             try:
                 with transaction.atomic():
-                    import_thermo(thermo_path, kinetic_model, models)
+                    thermo_counts = import_thermo(thermo_path, kinetic_model, models)
                 thermo_count = ThermoComment.objects.filter(kinetic_model=kinetic_model).count()
                 self.stdout.write(f"   + Imported thermo ({thermo_count} entries)")
+                for skipped in thermo_counts["skipped_duplicates"]:
+                    self.stdout.write(self.style.WARNING(
+                        f"     skipped thermo entry {skipped['label']}: {skipped['reason']}"))
+                for label, state in thermo_counts["excited_states"].items():
+                    self.stdout.write(f"     electronic state of {label}: {state}")
             except Exception as e:
                 self.stderr.write(f"   ⚠️ Thermo import failed: {e}")
         
