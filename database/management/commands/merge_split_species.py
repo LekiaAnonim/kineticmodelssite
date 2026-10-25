@@ -1,4 +1,4 @@
-"""Merge species records that are one species (same structure keys and electronic state).
+"""Merge species records that are one species (they share a structure key in one electronic state).
 
 Older imports made one record for a thermo entry's single resonance form and another for the
 reaction's full set. The record with the most forms is kept (the one the importer picks); every
@@ -15,7 +15,7 @@ from database.services.cleanup import merge_split_species
 
 
 class Command(BaseCommand):
-    help = "Merge species records that hold the same structures in the same electronic state."
+    help = "Merge species records that share a structure key in the same electronic state."
 
     def add_arguments(self, parser):
         parser.add_argument("--apply", action="store_true", help="Write the changes (default: dry run).")

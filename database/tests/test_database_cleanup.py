@@ -119,6 +119,53 @@ class MergeSplitSpeciesTests(TestCase):
         self.assertFalse(any({ground.pk, excited.pk} <= set(g) for g in groups))
 
 
+class MultiKeySplitTests(TestCase):
+    """CH2COOH: its resonance forms have different structure keys, so the one-form record and
+    the full record do not have the same key set."""
+
+    def test_records_sharing_one_key_are_merged(self):
+        model = db.KineticModel.objects.create(model_name="a")
+        single, full = split_records("CH2COOH")
+        identities = cleanup.species_identities()
+        self.assertLess(identities[single.pk][0], identities[full.pk][0])
+        db.SpeciesName.objects.create(species=single, kinetic_model=model, name="CH2COOH")
+        db.SpeciesName.objects.create(species=full, kinetic_model=model, name="CH2COOH")
+        self.assertEqual(cleanup.split_groups(), [[full.pk, single.pk]])
+        self.assertEqual(cleanup.integrity_report()["model_names_on_2plus_records"], 1)
+        report = cleanup.merge_split_species(apply=True)
+        self.assertEqual(report["records_merged_away"], 1)
+        self.assertFalse(db.Species.objects.filter(pk=single.pk).exists())
+        self.assertEqual(list(db.SpeciesName.objects.values_list("species_id", "name")),
+                         [(full.pk, "CH2COOH")])
+        report = cleanup.integrity_report()
+        self.assertEqual((report["split_species"], report["model_names_on_2plus_records"],
+                          report["species_with_stale_hash"]), (0, 0, 0))
+
+    def test_one_form_records_are_joined_through_the_full_record(self):
+        # Two models' thermo entries written as different forms, then a reaction with both.
+        get_or_create_species(None, "", resonance_forms("CH2COOH"), MODELS)
+        isomers = list(db.Isomer.objects.filter(formula__formula="C2H3O2").order_by("pk"))
+        db.Species.objects.all().delete()
+        one_form = []
+        for isomer in isomers:
+            record = db.Species.objects.create(hash=f"form {isomer.pk}")
+            record.isomers.add(isomer)
+            one_form.append(record.pk)
+        full = db.Species.objects.create(hash="full")
+        full.isomers.add(*isomers)
+        # The full record is the newest, but it has the most forms.
+        self.assertEqual(cleanup.split_groups(), [[full.pk, *one_form]])
+        cleanup.merge_split_species(apply=True)
+        self.assertEqual(list(db.Species.objects.values_list("pk", flat=True)), [full.pk])
+        self.assertEqual(set(db.Species.objects.get().isomers.all()), set(isomers))
+
+    def test_unrelated_records_stay_apart(self):
+        get_or_create_species(None, "", resonance_forms("CH2COOH"), MODELS)
+        get_or_create_species(None, "", [molecule("OH")], MODELS)
+        get_or_create_species(None, "", [molecule("CH2CO")], MODELS)
+        self.assertEqual(cleanup.split_groups(), [])
+
+
 class RebuildModelLinksTests(TestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp()
