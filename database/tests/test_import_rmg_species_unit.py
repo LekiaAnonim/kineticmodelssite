@@ -2,17 +2,20 @@ import os
 import shutil
 import tempfile
 from types import SimpleNamespace
+from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
 from rmgpy.molecule import Molecule
 from rmgpy.species import Species as RMGSpecies
 
 from database import models as db
+from database.scripts import import_rmg_models as importer
 from database.scripts.import_rmg_models import (
     get_or_create_species,
     get_species_hash,
     import_kinetics,
     import_thermo,
+    model_thermo,
     species_record,
 )
 from database.scripts.rmg_libraries import TolerantThermoLibrary, smiles_txt_states
@@ -365,3 +368,86 @@ class LibraryImportTests(TestCase):
         ohx, oh = self.record("OHX", model), self.record("OH", model)
         self.assertNotEqual(ohx.pk, oh.pk)
         self.assertEqual(ohx.electronic_state, "excited")
+
+
+class ThermoLookupTests(TestCase):
+    FIELDS = {"coeffs_poly1": [2.5, 0, 0, 0, 0, 25471.6, -0.46], "coeffs_poly2": [2.5, 0, 0, 0, 0, 25471.6, -0.46],
+              "temp_min_1": 298.0, "temp_max_1": 1000.0, "temp_min_2": 1000.0, "temp_max_2": 5000.0}
+
+    def provider_copy(self, species):
+        copy = db.Thermo.objects.create(species=species, **self.FIELDS)
+        db.ThermoRecord.objects.create(
+            species=species, structure=db.Structure.objects.filter(isomer__species=species).first(),
+            provider="rmg_thermo_library", external_id=f"copy-{copy.pk}", source_version="test",
+            label="H", nasa_thermo=copy)
+        return copy
+
+    def test_provider_copies_are_not_the_model_row(self):
+        species = get_or_create_species(None, "H", [molecule("H")], MODELS)
+        own = db.Thermo.objects.create(species=species, **self.FIELDS)
+        self.provider_copy(species)
+        self.provider_copy(species)
+        self.assertEqual(model_thermo(species, self.FIELDS, MODELS).pk, own.pk)
+
+    def test_a_row_is_made_when_only_provider_copies_exist(self):
+        species = get_or_create_species(None, "H", [molecule("H")], MODELS)
+        copy = self.provider_copy(species)
+        thermo = model_thermo(species, self.FIELDS, MODELS)
+        self.assertNotEqual(thermo.pk, copy.pk)
+        self.assertEqual(model_thermo(species, self.FIELDS, MODELS).pk, thermo.pk)
+
+    def test_import_with_provider_copies_has_no_failures(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        thermo_path, _ = model_folder(directory, "model", ["H", "OH"])
+        model = db.KineticModel.objects.create(model_name="model")
+        self.assertEqual(import_thermo(thermo_path, model, MODELS)["failed"], 0)
+        for thermo in list(db.Thermo.objects.all()):
+            for _ in range(2):
+                self.provider_copy_of(thermo)
+        counts = import_thermo(thermo_path, model, MODELS)
+        self.assertEqual(counts["failed"], 0)
+        self.assertEqual(db.ThermoComment.objects.filter(kinetic_model=model).count(), 2)
+
+    def provider_copy_of(self, thermo):
+        fields = {k: getattr(thermo, k) for k in self.FIELDS}
+        copy = db.Thermo.objects.create(species=thermo.species, **fields)
+        db.ThermoRecord.objects.create(
+            species=thermo.species, structure=db.Structure.objects.filter(isomer__species=thermo.species).first(),
+            provider="rmg_thermo_library", external_id=f"copy-{copy.pk}", source_version="test",
+            label="x", nasa_thermo=copy)
+
+
+class SpeciesCacheTests(TestCase):
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory)
+        self.model = db.KineticModel.objects.create(model_name="test model")
+        _, self.kinetics_path = model_folder(self.directory, "model", ["H"], kinetics=True)
+
+    def test_each_species_is_looked_up_once_per_import(self):
+        with mock.patch.object(importer, "get_or_create_species", wraps=importer.get_or_create_species) as spy:
+            counts = import_kinetics(self.kinetics_path, self.model, MODELS)
+        self.assertEqual(counts["failed"], 0)
+        # 9 labels (H, O2, O, OH, OH*, H2O, HCCO, CO, AR); the colliders H2O and AR are labels too.
+        self.assertEqual(spy.call_count, 9)
+
+    def test_a_failed_entry_leaves_no_stale_species(self):
+        real = importer.create_kinetics_data
+        calls = {"n": 0}
+
+        def fail_first(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ValueError("first entry fails")
+            return real(*args, **kwargs)
+
+        with mock.patch.object(importer, "create_kinetics_data", side_effect=fail_first):
+            counts = import_kinetics(self.kinetics_path, self.model, MODELS)
+        self.assertEqual((counts["imported"], counts["failed"]), (3, 1))
+        names = set(db.SpeciesName.objects.filter(kinetic_model=self.model).values_list("name", flat=True))
+        # O2 only takes part in the failed first reaction, so it was rolled back; H was rebuilt.
+        self.assertNotIn("O2", names)
+        self.assertIn("H", names)
+        for species_id in db.Stoichiometry.objects.values_list("species_id", flat=True):
+            self.assertTrue(db.Species.objects.filter(pk=species_id).exists())
