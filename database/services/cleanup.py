@@ -268,8 +268,31 @@ def model_links(model):
         list(db.ThermoComment.objects.filter(kinetic_model=model)
              .values("thermo_id", "thermo__species_id", "comment")),
         list(db.KineticsComment.objects.filter(kinetic_model=model)
-             .values("kinetics_id", "kinetics__reaction__canonical_key", "comment")),
+             .values("kinetics_id", "kinetics__reaction_id", "kinetics__reaction__canonical_key", "comment")),
     )
+
+
+def names_of_species(name_rows):
+    """species id -> the model's names for it, from model_links()[0]."""
+    names = defaultdict(set)
+    for n in name_rows:
+        if n["name"]:
+            names[n["species_id"]].add(n["name"])
+    return names
+
+
+def label_equations(kinetics_rows, names):
+    """kinetics id -> the reaction written with the model's species names, e.g. C3H5 + H = C3H6.
+
+    It identifies a reaction across a corrected structure: the corrected species is a new
+    record, so the reaction's species and canonical key change, but its names do not."""
+    reactions = {k["kinetics__reaction_id"] for k in kinetics_rows}
+    rows = defaultdict(list)
+    for reaction_id, species_id, coeff in db.Stoichiometry.objects.filter(
+            reaction_id__in=reactions).values_list("reaction_id", "species_id", "coeff"):
+        label = "|".join(sorted(names.get(species_id, ()))) or f"#{species_id}"
+        rows[reaction_id].append((label, coeff))
+    return {k["kinetics_id"]: frozenset(rows[k["kinetics__reaction_id"]]) for k in kinetics_rows}
 
 
 def run_import(func, path, model):
@@ -312,16 +335,25 @@ def rebuild_model_links(model, thermo_path, kinetics_path):
     keep_names = {(n["species_id"], n["name"]) for n in old[0]
                   if (n["species_id"], n["name"]) not in made_pairs and not names_ok
                   and not (n["name"] in made_names if n["name"] else n["species_id"] in named_species)}
+    # Thermo and kinetics made for the same species or reaction replace the old link. "The
+    # same" is judged by record and, for a corrected structure (a new record), by the model's
+    # names: the species' name, or the reaction written with names.
+    old_names, made_names_of = names_of_species(old[0]), names_of_species(made[0])
     made_thermo = {t["thermo_id"] for t in made[1]}
     covered = {t["thermo__species_id"] for t in made[1]}
+    covered_names = set().union(*(made_names_of[s] for s in covered)) if covered else set()
     keep_thermo = {t["thermo_id"]: t["comment"] for t in old[1]
                    if t["thermo_id"] not in made_thermo and thermo_status != "ok"
-                   and t["thermo__species_id"] not in covered}
+                   and t["thermo__species_id"] not in covered
+                   and not old_names[t["thermo__species_id"]] & covered_names}
     made_kinetics = {k["kinetics_id"] for k in made[2]}
     made_reactions = {k["kinetics__reaction__canonical_key"] for k in made[2]} - {""}
+    made_equations = set(label_equations(made[2], made_names_of).values())
+    old_equations = label_equations(old[2], old_names)
     keep_kinetics = {k["kinetics_id"]: k["comment"] for k in old[2]
                      if k["kinetics_id"] not in made_kinetics and kinetics_status != "ok"
-                     and k["kinetics__reaction__canonical_key"] not in made_reactions}
+                     and k["kinetics__reaction__canonical_key"] not in made_reactions
+                     and old_equations[k["kinetics_id"]] not in made_equations}
     db.SpeciesName.objects.bulk_create([
         db.SpeciesName(species_id=species, kinetic_model=model, name=name) for species, name in keep_names])
     db.ThermoComment.objects.bulk_create([
