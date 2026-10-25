@@ -7,7 +7,8 @@ current importer adds correct links but deletes nothing, so the old links stay n
 ones. Four steps repair this. Each step runs in transactions and writes only with apply=True;
 without it the work is done and rolled back, so a dry run reports exactly what would change.
 
-1. merge_split_species: one record per species (its structure keys plus electronic state).
+1. merge_split_species: one record per species (records in one electronic state that share
+   a structure key).
    Every row that refers to another record of the same species is moved to the kept record,
    and reactions and kinetics that become identical are merged as well.
 2. rebuild_model_links: replaces a model's names, thermo links and kinetics links with what the
@@ -125,8 +126,7 @@ def keep_oldest(model, group_fields, **filters):
 def species_identities():
     """species id -> (structure keys of its isomers, electronic state).
 
-    Resonance forms share a structure key and spin states do not, so two records with the same
-    identity are the same species. Records without structure keys are left out."""
+    Records without structure keys are left out."""
     keys_of_isomer = defaultdict(set)
     for isomer_id, key in db.Structure.objects.exclude(structure_key="").values_list("isomer_id", "structure_key"):
         keys_of_isomer[isomer_id].add(key)
@@ -140,12 +140,32 @@ def species_identities():
 def split_groups():
     """Groups of records that are one species, the record to keep first.
 
-    The kept record is the one the importer picks: the most resonance forms, then the oldest."""
-    by_identity = defaultdict(list)
-    for species_id, identity in species_identities().items():
-        by_identity[identity].append(species_id)
+    Records in one electronic state that share a structure key are one species (spin states
+    have different keys). Resonance forms usually share one key, but not when their InChI H
+    layers differ: an older import left CH2COOH as a record with [CH2]C(=O)O and another with
+    that form and C=C([O])O. So records are joined through any key they share, also through a
+    third record, not only when all their keys are the same. The kept record is the one the
+    importer picks: the most resonance forms, then the oldest."""
+    parent = {}
+
+    def root(species_id):
+        while parent[species_id] != species_id:
+            parent[species_id] = parent[parent[species_id]]
+            species_id = parent[species_id]
+        return species_id
+
+    first_holder = {}
+    for species_id, (keys, state) in species_identities().items():
+        parent.setdefault(species_id, species_id)
+        for key in keys:
+            holder = first_holder.setdefault((key, state), species_id)
+            parent[root(species_id)] = root(holder)
+    groups = defaultdict(list)
+    for species_id in parent:
+        groups[root(species_id)].append(species_id)
     size = dict(db.Species.objects.annotate(n=Count("isomers")).values_list("pk", "n"))
-    return [sorted(ids, key=lambda sp: (-size[sp], sp)) for ids in by_identity.values() if len(ids) > 1]
+    return sorted(sorted(ids, key=lambda sp: (-size[sp], sp))
+                  for ids in groups.values() if len(ids) > 1)
 
 
 def stoichiometry_hash(reaction_id):
