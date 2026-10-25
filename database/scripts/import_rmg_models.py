@@ -3,13 +3,13 @@ import math
 import os
 import re
 import hashlib
+from collections import ChainMap, defaultdict
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import habanero
 from django.db import transaction, IntegrityError
-from django.db.models import Q
 from dateutil import parser
 from rmgpy import kinetics, constants
 from rmgpy.quantity import RateCoefficient
@@ -233,14 +233,23 @@ def species_record(isomers, molecules, models, electronic_state=""):
         # Old data migrations, or molecules that are not resonance forms of one structure.
         return new_species(isomers, models, electronic_state)
 
+    # Simple indexed lookups: isomers with these structure keys, then the species that hold
+    # any of them, then all isomers of those species.
     isomer_ids = {isomer.id for isomer in isomers}
-    candidates = models.Species.objects.filter(
-        Q(isomers__in=isomer_ids) | Q(isomers__structure__structure_key__in=keys)
-    )
+    keyed = set(models.Structure.objects.filter(structure_key__in=keys)
+                .values_list("isomer_id", flat=True))
+    links = models.Species.isomers.through.objects
+    species_ids = set(links.filter(isomer_id__in=isomer_ids | keyed)
+                      .values_list("species_id", flat=True))
+    candidates = models.Species.objects.filter(pk__in=species_ids)
     if has_field(models.Species, "electronic_state"):
         candidates = candidates.filter(electronic_state=electronic_state)
-    held = {species: set(species.isomers.values_list("id", flat=True))
-            for species in candidates.distinct()}
+    candidates = list(candidates)
+    isomers_of = defaultdict(set)
+    for species_id, isomer_id in links.filter(species_id__in=[s.pk for s in candidates]) \
+            .values_list("species_id", "isomer_id"):
+        isomers_of[species_id].add(isomer_id)
+    held = {species: isomers_of[species.pk] for species in candidates}
     if not held:
         return new_species(isomers, models, electronic_state)
     # Older imports left one record per resonance set. Prefer a record that already holds
@@ -297,7 +306,7 @@ def index_new_rows(models, reaction=None, kinetics=None):
         kinetics.save(update_fields=["rate_fingerprint"])
 
 
-def get_or_create_reaction(kinetic_model, rmg_reaction, models, states=None):
+def get_or_create_reaction(kinetic_model, rmg_reaction, models, states=None, cache=None):
     """
     Create and save a reaction from an RMG reaction
 
@@ -305,7 +314,9 @@ def get_or_create_reaction(kinetic_model, rmg_reaction, models, states=None):
     If a reaction already exists, it is looked up and returned.
     The uniqueness of a reaction consists of a set of species
     and respective stoichiometric coefficients.
-    `states` maps species labels to electronic states (see model_states).
+    `states` maps species labels to electronic states (see model_states). `cache` (a dict,
+    kept for one library import) maps a label and state to its species record, so a species
+    that takes part in many reactions is looked up once.
     """
 
     reversible = rmg_reaction.reversible
@@ -322,13 +333,19 @@ def get_or_create_reaction(kinetic_model, rmg_reaction, models, states=None):
     with transaction.atomic():
         for name, rmg_species in species_map.items():
             # The label is the species name in the mechanism (from the library dictionary).
-            species = get_or_create_species(
-                kinetic_model,
-                name or "",
-                rmg_species.molecule,
-                models,
-                electronic_state=(states or {}).get(name, ""),
-            )
+            state = (states or {}).get(name, "")
+            key = ("label", name, state) if name and cache is not None else None
+            species = cache.get(key) if key else None
+            if species is None:
+                species = get_or_create_species(
+                    kinetic_model,
+                    name or "",
+                    rmg_species.molecule,
+                    models,
+                    electronic_state=state,
+                )
+                if key:
+                    cache[key] = species
             reactant_coeff = sum(-1 for reactant in reactants if reactant == rmg_species)
             product_coeff = sum(1 for product in products if product == rmg_species)
 
@@ -478,11 +495,20 @@ def labels_by_structure_key(species_dict, states=None):
 
 
 def create_and_save_efficiencies(
-    kinetic_model, kinetics_instance, rmg_kinetics_data, models, labels=None
+    kinetic_model, kinetics_instance, rmg_kinetics_data, models, labels=None, cache=None
 ):
     for rmg_molecule, efficiency in rmg_kinetics_data.efficiencies.items():
-        name = (labels or {}).get(molecule_key(rmg_molecule), "")
-        species = get_or_create_species(kinetic_model, name, [rmg_molecule], models)
+        structure = molecule_key(rmg_molecule)
+        name = (labels or {}).get(structure, "")
+        # A labelled collider is the reaction species with that label (ground state).
+        key = None
+        if cache is not None:
+            key = ("label", name, "") if name else (("structure", structure) if structure else None)
+        species = cache.get(key) if key else None
+        if species is None:
+            species = get_or_create_species(kinetic_model, name, [rmg_molecule], models)
+            if key:
+                cache[key] = species
         efficiency = models.Efficiency.objects.create(
             species=species, kinetics=kinetics_instance, efficiency=efficiency
         )
@@ -566,6 +592,9 @@ def import_kinetics(kinetics_path, kinetic_model, models, only_types=None, state
     states = {**(model_states(kinetics_path) if states is None else states),
               **getattr(library, "term_symbols", {})}
     labels = labels_by_structure_key(getattr(library, "species_dict", None), states)
+    # Species looked up during this import. Each entry's new lookups are kept apart until the
+    # entry commits, because a failed entry rolls back the species it created.
+    cache = {}
     counts = {"imported": 0, "skipped": 0, "failed": 0, "rejected": len(library.rejected)}
     for label, reason in library.rejected:
         logger.warning(f"RMG cannot load reaction {label} ({reason}); skipped")
@@ -573,12 +602,15 @@ def import_kinetics(kinetics_path, kinetic_model, models, only_types=None, state
         if only_types is not None and entry.data.__class__.__name__ not in only_types:
             counts["skipped"] += 1
             continue
+        pending = {}
+        lookups = ChainMap(pending, cache)
         try:
             with transaction.atomic():
                 rmg_kinetics_data = entry.data
                 comment = entry.short_desc
                 rmg_reaction = entry.item
-                reaction = get_or_create_reaction(kinetic_model, rmg_reaction, models, states)
+                reaction = get_or_create_reaction(
+                    kinetic_model, rmg_reaction, models, states, cache=lookups)
                 kinetics_data = create_kinetics_data(kinetic_model, rmg_kinetics_data, models)
                 base_fields = get_base_kinetics_data_fields(rmg_kinetics_data)
 
@@ -588,7 +620,8 @@ def import_kinetics(kinetics_path, kinetic_model, models, only_types=None, state
                 # PLOG and Chebyshev kinetics have no collider efficiencies.
                 if created and getattr(rmg_kinetics_data, "efficiencies", None):
                     create_and_save_efficiencies(
-                        kinetic_model, kinetics_instance, rmg_kinetics_data, models, labels=labels
+                        kinetic_model, kinetics_instance, rmg_kinetics_data, models,
+                        labels=labels, cache=lookups,
                     )
                 if created:
                     index_new_rows(models, kinetics=kinetics_instance)
@@ -598,6 +631,7 @@ def import_kinetics(kinetics_path, kinetic_model, models, only_types=None, state
                     kinetic_model=kinetic_model,
                     defaults={"comment": comment},
                 )
+            cache.update(pending)
             counts["imported"] += 1
         except Exception:
             counts["failed"] += 1
@@ -639,6 +673,22 @@ def import_thermo(thermo_path, kinetic_model, models, states=None):
     return counts
 
 
+def model_thermo(species, fields, models):
+    """The species' thermo row with these coefficients, created when there is none.
+
+    Thermo enrichment keeps its own copy of a polynomial for every source that lists it
+    (ThermoRecord.nasa_thermo, often identical to a model's), so several rows can match; the
+    copies a provider record owns are not a model's row and are left out.
+    """
+    rows = models.Thermo.objects.filter(species=species, **fields)
+    if has_field(models.Thermo, "provider_record"):
+        rows = rows.filter(provider_record__isnull=True)
+    thermo = rows.order_by("pk").first()
+    if thermo is None:
+        thermo = models.Thermo.objects.create(species=species, **fields)
+    return thermo
+
+
 def import_thermo_entry(kinetic_model, species_name, entry, models, electronic_state=""):
     species = get_or_create_species(
         kinetic_model, species_name, [entry.item], models, electronic_state=electronic_state)
@@ -659,15 +709,14 @@ def import_thermo_entry(kinetic_model, species_name, entry, models, electronic_s
     if t_min_2 < t_max_1:
         t_min_2 = t_max_1
 
-    thermo, _ = models.Thermo.objects.get_or_create(
-        species=species,
-        coeffs_poly1=poly1.coeffs.tolist(),
-        coeffs_poly2=poly2.coeffs.tolist(),
-        temp_min_1=t_min_1,
-        temp_max_1=t_max_1,
-        temp_min_2=t_min_2,
-        temp_max_2=t_max_2,
-    )
+    thermo = model_thermo(species, {
+        "coeffs_poly1": poly1.coeffs.tolist(),
+        "coeffs_poly2": poly2.coeffs.tolist(),
+        "temp_min_1": t_min_1,
+        "temp_max_1": t_max_1,
+        "temp_min_2": t_min_2,
+        "temp_max_2": t_max_2,
+    }, models)
     # One link per model and thermo row, so importing a model again adds no second link.
     comment = entry.long_desc or entry.short_desc or ""
     thermo_comment = models.ThermoComment.objects.filter(
