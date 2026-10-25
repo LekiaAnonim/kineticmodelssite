@@ -267,6 +267,39 @@ class CorrectedStructureTests(TestCase):
         self.assertEqual((result["kinetics_links"]["removed"], result["kinetics_links"]["kept_after_import_failure"]),
                          (1, 0))
 
+    def test_a_record_with_two_names_is_split_and_its_old_reactions_replaced(self):
+        # An older import gave C3H5 and C3H5X one record, so C3H5X <=> C3H5 became C3H5 = C3H5.
+        allyl = get_or_create_species(self.model, "C3H5", [Molecule().from_smiles("[CH2]C=C")], MODELS)
+        db.SpeciesName.objects.create(species=allyl, kinetic_model=self.model, name="C3H5X")
+        h = get_or_create_species(self.model, "H", [Molecule().from_smiles("[H]")], MODELS)
+        propene = get_or_create_species(self.model, "C3H6", [Molecule().from_smiles("C=CC")], MODELS)
+        old = []
+        for rows in (((-1, allyl), (-1, h), (1, propene)), ((-1, allyl), (1, allyl))):
+            kinetics = db.Kinetics.objects.create(reaction=reaction(*rows), raw_data=RATE)
+            db.KineticsComment.objects.create(kinetics=kinetics, kinetic_model=self.model)
+            old.append(kinetics)
+        # The corrected library: C3H5X is 1-propenyl.
+        with open(self.dictionary, "w") as handle:
+            for label, smiles in (("H", "[H]"), ("C3H5", "[CH2]C=C"), ("C3H5X", "[CH]=CC"), ("C3H6", "C=CC")):
+                handle.write(f"{label}\n{Molecule().from_smiles(smiles).to_adjacency_list()}\n")
+        with open(self.reactions, "a") as handle:
+            handle.write('entry(\n    index = 1,\n    label = "C3H5X <=> C3H5",\n    degeneracy = 1.0,\n'
+                         "    kinetics = Arrhenius(A=(1e+10,'s^-1'), n=0, Ea=(30000,'cal/mol'), T0=(1,'K')),\n"
+                         '    shortDesc = """test""",\n)\n')
+        real = cleanup.import_kinetics
+
+        def one_entry_fails(path, model, models):
+            return {**real(path, model, models), "failed": 1}
+
+        with mock.patch.object(cleanup, "import_kinetics", one_entry_fails):
+            result = cleanup.rebuild_model_links(self.model, None, self.reactions)
+        links = db.KineticsComment.objects.filter(kinetic_model=self.model)
+        self.assertEqual(links.count(), 2)
+        self.assertFalse(links.filter(kinetics__in=old).exists())  # both old links were replaced
+        c3h5x = db.Species.objects.get(speciesname__kinetic_model=self.model, speciesname__name="C3H5X")
+        self.assertNotEqual(c3h5x.pk, allyl.pk)
+        self.assertEqual(result["kinetics_links"]["kept_after_import_failure"], 0)
+
 
 class PruneUnlinkedRowsTests(TestCase):
     def test_only_rows_nothing_refers_to_are_deleted(self):

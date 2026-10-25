@@ -18,6 +18,7 @@ without it the work is done and rolled back, so a dry run reports exactly what w
    to any more. Rows that only provider data or derived tables refer to are kept and counted.
 4. integrity_report: counts each defect. Run it before and after the steps as the evidence.
 """
+import itertools
 import re
 from collections import Counter, defaultdict
 from types import SimpleNamespace
@@ -301,18 +302,28 @@ def names_of_species(name_rows):
     return names
 
 
-def label_equations(kinetics_rows, names):
-    """kinetics id -> the reaction written with the model's species names, e.g. C3H5 + H = C3H6.
+def label_equations(kinetics_rows, names, most=256):
+    """kinetics id -> the reaction written with the model's species names, e.g. C3H5 + H = C3H6,
+    as a set of spellings.
 
     It identifies a reaction across a corrected structure: the corrected species is a new
-    record, so the reaction's species and canonical key change, but its names do not."""
+    record, so the reaction's species and canonical key change, but its names do not. A record
+    an older import gave several names (C3H2, C3H2(S) and H2CCC(S) on one record) could stand
+    for any of them, so the reaction gets one spelling per choice of names."""
     reactions = {k["kinetics__reaction_id"] for k in kinetics_rows}
     rows = defaultdict(list)
     for reaction_id, species_id, coeff in db.Stoichiometry.objects.filter(
             reaction_id__in=reactions).values_list("reaction_id", "species_id", "coeff"):
-        label = "|".join(sorted(names.get(species_id, ()))) or f"#{species_id}"
-        rows[reaction_id].append((label, coeff))
-    return {k["kinetics_id"]: frozenset(rows[k["kinetics__reaction_id"]]) for k in kinetics_rows}
+        labels = sorted(names.get(species_id, ())) or [f"#{species_id}"]
+        rows[reaction_id].append([(label, coeff) for label in labels])
+    spellings = {}
+    for reaction_id, options in rows.items():
+        count = 1
+        for o in options:
+            count *= len(o)
+        spellings[reaction_id] = ({frozenset(choice) for choice in itertools.product(*options)} if count <= most
+                                  else {frozenset(o[0] for o in options)})
+    return {k["kinetics_id"]: spellings.get(k["kinetics__reaction_id"], set()) for k in kinetics_rows}
 
 
 def run_import(func, path, model):
@@ -368,12 +379,12 @@ def rebuild_model_links(model, thermo_path, kinetics_path):
                    and not old_names[t["thermo__species_id"]] & covered_names}
     made_kinetics = {k["kinetics_id"] for k in made[2]}
     made_reactions = {k["kinetics__reaction__canonical_key"] for k in made[2]} - {""}
-    made_equations = set(label_equations(made[2], made_names_of).values())
+    made_equations = set().union(*label_equations(made[2], made_names_of).values())
     old_equations = label_equations(old[2], old_names)
     keep_kinetics = {k["kinetics_id"]: k["comment"] for k in old[2]
                      if k["kinetics_id"] not in made_kinetics and kinetics_status != "ok"
                      and k["kinetics__reaction__canonical_key"] not in made_reactions
-                     and old_equations[k["kinetics_id"]] not in made_equations}
+                     and not old_equations[k["kinetics_id"]] & made_equations}
     db.SpeciesName.objects.bulk_create([
         db.SpeciesName(species_id=species, kinetic_model=model, name=name) for species, name in keep_names])
     db.ThermoComment.objects.bulk_create([
