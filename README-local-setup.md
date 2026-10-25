@@ -206,10 +206,11 @@ To populate the database by importing from RMG-models:
 ```bash
 # Make sure RMGMODELSPATH is set in .env.dev
 python manage.py migrate
-python reimport_kinetics.py
+python manage.py import_rmg_models                 # all models
+python manage.py import_rmg_models --model <name>  # one model
 ```
 
-> **Note:** The import process can take a while depending on the number of models.
+> **Note:** `migrate` does not import models. The import process can take a while depending on the number of models.
 
 ---
 

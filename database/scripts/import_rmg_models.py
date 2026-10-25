@@ -223,15 +223,17 @@ def species_record(isomers, molecules, models, electronic_state=""):
 
     A thermo entry gives one resonance form of a radical and a reaction gives all of them, so
     the isomer sets differ. The record is therefore found by structure key (InChIKey plus
-    multiplicity: shared by resonance forms, different for spin states) or by a shared isomer,
-    and missing resonance forms are added to it. An excited state (OH*) has the structures of
-    its ground state, so the electronic state is part of the identity too. The hash stays the
-    isomer-set fingerprint plus the state (signals.py keeps it current).
+    multiplicity: different for spin states) or by a shared isomer, and missing resonance forms
+    are added to it. Resonance forms usually share one key, but not when their InChI H layers
+    differ ([CH2]C(=O)O and C=C([O])O), so a record that holds any of the keys is a candidate.
+    An excited state (OH*) has the structures of its ground state, so the electronic state is
+    part of the identity too. The hash stays the isomer-set fingerprint plus the state
+    (signals.py keeps it current).
     """
-    keys = {molecule_key(molecule) for molecule in molecules}
-    if not has_structure_keys(models) or len(keys) != 1 or None in keys:
-        # Old data migrations, or molecules that are not resonance forms of one structure.
+    if not has_structure_keys(models):
+        # Old data migrations: their historical models have no structure keys.
         return new_species(isomers, models, electronic_state)
+    keys = {molecule_key(molecule) for molecule in molecules} - {None}
 
     # Simple indexed lookups: isomers with these structure keys, then the species that hold
     # any of them, then all isomers of those species.
