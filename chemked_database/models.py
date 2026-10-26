@@ -584,7 +584,17 @@ class ExperimentDatapoint(models.Model):
         blank=True,
         related_name='datapoints'
     )
-    
+
+    # Speciation measurement: the columns of each concentration profile's rows
+    independent_variables = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "ChemKED independent-variables in column order: name, units, primary, and the "
+            "species-name / InChI / SMILES a sweep may name"
+        )
+    )
+
     class Meta:
         db_table = 'chemked_datapoints'
         ordering = ['dataset', 'temperature']
@@ -930,15 +940,30 @@ class ConcentrationTimeProfileMeasurementDatapoint(models.Model):
 
 class ConcentrationProfile(models.Model):
     """
-    Individual species concentration profile within a CTP measurement datapoint.
-    The schema allows multiple concentration-profiles per datapoint (one per tracked species).
+    One species profile of a speciation datapoint (ChemKED concentration-profiles).
+
+    A datapoint has one profile per measured species. Each row of ``values`` holds one value
+    per independent variable of the datapoint (``ExperimentDatapoint.independent_variables``),
+    then the amount, then optionally its uncertainty, as in the ChemKED file.
     """
+    datapoint = models.ForeignKey(
+        ExperimentDatapoint,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='concentration_profiles'
+    )
+    # Older single-measurement form; profiles imported from ChemKED files use ``datapoint``
     measurement = models.ForeignKey(
         ConcentrationTimeProfileMeasurementDatapoint,
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name='concentration_profiles'
     )
 
+    # A CompositionSpecies with no composition and no amount: the species name, and its
+    # InChI / SMILES where the file gives them
     species = models.ForeignKey(
         'CompositionSpecies',
         on_delete=models.SET_NULL,
@@ -947,22 +972,74 @@ class ConcentrationProfile(models.Model):
         help_text="Tracked species for this concentration profile"
     )
 
-    time_units = models.CharField(max_length=20, default='s')
+    time_units = models.CharField(
+        max_length=20,
+        default='s',
+        blank=True,
+        help_text="Units of the time column; blank when the profile has no time column"
+    )
     quantity_units = models.CharField(
         max_length=50,
         help_text="Species concentration units (e.g., mole fraction, ppm)"
     )
 
     values = models.JSONField(
-        help_text="Array of [time, value] or [time, value, uncertainty] pairs"
+        help_text="Rows of [independent values..., amount] or [independent values..., amount, uncertainty]"
+    )
+
+    uncertainty = models.JSONField(
+        null=True,
+        blank=True,
+        help_text=(
+            "The profile's ChemKED uncertainty block as in the file (uncertainty-type, "
+            "uncertainty, upper/lower-uncertainty, uncertainty-sourcetype, "
+            "evaluated-standard-deviation and its type, sourcetype and method)"
+        )
     )
 
     class Meta:
         db_table = 'chemked_concentration_profiles'
+        ordering = ['id']
 
     def __str__(self):
         count = len(self.values) if self.values else 0
-        return f"{self.species.species_name} ({count} points)"
+        species = self.species.species_name if self.species else 'unknown'
+        return f"{species} ({count} points)"
+
+
+class AuxiliaryProfile(models.Model):
+    """
+    A profile measured along with the species of a speciation datapoint (ChemKED
+    auxiliary-profiles), e.g. the temperature against height above a burner.
+    """
+    datapoint = models.ForeignKey(
+        ExperimentDatapoint,
+        on_delete=models.CASCADE,
+        related_name='auxiliary_profiles'
+    )
+
+    profile_type = models.CharField(
+        max_length=30,
+        help_text="Measured property: temperature, pressure, volume or velocity"
+    )
+    independent_name = models.CharField(
+        max_length=30,
+        help_text="Independent variable: distance or time"
+    )
+    independent_units = models.CharField(max_length=20)
+    quantity_units = models.CharField(max_length=50)
+
+    values = models.JSONField(
+        help_text="Rows of [independent, value] or [independent, value, uncertainty]"
+    )
+
+    class Meta:
+        db_table = 'chemked_auxiliary_profiles'
+        ordering = ['id']
+
+    def __str__(self):
+        count = len(self.values) if self.values else 0
+        return f"{self.profile_type} against {self.independent_name} ({count} points)"
 
 
 class JetStirredReactorMeasurementDatapoint(models.Model):
@@ -1581,8 +1658,10 @@ class CompositionSpecies(models.Model):
         related_name='chemked_occurrences'
     )
     
-    # Amount
+    # Amount; empty for the species of a concentration profile, which has no composition
     amount = models.FloatField(
+        null=True,
+        blank=True,
         validators=[MinValueValidator(0)],
         help_text="Amount (units depend on composition kind)"
     )

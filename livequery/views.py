@@ -255,6 +255,7 @@ QUERY_EXAMPLES = [
             "       COUNT(*) AS appearance_count\n"
             "FROM chemked_composition_species cs\n"
             "WHERE cs.species_name NOT IN ('O2','N2','Ar','He','CO2','H2O')\n"
+            "  AND cs.composition_id IS NOT NULL\n"
             "GROUP BY cs.species_name\n"
             "ORDER BY appearance_count DESC\n"
             "LIMIT 30"

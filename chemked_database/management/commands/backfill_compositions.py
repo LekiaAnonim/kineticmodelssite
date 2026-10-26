@@ -26,7 +26,12 @@ class Command(BaseCommand):
                 datapoint.save(update_fields=["composition"])
                 created += 1
 
-            for species in CompositionSpecies.objects.filter(composition__isnull=True):
+            # The species of a concentration profile has no composition on purpose
+            for species in CompositionSpecies.objects.filter(
+                composition__isnull=True,
+                concentration_profiles__isnull=True,
+                concentration_time_profiles__isnull=True,
+            ):
                 datapoint = getattr(species, "datapoint", None)
                 if datapoint and datapoint.composition:
                     species.composition = datapoint.composition

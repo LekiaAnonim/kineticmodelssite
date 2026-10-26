@@ -6,6 +6,7 @@ Designed for combustion research community and scientists.
 """
 
 import html as html_mod
+import math
 import os
 import re
 import tempfile
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from django.conf import settings
 from django.contrib import messages
+from django.core.exceptions import ObjectDoesNotExist
 from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage
 from django.db import transaction
 from django.db.models import Count, Avg, Min, Max, Q
@@ -226,6 +228,7 @@ class ChemKEDHomeView(TemplateView):
         # Top fuels (species appearing most frequently)
         context["top_fuels"] = (
             CompositionSpecies.objects
+            .filter(composition__isnull=False)  # not species measured in a profile
             .exclude(species_name__in=["O2", "N2", "Ar", "He", "CO2", "H2O"])
             .values("species_name")
             .annotate(count=Count("id"))
@@ -453,7 +456,8 @@ class SpeciesDatapointsView(ListView):
             ExperimentDatapoint.objects
             .filter(
                 Q(composition__species__species_name=species_name) |
-                Q(dataset__common_properties__composition__species__species_name=species_name)
+                Q(dataset__common_properties__composition__species__species_name=species_name) |
+                Q(concentration_profiles__species__species_name=species_name)
             )
             .select_related("dataset", "ignition_delay", "temperature_quantity", "pressure_quantity")
             .distinct()
@@ -3969,6 +3973,12 @@ class DatasetExportView(View):
                 'datapoints__composition__species',
                 'datapoints__time_histories',
                 'datapoints__volume_history',
+                'datapoints__concentration_profiles__species',
+                'datapoints__auxiliary_profiles',
+                'datapoints__jet_stirred_reactor_measurement',
+                'datapoints__outlet_concentration_measurement',
+                'datapoints__burner_stabilized_flame_speciation_measurement',
+                'datapoints__concentration_time_profile_measurement',
             ),
             pk=pk
         )
@@ -4136,13 +4146,7 @@ class DatasetExportView(View):
                     'species': []
                 }
                 for sp in cp.composition.species.all():
-                    sp_dict = {
-                        'species-name': sp.species_name,
-                        'amount': [sp.amount]
-                    }
-                    if sp.inchi:
-                        sp_dict['InChI'] = sp.inchi
-                    composition['species'].append(sp_dict)
+                    composition['species'].append(self._composition_species_entry(sp))
         
         # Ignition type from common properties
         ignition_type = None
@@ -4225,13 +4229,21 @@ class DatasetExportView(View):
 
             return serialized
 
-        for dp in dataset.datapoints.all():
+        # A speciation measurement (ChemKED 0.5) keeps species profiles. Its datapoints are
+        # written in file order: a temperature sweep has no datapoint temperature to sort by.
+        all_datapoints = list(dataset.datapoints.all())
+        speciation = any(dp.concentration_profiles.all() for dp in all_datapoints)
+        if speciation:
+            all_datapoints.sort(key=lambda dp: dp.pk)
+        common = getattr(dataset, 'common_properties', None)
+
+        for dp in all_datapoints:
             dp_dict = {}
             
-            # Temperature
+            # Temperature (a speciation datapoint stores 0 K when it gives none)
             temp_entry = _serialize_quantity(
                 dp.temperature_quantity,
-                fallback_value=dp.temperature,
+                fallback_value=None if speciation else dp.temperature,
                 fallback_units='kelvin',
             )
             if temp_entry:
@@ -4262,7 +4274,7 @@ class DatasetExportView(View):
                 dp_dict['composition'] = {
                     'kind': str(dp.composition.kind) if dp.composition.kind else 'mole fraction',
                     'species': [
-                        {'species-name': sp.species_name, 'amount': [sp.amount]}
+                        self._composition_species_entry(sp)
                         for sp in dp.composition.species.all()
                     ]
                 }
@@ -4348,11 +4360,15 @@ class DatasetExportView(View):
                 except dp.__class__.rate_coefficient.RelatedObjectDoesNotExist:
                     pass
 
+            if speciation:
+                dp_dict.update(self._speciation_entries(dp, common, _serialize_quantity))
+
             datapoints.append(dp_dict)
         
-        # Ensure experiment-type is a plain string (not Django TextChoices enum)
+        # Ensure experiment-type is a plain string (not Django TextChoices enum). The site's
+        # jet stirred reactor, outlet, flame and time profile types are one type in ChemKED.
         exp_type = dataset.experiment_type or 'ignition delay'
-        exp_type_str = f"{exp_type}"  # Force plain str from TextChoices
+        exp_type_str = 'speciation measurement' if speciation else f"{exp_type}"
 
         chemked_dict = {
             'file-version': dataset.file_version or 0,
@@ -4407,6 +4423,136 @@ class DatasetExportView(View):
                     chemked_dict['reaction'] = m.group(1).strip()
 
         return chemked_dict
+
+    @staticmethod
+    def _composition_species_entry(sp):
+        """A composition species as ChemKED writes it, with the uncertainty of its amount."""
+        entry = {'species-name': sp.species_name}
+        if sp.inchi:
+            entry['InChI'] = sp.inchi
+        metadata = {}
+        # PyKED cannot read an uncertainty without its type
+        if sp.amount_uncertainty_type:
+            metadata['uncertainty-type'] = sp.amount_uncertainty_type
+            for key, number in (
+                ('uncertainty', sp.amount_uncertainty),
+                ('upper-uncertainty', sp.amount_upper_uncertainty),
+                ('lower-uncertainty', sp.amount_lower_uncertainty),
+            ):
+                if number is not None:
+                    metadata[key] = number
+            if sp.amount_uncertainty_sourcetype:
+                metadata['uncertainty-sourcetype'] = sp.amount_uncertainty_sourcetype
+        if sp.amount_evaluated_standard_deviation is not None:
+            metadata['evaluated-standard-deviation'] = sp.amount_evaluated_standard_deviation
+        for key, value in (
+            ('evaluated-standard-deviation-type', sp.amount_evaluated_standard_deviation_type),
+            ('evaluated-standard-deviation-sourcetype', sp.amount_evaluated_standard_deviation_sourcetype),
+            ('evaluated-standard-deviation-method', sp.amount_evaluated_standard_deviation_method),
+        ):
+            if value:
+                metadata[key] = value
+        entry['amount'] = [sp.amount, metadata] if metadata else [sp.amount]
+        return entry
+
+    @staticmethod
+    def _speciation_entries(dp, common, serialize_quantity):
+        """The speciation measurement keys of a ChemKED 0.5 datapoint.
+
+        Profiles are written as sync_chemked stored them: species name and identifiers, units,
+        rows and uncertainty block unchanged. A reactor condition the datapoint does not store
+        itself (reactor volume, a flame's burning velocity, and residence time or flow rate
+        outside the outlet and flame records) is the dataset's common value, which every
+        datapoint of ChemKED-database repeats.
+        """
+        def extension(name):
+            try:
+                return getattr(dp, name)
+            except ObjectDoesNotExist:
+                return None
+
+        def common_quantity(field):
+            return getattr(common, f'{field}_quantity', None) if common else None
+
+        jsr = extension('jet_stirred_reactor_measurement')
+        outlet = extension('outlet_concentration_measurement')
+        flame = extension('burner_stabilized_flame_speciation_measurement')
+        time_profile = extension('concentration_time_profile_measurement')
+
+        entries = {}
+        if outlet and outlet.residence_time_quantity:
+            residence_time = serialize_quantity(outlet.residence_time_quantity)
+        elif dp.residence_time is not None and (
+            not common or common.residence_time is None
+            or not math.isclose(dp.residence_time, common.residence_time, rel_tol=1e-9)
+        ):
+            residence_time = serialize_quantity(None, fallback_value=dp.residence_time, fallback_units='s')
+        else:
+            residence_time = serialize_quantity(common_quantity('residence_time'))
+        conditions = {
+            'residence-time': residence_time,
+            'reactor-volume': serialize_quantity(common_quantity('reactor_volume')),
+            'flow-rate': serialize_quantity(
+                flame.flow_rate_quantity if flame and flame.flow_rate_quantity
+                else common_quantity('flow_rate')
+            ),
+            'environment-temperature': serialize_quantity(
+                jsr.environment_temperature_quantity if jsr else None
+            ),
+            'volumetric-flow-in-reference-state': serialize_quantity(
+                outlet.volumetric_flow_quantity if outlet else None
+            ),
+            'laminar-burning-velocity': serialize_quantity(common_quantity('laminar_burning_velocity')),
+        }
+        entries.update({key: value for key, value in conditions.items() if value})
+
+        entries['independent-variables'] = dp.independent_variables
+
+        profiles = []
+        for profile in dp.concentration_profiles.all():
+            species = profile.species
+            entry = {'species-name': species.species_name if species else ''}
+            # SMILES derived from the InChI on import is not the file's
+            if species and species.inchi:
+                entry['InChI'] = species.inchi
+            elif species and species.smiles:
+                entry['SMILES'] = species.smiles
+            entry['quantity'] = {'units': profile.quantity_units}
+            entry['values'] = profile.values
+            if profile.uncertainty:
+                entry['uncertainty'] = (
+                    [profile.uncertainty] if isinstance(profile.uncertainty, dict)
+                    else profile.uncertainty
+                )
+            profiles.append(entry)
+        entries['concentration-profiles'] = profiles
+
+        auxiliary = [
+            {
+                'type': profile.profile_type,
+                'independent': {
+                    'name': profile.independent_name,
+                    'units': profile.independent_units,
+                },
+                'quantity': {'units': profile.quantity_units},
+                'values': profile.values,
+            }
+            for profile in dp.auxiliary_profiles.all()
+        ]
+        if auxiliary:
+            entries['auxiliary-profiles'] = auxiliary
+
+        if time_profile and time_profile.timeshift_target:
+            time_shift = {
+                'target': time_profile.timeshift_target,
+                'type': time_profile.timeshift_type,
+            }
+            amount = serialize_quantity(time_profile.timeshift_amount_quantity)
+            if amount:
+                time_shift['amount'] = amount
+            entries['time-shift'] = time_shift
+
+        return entries
 
 
 class DatasetProcessView(View):

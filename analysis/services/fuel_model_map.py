@@ -121,8 +121,9 @@ def build_fuel_species_index(
     """
     _ensure_rdkit()
 
-    # Collect composition species that are fuels (not diluents)
-    qs = CompositionSpecies.objects.exclude(
+    # Collect composition species that are fuels (not diluents); the species measured in a
+    # concentration profile have no composition
+    qs = CompositionSpecies.objects.filter(composition__isnull=False).exclude(
         species_name__in=_DILUENTS
     ).select_related("composition")
 

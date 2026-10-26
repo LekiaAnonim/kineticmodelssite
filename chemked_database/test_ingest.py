@@ -18,8 +18,12 @@ from django.core.management.base import CommandError
 from django.test import SimpleTestCase, TestCase
 
 from .import_dispatcher import import_chemked_to_db
-from .management.commands.sync_chemked import experiment_type_of, time_first
-from .models import ExperimentDataset, ExperimentType
+from .management.commands.sync_chemked import (
+    experiment_type_of,
+    speciation_experiment_type,
+    time_first,
+)
+from .models import CompositionSpecies, ConcentrationProfile, ExperimentDataset, ExperimentType
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
 FIXTURE_NAME = "Test_2020_ST_7.yaml"
@@ -52,7 +56,9 @@ class SyncChemkedIngestTests(TestCase):
             self._sync("no-such-dir/missing.yaml", path=str(TESTDATA))
 
 
-# A jet-stirred reactor file of ChemKED-database (hydrogen/Cong_2009), shortened
+# A jet-stirred reactor file of ChemKED-database (hydrogen/Cong_2009), shortened. The second
+# profile adds what other files have: no InChI (pentane/Bugler_2017), a row uncertainty column
+# (ammonia/Dagaut_2022), a repeated x value (H2_O2_NOx/Seery_1981), and ppm.
 SPECIATION_FILE = """\
 file-authors:
   - name: Test Author
@@ -83,9 +89,24 @@ datapoints:
         InChI: 1S/H2/h1H
         quantity: {units: mole fraction}
         values: [[800.0, 0.0108], [900.0, 0.00751]]
+        uncertainty:
+          - evaluated-standard-deviation: 0.00045
+            evaluated-standard-deviation-type: absolute
+            evaluated-standard-deviation-sourcetype: estimated
+            evaluated-standard-deviation-method: statistical scatter
+      - species-name: NC5H12
+        quantity: {units: ppm}
+        values: [[800.0, 120.0, 12.0], [800.0, 118.0, 11.8], [900.0, 64.0, 6.4]]
+        uncertainty:
+          - {uncertainty-type: relative, uncertainty: 0.1, uncertainty-sourcetype: reported}
     pressure: [1 atm]
     composition: *comp
 """
+
+# Speciation is not measured in a rapid compression machine
+UNSUPPORTED_SPECIATION_FILE = SPECIATION_FILE.replace(
+    "kind: jet stirred reactor", "kind: rapid compression machine"
+)
 
 LBV_FILE = """\
 file-authors:
@@ -130,16 +151,18 @@ class SyncChemkedExperimentTypeTests(TestCase):
             stdout=StringIO(), stderr=self.err,
         )
 
-    def test_speciation_measurement_is_not_stored_as_ignition_delay(self):
-        rel = "hydrogen/Cong_2009/Cong_2009_jsr_p1atm.yaml"
-        self._write(rel, SPECIATION_FILE)
+    def test_speciation_on_an_unsupported_apparatus_is_not_stored(self):
+        rel = "x/rcm.yaml"
+        self._write(rel, UNSUPPORTED_SPECIATION_FILE)
 
         with self.assertRaises(CommandError):
             self._sync(rel)
 
         self.assertFalse(ExperimentDataset.objects.exists())
         self.assertIn(
-            "experiment-type 'speciation measurement' is not supported", self.err.getvalue()
+            "experiment-type 'speciation measurement' on apparatus kind"
+            " 'rapid compression machine' is not supported",
+            self.err.getvalue(),
         )
         self.assertNotIn("defaulting to", self.err.getvalue())
 
@@ -158,11 +181,11 @@ class SyncChemkedExperimentTypeTests(TestCase):
         self.assertIn("experiment-type is missing", self.err.getvalue())
 
     def test_other_files_of_the_run_are_imported(self):
-        self._write("x/jsr.yaml", SPECIATION_FILE)
+        self._write("x/rcm.yaml", UNSUPPORTED_SPECIATION_FILE)
         self._write("x/lbv.yaml", LBV_FILE)
 
         with self.assertRaisesMessage(CommandError, "1 file(s) were not imported"):
-            self._sync("x/jsr.yaml", "x/lbv.yaml")
+            self._sync("x/rcm.yaml", "x/lbv.yaml")
 
         dataset = ExperimentDataset.objects.get()
         self.assertEqual(dataset.chemked_file_path, "x/lbv.yaml")
@@ -171,8 +194,8 @@ class SyncChemkedExperimentTypeTests(TestCase):
         self.assertAlmostEqual(lbv.laminar_burning_velocity, 0.4)
 
     def test_dataset_stored_earlier_is_named_and_left_unchanged(self):
-        rel = "x/jsr.yaml"
-        self._write(rel, SPECIATION_FILE)
+        rel = "x/rcm.yaml"
+        self._write(rel, UNSUPPORTED_SPECIATION_FILE)
         stale = ExperimentDataset.objects.create(
             chemked_file_path=rel, experiment_type=ExperimentType.IGNITION_DELAY
         )
@@ -188,6 +211,123 @@ class SyncChemkedExperimentTypeTests(TestCase):
         self.assertEqual(stale.experiment_type, ExperimentType.IGNITION_DELAY)
 
 
+class SyncChemkedSpeciationTests(TestCase):
+    """ChemKED 0.5 speciation measurement files keep every profile as the file gives it."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        self.err = StringIO()
+
+    def _sync(self, text, rel="hydrogen/Cong_2009/Cong_2009_jsr_p1atm.yaml"):
+        (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / rel).write_text(text)
+        call_command(
+            "sync_chemked", path=str(self.root), files=[rel], stdout=StringIO(), stderr=self.err,
+        )
+        return ExperimentDataset.objects.get(chemked_file_path=rel)
+
+    def test_stored_as_jet_stirred_reactor_measurement(self):
+        dataset = self._sync(SPECIATION_FILE)
+
+        self.assertEqual(dataset.experiment_type, ExperimentType.JSR_MEASUREMENT)
+        datapoint = dataset.datapoints.get()
+        self.assertTrue(hasattr(datapoint, "jet_stirred_reactor_measurement"))
+        self.assertEqual(
+            datapoint.independent_variables,
+            [{"name": "temperature", "units": "K", "primary": True}],
+        )
+        self.assertAlmostEqual(datapoint.pressure, 101325.0)
+        self.assertEqual(datapoint.composition.species.count(), 3)
+
+    def test_profiles_are_kept_as_in_the_file(self):
+        source = yaml.safe_load(SPECIATION_FILE)["datapoints"][0]["concentration-profiles"]
+
+        profiles = list(self._sync(SPECIATION_FILE).datapoints.get().concentration_profiles.all())
+
+        self.assertEqual(len(profiles), 2)
+        for profile, expected in zip(profiles, source):
+            with self.subTest(species=expected["species-name"]):
+                self.assertEqual(profile.species.species_name, expected["species-name"])
+                self.assertEqual(profile.species.inchi, expected.get("InChI", ""))
+                self.assertEqual(profile.quantity_units, expected["quantity"]["units"])
+                self.assertEqual(profile.values, expected["values"])
+                self.assertEqual(profile.uncertainty, expected["uncertainty"][0])
+
+    def test_profile_species_have_no_composition_or_amount(self):
+        profile = self._sync(SPECIATION_FILE).datapoints.get().concentration_profiles.get(
+            species__species_name="NC5H12"
+        )
+
+        self.assertIsNone(profile.species.composition)
+        self.assertIsNone(profile.species.amount)
+
+    def test_reingest_replaces_profiles_and_their_species(self):
+        self._sync(SPECIATION_FILE)
+        self._sync(SPECIATION_FILE)
+
+        self.assertEqual(ConcentrationProfile.objects.count(), 2)
+        self.assertEqual(CompositionSpecies.objects.filter(composition__isnull=True).count(), 2)
+
+    def test_backfill_compositions_leaves_profile_species_alone(self):
+        self._sync(SPECIATION_FILE)
+
+        call_command("backfill_compositions", stdout=StringIO())
+
+        self.assertEqual(CompositionSpecies.objects.filter(composition__isnull=True).count(), 2)
+
+    def test_datapoint_without_profiles_is_not_stored(self):
+        document = yaml.safe_load(SPECIATION_FILE)
+        del document["datapoints"][0]["concentration-profiles"]
+
+        with self.assertRaises(CommandError):
+            self._sync(yaml.safe_dump(document))
+
+        self.assertFalse(ExperimentDataset.objects.exists())
+        self.assertIn("concentration-profiles required by schema", self.err.getvalue())
+        self.assertIn("no datapoint could be stored", self.err.getvalue())
+
+    def test_rows_must_fit_the_independent_variables(self):
+        document = yaml.safe_load(SPECIATION_FILE)
+        document["datapoints"][0]["concentration-profiles"][0]["values"][0] = [800.0]
+
+        with self.assertRaises(CommandError):
+            self._sync(yaml.safe_dump(document))
+
+        self.assertIn(
+            "concentration profile of H2 has rows that are not 2 or 3 columns long",
+            self.err.getvalue(),
+        )
+
+
+class SpeciationExperimentTypeTests(SimpleTestCase):
+    def _file(self, kind, *variables):
+        return {
+            "experiment-type": "speciation measurement",
+            "apparatus": {"kind": kind},
+            "datapoints": [{"independent-variables": [{"name": name} for name in variables]}],
+        }
+
+    def test_type_follows_the_apparatus(self):
+        for kind, variables, expected in (
+            ("jet stirred reactor", ["temperature"], ExperimentType.JSR_MEASUREMENT),
+            ("burner stabilized flame", ["distance"], ExperimentType.BSFS_MEASUREMENT),
+            ("shock tube", ["time"], ExperimentType.CONCENTRATION_TIME_PROFILE),
+            ("flow reactor", ["time"], ExperimentType.CONCENTRATION_TIME_PROFILE),
+            ("flow reactor", ["temperature", "residence-time"], ExperimentType.OUTLET_CONCENTRATION),
+            ("flow reactor", ["residence-time"], ExperimentType.OUTLET_CONCENTRATION),
+        ):
+            with self.subTest(kind=kind, variables=variables):
+                data = self._file(kind, *variables)
+                self.assertEqual(speciation_experiment_type(data), expected)
+                self.assertEqual(experiment_type_of(data), expected)
+
+    def test_other_apparatus_raises(self):
+        for data in (self._file("rapid compression machine", "time"), {"experiment-type": "x"}):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                speciation_experiment_type(data)
+
+
 class ExperimentTypeOfTests(SimpleTestCase):
     def test_site_types_are_kept(self):
         for value in ExperimentType.values:
@@ -195,6 +335,7 @@ class ExperimentTypeOfTests(SimpleTestCase):
                 self.assertEqual(experiment_type_of({"experiment-type": value}), value)
 
     def test_other_types_raise(self):
+        # A speciation measurement without an apparatus cannot be given a site type
         for data in ({}, {"experiment-type": ""}, {"experiment-type": "speciation measurement"},
                      {"experiment-type": "Ignition Delay"}):
             with self.subTest(data=data):

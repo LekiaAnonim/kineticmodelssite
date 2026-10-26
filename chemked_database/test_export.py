@@ -208,3 +208,203 @@ class DatasetExportYamlTests(TestCase):
 
     def test_pyked_validates_the_export(self):
         load_in_pyked(self._export())
+
+
+# Shortened from H2_O2_NOx/Seery_1981/Seery_1981_bsf_p76torr_4 of ChemKED-database (DOI left
+# out), keeping its repeated distance of 16.62 mm.
+FLAME_FILE = """\
+file-authors:
+  - name: Test Author
+file-version: 0
+chemked-version: 0.5.0
+reference:
+  authors:
+    - name: D.J. Seery
+    - name: M.F. Zabielski
+  journal: Symposium (International) on Combustion
+  year: 1981
+  volume: 18
+  pages: 397-404
+experiment-type: speciation measurement
+apparatus:
+  kind: burner stabilized flame
+common-properties:
+  temperature: &temperature [300 K]
+  pressure: &pressure [76 torr]
+  flow-rate: &flow [0.04932 kg * m**-2 * s**-1]
+  composition: &comp
+    kind: mole fraction
+    species:
+      - {species-name: H2, InChI: 1S/H2/h1H, amount: [0.408]}
+      - {species-name: O2, InChI: 1S/O2/c1-2, amount: [0.148]}
+      - {species-name: Ar, InChI: 1S/Ar, amount: [0.44]}
+      - {species-name: 'NO', InChI: 1S/NO/c1-2, amount: [0.0041]}
+datapoints:
+  - independent-variables:
+      - {name: distance, units: mm, primary: true}
+    concentration-profiles:
+      - species-name: 'NO'
+        InChI: 1S/NO/c1-2
+        quantity: {units: mole fraction}
+        values: [[0.0, 0.00384], [11.35, 0.002441], [16.62, 0.002324], [16.62, 0.00216]]
+        uncertainty:
+          - evaluated-standard-deviation-type: absolute
+            evaluated-standard-deviation: 0.000384
+            evaluated-standard-deviation-sourcetype: estimated
+            evaluated-standard-deviation-method: statistical scatter
+    auxiliary-profiles:
+      - type: temperature
+        independent: {name: distance, units: mm}
+        quantity: {units: K}
+        values: [[0.0, 300.0], [11.35, 1878.0], [16.62, 1830.0], [16.62, 1830.0]]
+    temperature: *temperature
+    pressure: *pressure
+    flow-rate: *flow
+    composition: *comp
+"""
+
+# Shortened from pentane/Bugler_2017/Bugler_2017_jsr_p1.05atm of ChemKED-database: species
+# with names only. A second datapoint at another residence time, a profile in ppm with a row
+# uncertainty column, and reported relative uncertainties (as in ammonia/Dagaut_2022) are added.
+JSR_FILE = """\
+file-authors:
+  - name: Test Author
+file-version: 0
+chemked-version: 0.5.0
+reference:
+  authors:
+    - name: J. Bugler
+  journal: Proceedings of the Combustion Institute
+  year: 2017
+  volume: 36
+  pages: 441-448
+experiment-type: speciation measurement
+apparatus:
+  kind: jet stirred reactor
+common-properties:
+  reactor-volume: &volume [30 cm3]
+  pressure: &pressure [1.05 atm]
+  residence-time: &time [2000.0 ms]
+  composition: &comp
+    kind: mole fraction
+    species:
+      - {species-name: NC5H12, amount: [0.01]}
+      - species-name: O2
+        amount: [0.16, {uncertainty-type: relative, uncertainty: 0.1, uncertainty-sourcetype: reported}]
+      - {species-name: HE, amount: [0.83]}
+datapoints:
+  - independent-variables:
+      - {name: temperature, units: K, primary: true}
+    concentration-profiles:
+      - species-name: NC5H12
+        quantity: {units: mole fraction}
+        values: [[500.0, 0.01], [525.0, 0.01], [550.0, 0.0098]]
+        uncertainty:
+          - evaluated-standard-deviation-type: absolute
+            evaluated-standard-deviation: 0.0005
+            evaluated-standard-deviation-sourcetype: reported
+            evaluated-standard-deviation-method: reported uncertainty
+      - species-name: CH2O
+        InChI: 1S/CH2O/c1-2/h1H2
+        quantity: {units: ppm}
+        values: [[500.0, 0.0, 0.0], [525.0, 12.0, 1.2], [550.0, 85.0, 8.5]]
+        uncertainty:
+          - {uncertainty-type: relative, uncertainty: 0.1, uncertainty-sourcetype: reported}
+    reactor-volume: *volume
+    pressure: *pressure
+    residence-time: *time
+    composition: *comp
+  - independent-variables:
+      - {name: temperature, units: K, primary: true}
+    concentration-profiles:
+      - species-name: NC5H12
+        quantity: {units: mole fraction}
+        values: [[500.0, 0.01], [600.0, 0.0071]]
+    reactor-volume: *volume
+    pressure: *pressure
+    residence-time: [1000 ms]
+    composition: *comp
+"""
+
+SPECIATION_KEYS = ("independent-variables", "concentration-profiles", "auxiliary-profiles")
+
+
+class SpeciationExportTests(TestCase):
+    """A speciation measurement is written back as ChemKED 0.5 speciation datapoints."""
+
+    def _round_trip(self, text, rel):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_text(text)
+        call_command(
+            "sync_chemked", path=str(root), files=[rel], stdout=io.StringIO(), stderr=io.StringIO()
+        )
+        dataset = ExperimentDataset.objects.get(chemked_file_path=rel)
+        response = self.client.get(
+            reverse("chemked_database:dataset-export", args=[dataset.pk]), {"format": "yaml"}
+        )
+        self.assertEqual(response.status_code, 200, response.content[:300])
+        return yaml.safe_load(text), yaml.safe_load(response.content)
+
+    def test_profiles_are_written_as_stored(self):
+        for text, rel in ((FLAME_FILE, "x/flame.yaml"), (JSR_FILE, "x/jsr.yaml")):
+            source, exported = self._round_trip(text, rel)
+            with self.subTest(rel=rel):
+                self.assertEqual(exported["experiment-type"], "speciation measurement")
+                self.assertEqual(exported["apparatus"], source["apparatus"])
+                self.assertEqual(len(exported["datapoints"]), len(source["datapoints"]))
+                for point, expected in zip(exported["datapoints"], source["datapoints"]):
+                    for key in SPECIATION_KEYS:
+                        self.assertEqual(point.get(key), expected.get(key), key)
+
+    def test_pyked_validates_the_export(self):
+        for text, rel in ((FLAME_FILE, "x/flame.yaml"), (JSR_FILE, "x/jsr.yaml")):
+            with self.subTest(rel=rel):
+                load_in_pyked(self._round_trip(text, rel)[1])
+
+    def test_flame_conditions(self):
+        point = self._round_trip(FLAME_FILE, "x/flame.yaml")[1]["datapoints"][0]
+
+        self.assertEqual(point["temperature"], ["300.0 K"])
+        self.assertEqual(point["pressure"], ["76.0 torr"])
+        self.assertEqual(point["flow-rate"], ["0.04932 kg * m**-2 * s**-1"])
+        # Composition species are written largest amount first
+        self.assertEqual(
+            [species["species-name"] for species in point["composition"]["species"]],
+            ["Ar", "H2", "O2", "NO"],
+        )
+
+    def test_reactor_conditions_in_file_order(self):
+        first, second = self._round_trip(JSR_FILE, "x/jsr.yaml")[1]["datapoints"]
+
+        # A temperature sweep has no datapoint temperature, so none is written
+        self.assertNotIn("temperature", first)
+        self.assertEqual(first["residence-time"], ["2000.0 ms"])
+        self.assertEqual(second["residence-time"], ["1.0 s"])
+        self.assertEqual(first["reactor-volume"], ["30.0 cm3"])
+        self.assertIn(
+            {"species-name": "NC5H12", "amount": [0.01]}, first["composition"]["species"]
+        )
+
+    def test_composition_amount_uncertainty_is_kept(self):
+        species = self._round_trip(JSR_FILE, "x/jsr.yaml")[1]["datapoints"][0]["composition"]["species"]
+
+        self.assertIn({
+            "species-name": "O2",
+            "amount": [
+                0.16,
+                {"uncertainty-type": "relative", "uncertainty": 0.1, "uncertainty-sourcetype": "reported"},
+            ],
+        }, species)
+
+    def test_flame_burning_velocity_is_kept(self):
+        # As in hydrogen/Vandooren_1991, whose flame files give it
+        document = yaml.safe_load(FLAME_FILE)
+        document["common-properties"]["laminar-burning-velocity"] = ["131 cm/s"]
+        document["datapoints"][0]["laminar-burning-velocity"] = ["131 cm/s"]
+
+        exported = self._round_trip(yaml.safe_dump(document), "x/flame.yaml")[1]
+
+        self.assertEqual(exported["datapoints"][0]["laminar-burning-velocity"], ["131.0 cm/s"])
+        load_in_pyked(exported)

@@ -12,9 +12,11 @@ from django.db import transaction
 from chemked_database.import_dispatcher import create_experiment_extension
 from chemked_database.models import (
     Apparatus,
+    AuxiliaryProfile,
     CommonProperties,
     Composition,
     CompositionSpecies,
+    ConcentrationProfile,
     ExperimentDataset,
     ExperimentDatapoint,
     ExperimentType,
@@ -32,16 +34,44 @@ from chemked_database.utils.chemistry import infer_smiles_and_atomic_composition
 
 # A number may end in a decimal point ("660. K").
 VALUE_UNIT_RE = re.compile(r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*(.*)$")
-COMPOSITION_KINDS = {"mass fraction", "mole fraction", "mole percent"}
-
-# ChemKED experiment types that are not ExperimentType values, and why they are not imported.
-UNSUPPORTED_EXPERIMENT_TYPES = {
-    # Jet-stirred reactor, flow reactor, flame and shock tube species profiles
-    "speciation measurement": (
-        "its datapoints are concentration-profiles against independent-variables,"
-        " which sync_chemked cannot store yet"
-    ),
+# The composition kinds of ChemKED 0.5; the concentrations are found in shock tube speciation files
+COMPOSITION_KINDS = {
+    "mass fraction", "mole fraction", "mole percent", "mol/cm3", "mol/m3", "mol/L", "mol/dm3",
 }
+
+# ChemKED 0.5 has one experiment type for every species profile measurement. The site keeps
+# one per reactor, each with its own extension model, told from the apparatus.
+SPECIATION_MEASUREMENT = "speciation measurement"
+SPECIATION_APPARATUS_TYPES = {
+    "jet stirred reactor": ExperimentType.JSR_MEASUREMENT,
+    "burner stabilized flame": ExperimentType.BSFS_MEASUREMENT,
+    "shock tube": ExperimentType.CONCENTRATION_TIME_PROFILE,
+}
+
+
+def speciation_experiment_type(data: Dict[str, Any]) -> str:
+    """ExperimentType value of a ChemKED speciation measurement file.
+
+    A flow reactor file is a concentration time profile measurement when its profiles are
+    against time, and an outlet concentration measurement otherwise (temperature or
+    residence-time sweeps).
+    """
+    kind = (data.get("apparatus") or {}).get("kind")
+    if kind in SPECIATION_APPARATUS_TYPES:
+        return SPECIATION_APPARATUS_TYPES[kind]
+    if kind == "flow reactor":
+        names = {
+            variable.get("name")
+            for datapoint in data.get("datapoints") or []
+            for variable in (datapoint or {}).get("independent-variables") or []
+        }
+        if "time" in names:
+            return ExperimentType.CONCENTRATION_TIME_PROFILE
+        return ExperimentType.OUTLET_CONCENTRATION
+    raise ValueError(
+        f"experiment-type '{SPECIATION_MEASUREMENT}' on apparatus kind '{kind}' is not"
+        f" supported; known kinds are {', '.join([*SPECIATION_APPARATUS_TYPES, 'flow reactor'])}"
+    )
 
 
 def experiment_type_of(data: Dict[str, Any]) -> str:
@@ -55,15 +85,51 @@ def experiment_type_of(data: Dict[str, Any]) -> str:
         raise ValueError("experiment-type is missing")
     if experiment_type in ExperimentType.values:
         return experiment_type
-    if experiment_type in UNSUPPORTED_EXPERIMENT_TYPES:
-        raise ValueError(
-            f"experiment-type '{experiment_type}' is not supported:"
-            f" {UNSUPPORTED_EXPERIMENT_TYPES[experiment_type]}"
-        )
+    if experiment_type == SPECIATION_MEASUREMENT:
+        return speciation_experiment_type(data)
     raise ValueError(
-        f"unknown experiment-type '{experiment_type}';"
-        f" known types are {', '.join(ExperimentType.values)}"
+        f"unknown experiment-type '{experiment_type}'; known types are"
+        f" {', '.join([*ExperimentType.values, SPECIATION_MEASUREMENT])}"
     )
+
+
+def speciation_problem(datapoint_data: Dict[str, Any]) -> Optional[str]:
+    """Why a speciation datapoint cannot be stored, or None.
+
+    Each profile row must hold one value per independent variable, then the amount, then
+    optionally its uncertainty.
+    """
+    variables = datapoint_data.get("independent-variables") or []
+    if not variables:
+        return "independent-variables required by schema"
+    if any(not isinstance(v, dict) or not v.get("name") or not v.get("units") for v in variables):
+        return "each independent-variable needs a name and units"
+    profiles = datapoint_data.get("concentration-profiles") or []
+    if not profiles:
+        return "concentration-profiles required by schema"
+    columns = (len(variables) + 1, len(variables) + 2)
+    for profile in profiles:
+        name = (profile or {}).get("species-name")
+        if not name:
+            return "a concentration profile has no species-name"
+        if not (profile.get("quantity") or {}).get("units"):
+            return f"concentration profile of {name} has no quantity units"
+        rows = profile.get("values") or []
+        if not rows:
+            return f"concentration profile of {name} has no values"
+        if any(not isinstance(row, list) or len(row) not in columns for row in rows):
+            return (
+                f"concentration profile of {name} has rows that are not"
+                f" {columns[0]} or {columns[1]} columns long"
+            )
+    return None
+
+
+def profile_uncertainty(raw: Any):
+    """A profile's uncertainty block as stored: the one dict of the ChemKED list."""
+    if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], dict):
+        return raw[0]
+    return raw or None
 
 
 def time_first(values: Any, time: Optional[Dict[str, Any]], quantity: Optional[Dict[str, Any]]):
@@ -216,6 +282,8 @@ def create_composition(
         report(f"Skipping {context}: composition species list is required")
         return None
 
+    # ChemKED 0.5 requires a name and an amount; InChI, SMILES and atomic-composition are
+    # optional (pentane/Bugler_2017 gives names only)
     def is_valid_species(species: Dict[str, Any]) -> bool:
         if not species.get("species-name"):
             return False
@@ -226,12 +294,7 @@ def create_composition(
             float(amount_list[0])
         except (TypeError, ValueError):
             return False
-        has_identifier = bool(
-            species.get("InChI")
-            or species.get("SMILES")
-            or (species.get("atomic-composition") or [])
-        )
-        return has_identifier
+        return True
 
     if not any(is_valid_species(species) for species in species_list):
         report(f"Skipping {context}: composition species missing required fields")
@@ -248,6 +311,7 @@ def create_composition(
         amount_value = None
         amount_uncertainty = None
         amount_uncertainty_type = ""
+        amount_uncertainty_sourcetype = ""
         amount_upper = None
         amount_lower = None
 
@@ -260,6 +324,7 @@ def create_composition(
         if len(amount_list) > 1 and isinstance(amount_list[1], dict):
             amount_uncertainty_type = amount_list[1].get("uncertainty-type", "")
             amount_uncertainty = amount_list[1].get("uncertainty")
+            amount_uncertainty_sourcetype = amount_list[1].get("uncertainty-sourcetype", "")
             amount_upper = amount_list[1].get("upper-uncertainty")
             amount_lower = amount_list[1].get("lower-uncertainty")
             amount_esd = amount_list[1].get("evaluated-standard-deviation")
@@ -287,6 +352,7 @@ def create_composition(
             amount=amount_value or 0.0,
             amount_uncertainty=amount_uncertainty,
             amount_uncertainty_type=amount_uncertainty_type,
+            amount_uncertainty_sourcetype=amount_uncertainty_sourcetype,
             amount_upper_uncertainty=amount_upper,
             amount_lower_uncertainty=amount_lower,
             amount_evaluated_standard_deviation=amount_esd,
@@ -399,6 +465,7 @@ class Command(BaseCommand):
                     f"{exc}; dataset {stored.pk} stored earlier for this file was left unchanged"
                 ) from exc
             raise
+        speciation = data.get("experiment-type") == SPECIATION_MEASUREMENT
 
         with transaction.atomic():
             dataset, created = ExperimentDataset.objects.get_or_create(
@@ -412,6 +479,10 @@ class Command(BaseCommand):
             # Re-ingesting an updated file replaces its datapoints instead of
             # appending a second copy.
             if not created:
+                # The species of profiles belong to no composition, so they go first
+                CompositionSpecies.objects.filter(
+                    concentration_profiles__datapoint__dataset=dataset
+                ).delete()
                 dataset.datapoints.all().delete()
 
             apparatus_data = data.get("apparatus") or {}
@@ -524,6 +595,10 @@ class Command(BaseCommand):
                     )
                     common_obj.residence_time_units = "s"
 
+                # A burner-stabilized flame file may give the burning velocity of its flame
+                lbv_quantity = create_value_with_unit(common_props.get("laminar-burning-velocity"))
+                common_obj.laminar_burning_velocity_quantity = lbv_quantity
+
                 flow_rate_raw = common_props.get("flow-rate")
                 flow_rate_quantity = create_value_with_unit(flow_rate_raw)
                 common_obj.flow_rate_quantity = flow_rate_quantity
@@ -549,6 +624,12 @@ class Command(BaseCommand):
                         self.stderr.write(
                             f"Skipping datapoint in {rel_path}: ignition-type required by schema"
                         )
+                        continue
+
+                if speciation:
+                    problem = speciation_problem(datapoint_data)
+                    if problem:
+                        self.stderr.write(f"Skipping datapoint in {rel_path}: {problem}")
                         continue
 
                 if not temperature_quantity and not pressure_quantity:
@@ -592,10 +673,16 @@ class Command(BaseCommand):
                         reporter=self.stderr.write,
                         context=f"{rel_path} datapoint",
                     ),
+                    independent_variables=(
+                        datapoint_data.get("independent-variables") if speciation else []
+                    ),
                 )
 
                 # --- Experiment-type-specific extensions ---
-                if dataset.experiment_type == ExperimentType.IGNITION_DELAY:
+                if speciation:
+                    self._store_speciation(datapoint, datapoint_data, dataset.experiment_type, context)
+
+                elif dataset.experiment_type == ExperimentType.IGNITION_DELAY:
                     ignition_payload = {
                         "ignition_delay": None,
                         "ignition_delay_quantity": create_value_with_unit(ignition_delay_raw),
@@ -731,3 +818,94 @@ class Command(BaseCommand):
                             volume_history.get("volume"),
                         ),
                     )
+
+            # A file none of whose datapoints could be stored is not imported, so it leaves
+            # no dataset without datapoints (an updated file leaves the stored one unchanged)
+            if not dataset.datapoints.exists():
+                raise ValueError("no datapoint could be stored")
+
+    def _store_speciation(
+        self,
+        datapoint: ExperimentDatapoint,
+        datapoint_data: Dict[str, Any],
+        experiment_type: str,
+        context: str,
+    ):
+        """Store a ChemKED speciation datapoint's profiles and its reactor's extension row.
+
+        Profiles keep the file's species name and identifiers, units, rows and uncertainty
+        block unchanged; the independent variables are on the datapoint.
+        """
+        report = self.stderr.write
+        time_units = next(
+            (
+                variable.get("units", "")
+                for variable in datapoint_data.get("independent-variables") or []
+                if variable.get("name") == "time"
+            ),
+            "",
+        )
+
+        payload: Dict[str, Any] = {}
+        if experiment_type == ExperimentType.JSR_MEASUREMENT:
+            quantity = create_value_with_unit(datapoint_data.get("environment-temperature"))
+            if quantity:
+                payload["environment_temperature"] = si_value(quantity, "temperature", report, context)
+                payload["environment_temperature_quantity"] = quantity
+        elif experiment_type == ExperimentType.OUTLET_CONCENTRATION:
+            quantity = create_value_with_unit(datapoint_data.get("residence-time"))
+            if quantity:
+                payload["residence_time"] = si_value(quantity, "time", report, context)
+                payload["residence_time_quantity"] = quantity
+            quantity = create_value_with_unit(datapoint_data.get("volumetric-flow-in-reference-state"))
+            if quantity:
+                payload["volumetric_flow_in_reference_state"] = si_value(
+                    quantity, "volumetric_flow", report, context
+                )
+                payload["volumetric_flow_quantity"] = quantity
+        elif experiment_type == ExperimentType.BSFS_MEASUREMENT:
+            quantity = create_value_with_unit(datapoint_data.get("flow-rate"))
+            if quantity:
+                payload["flow_rate"] = si_value(quantity, "mass_flux", report, context)
+                payload["flow_rate_quantity"] = quantity
+        elif experiment_type == ExperimentType.CONCENTRATION_TIME_PROFILE:
+            # The profiles are ConcentrationProfile rows, not this record's single profile
+            payload = {"time_units": time_units, "quantity_units": "", "values": []}
+            time_shift = datapoint_data.get("time-shift") or {}
+            if time_shift:
+                amount = create_value_with_unit(time_shift.get("amount"))
+                payload.update({
+                    "timeshift_target": time_shift.get("target", ""),
+                    "timeshift_type": time_shift.get("type", ""),
+                    "timeshift_amount": amount.value if amount else None,
+                    "timeshift_amount_quantity": amount,
+                })
+        create_experiment_extension(datapoint, experiment_type, payload)
+
+        for profile in datapoint_data.get("concentration-profiles") or []:
+            species = CompositionSpecies.objects.create(
+                composition=None,
+                species_name=profile["species-name"],
+                inchi=profile.get("InChI", ""),
+                smiles=profile.get("SMILES", ""),
+                amount=None,
+            )
+            ConcentrationProfile.objects.create(
+                datapoint=datapoint,
+                species=species,
+                time_units=time_units,
+                quantity_units=profile["quantity"]["units"],
+                values=profile["values"],
+                uncertainty=profile_uncertainty(profile.get("uncertainty")),
+            )
+
+        for profile in datapoint_data.get("auxiliary-profiles") or []:
+            independent = profile.get("independent") or {}
+            AuxiliaryProfile.objects.create(
+                datapoint=datapoint,
+                profile_type=profile.get("type", ""),
+                independent_name=independent.get("name", ""),
+                independent_units=independent.get("units", ""),
+                quantity_units=(profile.get("quantity") or {}).get("units", ""),
+                values=profile.get("values") or [],
+            )

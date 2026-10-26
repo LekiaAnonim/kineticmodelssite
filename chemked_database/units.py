@@ -23,6 +23,7 @@ SI_UNITS = {
     "length": "meter",
     "volume": "meter ** 3",
     "mass_flux": "kilogram / meter ** 2 / second",
+    "volumetric_flow": "meter ** 3 / second",
 }
 
 _registry: Optional[pint.UnitRegistry] = None
