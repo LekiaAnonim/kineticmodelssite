@@ -33,7 +33,7 @@
                     <tbody>
                         <tr>
                             <td class="text-muted" style="width: 200px;">Temperature</td>
-                            <td class="fw-medium font-monospace">{{ datapoint.temperature }} K</td>
+                            <td class="fw-medium font-monospace">{% if datapoint.temperature is not None %}{{ datapoint.temperature }} K{% else %}—{% endif %}</td>
                             <td>
                                 {% if datapoint.temperature_quantity %}
                                 <small class="text-muted">
@@ -69,6 +69,10 @@
                 </table>
             </div>
         </div>
+
+        {% if speciation_measurement %}
+        {% include "chemked_database/partials/speciation_measurement.html" %}
+        {% endif %}
 
         <!-- Ignition Delay Data -->
         {% if ignition_delay %}

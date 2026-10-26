@@ -55,7 +55,8 @@ GET /api/species/?expand=isomers
 |----------|-----------|
 | `experiment-datapoint` | `dataset` |
 | `experiment-dataset` | `reference` (Source) |
-| `ignition-delay`, `laminar-burning-velocity`, `rate-coefficient`, `concentration-time-profile`, `jet-stirred-reactor`, `outlet-concentration`, `burner-stabilized-flame` | `datapoint` |
+| `ignition-delay`, `laminar-burning-velocity`, `rate-coefficient`, `speciation-measurement` | `datapoint` |
+| `concentration-profile`, `auxiliary-profile` | `measurement` (speciation measurement) |
 | `simulation-run`, `model-dataset-coverage` | `kinetic_model`, `dataset` |
 | `simulation-result` | `simulation_run` |
 | `datapoint-result` | `simulation_result`, `datapoint` |

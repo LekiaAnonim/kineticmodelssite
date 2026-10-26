@@ -22,8 +22,11 @@ from chemked_database.models import (
     ExperimentType,
     FileAuthor,
     IgnitionDelayDatapoint,
+    IndependentVariable,
+    IndependentVariableName,
     ReferenceAuthor,
     RCMData,
+    SpeciationMeasurementDatapoint,
     SpeciesThermo,
     TimeHistory,
     ValueWithUnit,
@@ -39,41 +42,6 @@ COMPOSITION_KINDS = {
     "mass fraction", "mole fraction", "mole percent", "mol/cm3", "mol/m3", "mol/L", "mol/dm3",
 }
 
-# ChemKED 0.5 has one experiment type for every species profile measurement. The site keeps
-# one per reactor, each with its own extension model, told from the apparatus.
-SPECIATION_MEASUREMENT = "speciation measurement"
-SPECIATION_APPARATUS_TYPES = {
-    "jet stirred reactor": ExperimentType.JSR_MEASUREMENT,
-    "burner stabilized flame": ExperimentType.BSFS_MEASUREMENT,
-    "shock tube": ExperimentType.CONCENTRATION_TIME_PROFILE,
-}
-
-
-def speciation_experiment_type(data: Dict[str, Any]) -> str:
-    """ExperimentType value of a ChemKED speciation measurement file.
-
-    A flow reactor file is a concentration time profile measurement when its profiles are
-    against time, and an outlet concentration measurement otherwise (temperature or
-    residence-time sweeps).
-    """
-    kind = (data.get("apparatus") or {}).get("kind")
-    if kind in SPECIATION_APPARATUS_TYPES:
-        return SPECIATION_APPARATUS_TYPES[kind]
-    if kind == "flow reactor":
-        names = {
-            variable.get("name")
-            for datapoint in data.get("datapoints") or []
-            for variable in (datapoint or {}).get("independent-variables") or []
-        }
-        if "time" in names:
-            return ExperimentType.CONCENTRATION_TIME_PROFILE
-        return ExperimentType.OUTLET_CONCENTRATION
-    raise ValueError(
-        f"experiment-type '{SPECIATION_MEASUREMENT}' on apparatus kind '{kind}' is not"
-        f" supported; known kinds are {', '.join([*SPECIATION_APPARATUS_TYPES, 'flow reactor'])}"
-    )
-
-
 def experiment_type_of(data: Dict[str, Any]) -> str:
     """ExperimentType value of a ChemKED file.
 
@@ -85,11 +53,9 @@ def experiment_type_of(data: Dict[str, Any]) -> str:
         raise ValueError("experiment-type is missing")
     if experiment_type in ExperimentType.values:
         return experiment_type
-    if experiment_type == SPECIATION_MEASUREMENT:
-        return speciation_experiment_type(data)
     raise ValueError(
-        f"unknown experiment-type '{experiment_type}'; known types are"
-        f" {', '.join([*ExperimentType.values, SPECIATION_MEASUREMENT])}"
+        f"unknown experiment-type '{experiment_type}';"
+        f" known types are {', '.join(ExperimentType.values)}"
     )
 
 
@@ -104,6 +70,9 @@ def speciation_problem(datapoint_data: Dict[str, Any]) -> Optional[str]:
         return "independent-variables required by schema"
     if any(not isinstance(v, dict) or not v.get("name") or not v.get("units") for v in variables):
         return "each independent-variable needs a name and units"
+    for variable in variables:
+        if variable["name"] not in IndependentVariableName.values:
+            return f"unknown independent-variable '{variable['name']}'"
     profiles = datapoint_data.get("concentration-profiles") or []
     if not profiles:
         return "concentration-profiles required by schema"
@@ -125,11 +94,21 @@ def speciation_problem(datapoint_data: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def profile_uncertainty(raw: Any):
-    """A profile's uncertainty block as stored: the one dict of the ChemKED list."""
-    if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], dict):
-        return raw[0]
-    return raw or None
+def profile_uncertainty_fields(raw: Any) -> Dict[str, Any]:
+    """ConcentrationProfile fields for a profile's uncertainty (a list of one ChemKED block)."""
+    block = raw[0] if isinstance(raw, list) and raw and isinstance(raw[0], dict) else raw
+    if not isinstance(block, dict):
+        return {}
+    _, _, extra = parse_value_unit([None, block])
+    return {
+        field: extra[field]
+        for field in (
+            "uncertainty_type", "uncertainty", "upper_uncertainty", "lower_uncertainty",
+            "uncertainty_text", "uncertainty_sourcetype", "evaluated_standard_deviation",
+            "evaluated_standard_deviation_type", "evaluated_standard_deviation_sourcetype",
+            "evaluated_standard_deviation_method",
+        )
+    }
 
 
 def time_first(values: Any, time: Optional[Dict[str, Any]], quantity: Optional[Dict[str, Any]]):
@@ -200,6 +179,7 @@ def parse_value_unit(raw: Any):
                 "upper_uncertainty": upper_value,
                 "lower_uncertainty": lower_value,
                 "uncertainty_text": uncertainty_text or upper_text or lower_text or esd_text or "",
+                "uncertainty_sourcetype": metadata.get("uncertainty-sourcetype", ""),
                 "sourcetype": metadata.get("sourcetype", ""),
                 "evaluated_standard_deviation": esd_value,
                 "evaluated_standard_deviation_type": metadata.get("evaluated-standard-deviation-type", ""),
@@ -236,6 +216,7 @@ def create_value_with_unit(raw: Any):
         uncertainty_text=extra.get("uncertainty_text", ""),
         upper_uncertainty=extra.get("upper_uncertainty"),
         lower_uncertainty=extra.get("lower_uncertainty"),
+        uncertainty_sourcetype=extra.get("uncertainty_sourcetype", ""),
         sourcetype=extra.get("sourcetype", ""),
         evaluated_standard_deviation=extra.get("evaluated_standard_deviation"),
         evaluated_standard_deviation_type=extra.get("evaluated_standard_deviation_type", ""),
@@ -390,6 +371,412 @@ def create_composition(
     return composition
 
 
+def store_speciation_datapoint(
+    datapoint: ExperimentDatapoint,
+    datapoint_data: Dict[str, Any],
+    report: Callable[[str], None],
+    context: str,
+) -> SpeciationMeasurementDatapoint:
+    """Store the speciation part of a ChemKED datapoint as the file gives it.
+
+    Its quantities keep the file's value and unit next to the SI value; profiles keep their
+    species name and identifiers, units, rows and uncertainty block unchanged.
+    """
+    fields: Dict[str, Any] = {}
+    for key, field, kind in SpeciationMeasurementDatapoint.CHEMKED_QUANTITIES:
+        quantity = create_value_with_unit(datapoint_data.get(key))
+        if quantity:
+            fields[field] = si_value(quantity, kind, report, context)
+            fields[f"{field}_quantity"] = quantity
+    time_shift = datapoint_data.get("time-shift") or {}
+    if time_shift:
+        amount = create_value_with_unit(time_shift.get("amount"))
+        fields.update({
+            "timeshift_target": time_shift.get("target", ""),
+            "timeshift_type": time_shift.get("type", ""),
+            "timeshift_amount": si_value(amount, "time", report, context) if amount else None,
+            "timeshift_amount_quantity": amount,
+        })
+    measurement = create_experiment_extension(
+        datapoint, ExperimentType.SPECIATION_MEASUREMENT, fields
+    )
+
+    for column, variable in enumerate(datapoint_data["independent-variables"]):
+        IndependentVariable.objects.create(
+            measurement=measurement,
+            column=column,
+            name=variable["name"],
+            units=variable["units"],
+            primary=variable.get("primary"),
+            species_name=variable.get("species-name", ""),
+            inchi=variable.get("InChI", ""),
+            smiles=variable.get("SMILES", ""),
+        )
+
+    for profile in datapoint_data["concentration-profiles"]:
+        species = CompositionSpecies.objects.create(
+            composition=None,
+            species_name=profile["species-name"],
+            inchi=profile.get("InChI", ""),
+            smiles=profile.get("SMILES", ""),
+            amount=None,
+        )
+        ConcentrationProfile.objects.create(
+            measurement=measurement,
+            species=species,
+            quantity_units=profile["quantity"]["units"],
+            values=profile["values"],
+            **profile_uncertainty_fields(profile.get("uncertainty")),
+        )
+
+    for profile in datapoint_data.get("auxiliary-profiles") or []:
+        independent = profile.get("independent") or {}
+        AuxiliaryProfile.objects.create(
+            measurement=measurement,
+            profile_type=profile.get("type", ""),
+            independent_name=independent.get("name", ""),
+            independent_units=independent.get("units", ""),
+            quantity_units=(profile.get("quantity") or {}).get("units", ""),
+            values=profile.get("values") or [],
+        )
+    return measurement
+
+
+def store_chemked_data(data: Dict[str, Any], rel_path: str, report: Callable[[str], None]):
+    """Store a ChemKED file's contents as the dataset at *rel_path*, replacing its datapoints.
+
+    Problems that leave part of the file out are given to *report*; a file that cannot be
+    stored raises ValueError and changes nothing.
+    """
+    try:
+        experiment_type = experiment_type_of(data)
+    except ValueError as exc:
+        stored = ExperimentDataset.objects.filter(chemked_file_path=rel_path).first()
+        if stored:
+            raise ValueError(
+                f"{exc}; dataset {stored.pk} stored earlier for this file was left unchanged"
+            ) from exc
+        raise
+    speciation = experiment_type == ExperimentType.SPECIATION_MEASUREMENT
+
+    with transaction.atomic():
+        dataset, created = ExperimentDataset.objects.get_or_create(
+            chemked_file_path=rel_path,
+            defaults={
+                "file_version": data.get("file-version", 0),
+                "chemked_version": data.get("chemked-version", "0.4.1"),
+                "experiment_type": experiment_type,
+            },
+        )
+        # Re-ingesting an updated file replaces its datapoints instead of
+        # appending a second copy.
+        if not created:
+            # The species of profiles belong to no composition, so they go first
+            CompositionSpecies.objects.filter(
+                concentration_profiles__measurement__datapoint__dataset=dataset
+            ).delete()
+            dataset.datapoints.all().delete()
+
+        apparatus_data = data.get("apparatus") or {}
+        if apparatus_data:
+            apparatus, _ = Apparatus.objects.get_or_create(
+                kind=apparatus_data.get("kind", ""),
+                institution=apparatus_data.get("institution", ""),
+                facility=apparatus_data.get("facility", ""),
+            )
+            mode_raw = apparatus_data.get("mode", [])
+            if mode_raw:
+                if isinstance(mode_raw, list):
+                    mode_str = ", ".join(
+                        m.replace("-", " ") if isinstance(m, str) else str(m)
+                        for m in mode_raw
+                    )
+                else:
+                    mode_str = str(mode_raw).replace("-", " ")
+                if apparatus.mode != mode_str:
+                    apparatus.mode = mode_str
+                    apparatus.save(update_fields=["mode"])
+            dataset.apparatus = apparatus
+
+        dataset.file_version = data.get("file-version", dataset.file_version)
+        dataset.chemked_version = data.get("chemked-version", dataset.chemked_version)
+        dataset.experiment_type = experiment_type
+        dataset.reference_doi = (data.get("reference") or {}).get("doi", "")
+        dataset.reference_journal = (data.get("reference") or {}).get("journal", "")
+        dataset.reference_year = (data.get("reference") or {}).get("year")
+        dataset.reference_volume = (data.get("reference") or {}).get("volume")
+        dataset.reference_pages = (data.get("reference") or {}).get("pages", "")
+        dataset.reference_detail = (data.get("reference") or {}).get("detail", "")
+        dataset.comments = data.get("comments", [])
+        dataset.save()
+
+        dataset.file_authors.clear()
+        for author in data.get("file-authors", []) or []:
+            file_author, _ = FileAuthor.objects.get_or_create(
+                name=author.get("name", ""),
+                orcid=author.get("ORCID", ""),
+            )
+            dataset.file_authors.add(file_author)
+
+        dataset.reference_authors.clear()
+        for author in (data.get("reference") or {}).get("authors", []) or []:
+            ref_author, _ = ReferenceAuthor.objects.get_or_create(
+                name=author.get("name", ""),
+                orcid=author.get("ORCID", ""),
+            )
+            dataset.reference_authors.add(ref_author)
+
+        common_props = data.get("common-properties") or {}
+        if common_props:
+            common_obj, _ = CommonProperties.objects.get_or_create(dataset=dataset)
+            common_obj.composition = create_composition(
+                common_props.get("composition"),
+                reporter=report,
+                context=f"{rel_path} common-properties",
+            )
+            ignition_type = common_props.get("ignition-type") or {}
+            if experiment_type == ExperimentType.IGNITION_DELAY:
+                if not ignition_type or not ignition_type.get("target") or not ignition_type.get("type"):
+                    report(
+                        f"{rel_path} common-properties: ignition-type is required by schema"
+                    )
+            common_obj.ignition_target = ignition_type.get("target", "")
+            common_obj.ignition_type = ignition_type.get("type", "")
+
+            context = f"{rel_path} common-properties"
+
+            pressure_raw = common_props.get("pressure")
+            pressure_quantity = create_value_with_unit(pressure_raw)
+            common_obj.pressure_quantity = pressure_quantity
+            common_obj.pressure = si_value(pressure_quantity, "pressure", report, context)
+
+            pressure_rise_raw = common_props.get("pressure-rise")
+            pressure_rise_quantity = create_value_with_unit(pressure_rise_raw)
+            common_obj.pressure_rise_quantity = pressure_rise_quantity
+            common_obj.pressure_rise = si_value(
+                pressure_rise_quantity, "rate", report, context
+            )
+
+            temperature_raw = common_props.get("temperature")
+            temperature_quantity = create_value_with_unit(temperature_raw)
+            common_obj.temperature_quantity = temperature_quantity
+            common_obj.temperature = si_value(
+                temperature_quantity, "temperature", report, context
+            )
+
+            equiv_raw = common_props.get("equivalence-ratio")
+            equiv_quantity = create_value_with_unit(equiv_raw)
+            common_obj.equivalence_ratio_quantity = equiv_quantity
+            common_obj.equivalence_ratio = equiv_quantity.value if equiv_quantity else None
+
+            reactor_vol_raw = common_props.get("reactor-volume")
+            reactor_vol_quantity = create_value_with_unit(reactor_vol_raw)
+            common_obj.reactor_volume_quantity = reactor_vol_quantity
+            if reactor_vol_quantity:
+                common_obj.reactor_volume = si_value(
+                    reactor_vol_quantity, "volume", report, context
+                )
+                common_obj.reactor_volume_units = "m3"
+
+            residence_time_raw = common_props.get("residence-time")
+            residence_time_quantity = create_value_with_unit(residence_time_raw)
+            common_obj.residence_time_quantity = residence_time_quantity
+            if residence_time_quantity:
+                common_obj.residence_time = si_value(
+                    residence_time_quantity, "time", report, context
+                )
+                common_obj.residence_time_units = "s"
+
+            flow_rate_raw = common_props.get("flow-rate")
+            flow_rate_quantity = create_value_with_unit(flow_rate_raw)
+            common_obj.flow_rate_quantity = flow_rate_quantity
+            common_obj.flow_rate = si_value(flow_rate_quantity, "mass_flux", report, context)
+
+            # The other common properties keep the file's value and unit only
+            stored = {
+                "pressure", "temperature", "pressure-rise", "equivalence-ratio", "residence-time",
+                "reactor-volume", "flow-rate",
+            }
+            for key, field in CommonProperties.CHEMKED_QUANTITIES:
+                if key not in stored:
+                    setattr(common_obj, field, create_value_with_unit(common_props.get(key)))
+
+            common_obj.save()
+
+        for datapoint_data in data.get("datapoints", []) or []:
+            temperature_quantity = create_value_with_unit(datapoint_data.get("temperature"))
+            pressure_quantity = create_value_with_unit(datapoint_data.get("pressure"))
+            ignition_delay_raw = datapoint_data.get("ignition-delay")
+            first_stage_raw = datapoint_data.get("first-stage-ignition-delay")
+            ignition_type = datapoint_data.get("ignition-type") or {}
+            pressure_rise_raw = datapoint_data.get("pressure-rise")
+
+            if dataset.experiment_type == ExperimentType.IGNITION_DELAY:
+                if not ignition_delay_raw:
+                    report(
+                        f"Skipping datapoint in {rel_path}: ignition-delay required by schema"
+                    )
+                    continue
+                if not ignition_type or not ignition_type.get("target") or not ignition_type.get("type"):
+                    report(
+                        f"Skipping datapoint in {rel_path}: ignition-type required by schema"
+                    )
+                    continue
+
+            if speciation:
+                problem = speciation_problem(datapoint_data)
+                if problem:
+                    report(f"Skipping datapoint in {rel_path}: {problem}")
+                    continue
+
+            if not temperature_quantity and not pressure_quantity:
+                report(
+                    f"Skipping datapoint in {rel_path}: missing both temperature and pressure"
+                )
+                continue
+
+            # Parse per-datapoint equivalence ratio
+            equiv_raw = datapoint_data.get("equivalence-ratio")
+            equiv_quantity = create_value_with_unit(equiv_raw) if equiv_raw is not None else None
+            equiv_value = equiv_quantity.value if equiv_quantity else (
+                float(equiv_raw) if isinstance(equiv_raw, (int, float)) else None
+            )
+
+            # Parse per-datapoint residence time
+            res_quantity = create_value_with_unit(datapoint_data.get("residence-time"))
+
+            # Temperature and pressure are required numbers, so a datapoint whose unit
+            # cannot be converted is skipped rather than stored in the wrong unit.
+            try:
+                temperature = quantity_to_si(temperature_quantity, "temperature")
+                pressure = quantity_to_si(pressure_quantity, "pressure")
+            except UnitConversionError as exc:
+                report(f"Skipping datapoint in {rel_path}: {exc}")
+                continue
+            context = f"{rel_path} datapoint"
+
+            datapoint = ExperimentDatapoint.objects.create(
+                dataset=dataset,
+                temperature=temperature,
+                pressure=pressure if pressure is not None else 0.0,
+                temperature_quantity=temperature_quantity,
+                pressure_quantity=pressure_quantity,
+                equivalence_ratio=equiv_value,
+                equivalence_ratio_quantity=equiv_quantity,
+                residence_time=si_value(res_quantity, "time", report, context),
+                residence_time_units="s",
+                composition=create_composition(
+                    datapoint_data.get("composition"),
+                    reporter=report,
+                    context=f"{rel_path} datapoint",
+                ),
+            )
+
+            # --- Experiment-type-specific extensions ---
+            if speciation:
+                store_speciation_datapoint(datapoint, datapoint_data, report, context)
+
+            elif dataset.experiment_type == ExperimentType.IGNITION_DELAY:
+                ignition_payload = {
+                    "ignition_delay": None,
+                    "ignition_delay_quantity": create_value_with_unit(ignition_delay_raw),
+                    "first_stage_ignition_delay": None,
+                    "first_stage_ignition_delay_quantity": create_value_with_unit(first_stage_raw),
+                    "ignition_target": ignition_type.get("target", ""),
+                    "ignition_type": ignition_type.get("type", ""),
+                    "pressure_rise": None,
+                    "pressure_rise_quantity": create_value_with_unit(pressure_rise_raw),
+                }
+                for field, kind in (
+                    ("ignition_delay", "time"),
+                    ("first_stage_ignition_delay", "time"),
+                    ("pressure_rise", "rate"),
+                ):
+                    ignition_payload[field] = si_value(
+                        ignition_payload[f"{field}_quantity"], kind, report, context
+                    )
+                create_experiment_extension(datapoint, dataset.experiment_type, ignition_payload)
+
+            elif dataset.experiment_type == ExperimentType.LAMINAR_BURNING_VELOCITY:
+                lbv_quantity = create_value_with_unit(datapoint_data.get("laminar-burning-velocity"))
+                lbv_payload = {
+                    "laminar_burning_velocity": si_value(
+                        lbv_quantity, "velocity", report, context
+                    ),
+                    "laminar_burning_velocity_quantity": lbv_quantity,
+                }
+                pr_quantity = create_value_with_unit(pressure_rise_raw)
+                if pr_quantity:
+                    lbv_payload["pressure_rise"] = si_value(pr_quantity, "rate", report, context)
+                    lbv_payload["pressure_rise_quantity"] = pr_quantity
+                create_experiment_extension(datapoint, dataset.experiment_type, lbv_payload)
+
+            rcm_data = datapoint_data.get("rcm-data") or {}
+            if rcm_data:
+                rcm = RCMData.objects.create(
+                    datapoint=datapoint,
+                    compressed_temperature_quantity=create_value_with_unit(rcm_data.get("compressed-temperature")),
+                    compressed_pressure_quantity=create_value_with_unit(rcm_data.get("compressed-pressure")),
+                    compression_time_quantity=create_value_with_unit(rcm_data.get("compression-time")),
+                    stroke_quantity=create_value_with_unit(rcm_data.get("stroke")),
+                    clearance_quantity=create_value_with_unit(rcm_data.get("clearance")),
+                    compression_ratio_quantity=create_value_with_unit(rcm_data.get("compression-ratio")),
+                )
+                for field, kind in (
+                    ("compressed_temperature", "temperature"),
+                    ("compressed_pressure", "pressure"),
+                    ("compression_time", "time"),
+                    ("stroke", "length"),
+                    ("clearance", "length"),
+                ):
+                    quantity = getattr(rcm, f"{field}_quantity")
+                    if quantity:
+                        setattr(rcm, field, si_value(quantity, kind, report, f"{context} rcm-data"))
+                if rcm.compression_ratio_quantity:
+                    rcm.compression_ratio = rcm.compression_ratio_quantity.value
+                rcm.save()
+
+            for history in datapoint_data.get("time-histories", []) or []:
+                values = history.get("values")
+                if isinstance(values, dict):
+                    TimeHistory.objects.create(
+                        datapoint=datapoint,
+                        history_type=history.get("type"),
+                        time_units=(history.get("time") or {}).get("units", ""),
+                        quantity_units=(history.get("quantity") or {}).get("units", ""),
+                        values=None,
+                        source_filename=values.get("filename", ""),
+                    )
+                else:
+                    TimeHistory.objects.create(
+                        datapoint=datapoint,
+                        history_type=history.get("type"),
+                        time_units=(history.get("time") or {}).get("units", ""),
+                        quantity_units=(history.get("quantity") or {}).get("units", ""),
+                        values=time_first(values, history.get("time"), history.get("quantity")),
+                    )
+
+            volume_history = datapoint_data.get("volume-history") or {}
+            if volume_history:
+                VolumeHistory.objects.create(
+                    datapoint=datapoint,
+                    time_units=(volume_history.get("time") or {}).get("units", ""),
+                    volume_units=(volume_history.get("volume") or {}).get("units", ""),
+                    values=time_first(
+                        volume_history.get("values", []),
+                        volume_history.get("time"),
+                        volume_history.get("volume"),
+                    ),
+                )
+
+        # A file none of whose datapoints could be stored is not imported, so it leaves
+        # no dataset without datapoints (an updated file leaves the stored one unchanged)
+        if not dataset.datapoints.exists():
+            raise ValueError("no datapoint could be stored")
+
+    return dataset
+
+
 class Command(BaseCommand):
     help = "Sync ChemKED YAML files into the database"
 
@@ -454,458 +841,4 @@ class Command(BaseCommand):
         with open(yaml_path, "r", encoding="utf-8") as handle:
             data = yaml.safe_load(handle)
 
-        rel_path = str(yaml_path.relative_to(base_path))
-
-        try:
-            experiment_type = experiment_type_of(data)
-        except ValueError as exc:
-            stored = ExperimentDataset.objects.filter(chemked_file_path=rel_path).first()
-            if stored:
-                raise ValueError(
-                    f"{exc}; dataset {stored.pk} stored earlier for this file was left unchanged"
-                ) from exc
-            raise
-        speciation = data.get("experiment-type") == SPECIATION_MEASUREMENT
-
-        with transaction.atomic():
-            dataset, created = ExperimentDataset.objects.get_or_create(
-                chemked_file_path=rel_path,
-                defaults={
-                    "file_version": data.get("file-version", 0),
-                    "chemked_version": data.get("chemked-version", "0.4.1"),
-                    "experiment_type": experiment_type,
-                },
-            )
-            # Re-ingesting an updated file replaces its datapoints instead of
-            # appending a second copy.
-            if not created:
-                # The species of profiles belong to no composition, so they go first
-                CompositionSpecies.objects.filter(
-                    concentration_profiles__datapoint__dataset=dataset
-                ).delete()
-                dataset.datapoints.all().delete()
-
-            apparatus_data = data.get("apparatus") or {}
-            if apparatus_data:
-                apparatus, _ = Apparatus.objects.get_or_create(
-                    kind=apparatus_data.get("kind", ""),
-                    institution=apparatus_data.get("institution", ""),
-                    facility=apparatus_data.get("facility", ""),
-                )
-                mode_raw = apparatus_data.get("mode", [])
-                if mode_raw:
-                    if isinstance(mode_raw, list):
-                        mode_str = ", ".join(
-                            m.replace("-", " ") if isinstance(m, str) else str(m)
-                            for m in mode_raw
-                        )
-                    else:
-                        mode_str = str(mode_raw).replace("-", " ")
-                    if apparatus.mode != mode_str:
-                        apparatus.mode = mode_str
-                        apparatus.save(update_fields=["mode"])
-                dataset.apparatus = apparatus
-
-            dataset.file_version = data.get("file-version", dataset.file_version)
-            dataset.chemked_version = data.get("chemked-version", dataset.chemked_version)
-            dataset.experiment_type = experiment_type
-            dataset.reference_doi = (data.get("reference") or {}).get("doi", "")
-            dataset.reference_journal = (data.get("reference") or {}).get("journal", "")
-            dataset.reference_year = (data.get("reference") or {}).get("year")
-            dataset.reference_volume = (data.get("reference") or {}).get("volume")
-            dataset.reference_pages = (data.get("reference") or {}).get("pages", "")
-            dataset.reference_detail = (data.get("reference") or {}).get("detail", "")
-            dataset.comments = data.get("comments", [])
-            dataset.save()
-
-            dataset.file_authors.clear()
-            for author in data.get("file-authors", []) or []:
-                file_author, _ = FileAuthor.objects.get_or_create(
-                    name=author.get("name", ""),
-                    orcid=author.get("ORCID", ""),
-                )
-                dataset.file_authors.add(file_author)
-
-            dataset.reference_authors.clear()
-            for author in (data.get("reference") or {}).get("authors", []) or []:
-                ref_author, _ = ReferenceAuthor.objects.get_or_create(
-                    name=author.get("name", ""),
-                    orcid=author.get("ORCID", ""),
-                )
-                dataset.reference_authors.add(ref_author)
-
-            common_props = data.get("common-properties") or {}
-            if common_props:
-                common_obj, _ = CommonProperties.objects.get_or_create(dataset=dataset)
-                common_obj.composition = create_composition(
-                    common_props.get("composition"),
-                    reporter=self.stderr.write,
-                    context=f"{rel_path} common-properties",
-                )
-                ignition_type = common_props.get("ignition-type") or {}
-                if experiment_type == ExperimentType.IGNITION_DELAY:
-                    if not ignition_type or not ignition_type.get("target") or not ignition_type.get("type"):
-                        self.stderr.write(
-                            f"{rel_path} common-properties: ignition-type is required by schema"
-                        )
-                common_obj.ignition_target = ignition_type.get("target", "")
-                common_obj.ignition_type = ignition_type.get("type", "")
-
-                context = f"{rel_path} common-properties"
-
-                pressure_raw = common_props.get("pressure")
-                pressure_quantity = create_value_with_unit(pressure_raw)
-                common_obj.pressure_quantity = pressure_quantity
-                common_obj.pressure = si_value(pressure_quantity, "pressure", self.stderr.write, context)
-
-                pressure_rise_raw = common_props.get("pressure-rise")
-                pressure_rise_quantity = create_value_with_unit(pressure_rise_raw)
-                common_obj.pressure_rise_quantity = pressure_rise_quantity
-                common_obj.pressure_rise = si_value(
-                    pressure_rise_quantity, "rate", self.stderr.write, context
-                )
-
-                temperature_raw = common_props.get("temperature")
-                temperature_quantity = create_value_with_unit(temperature_raw)
-                common_obj.temperature_quantity = temperature_quantity
-                common_obj.temperature = si_value(
-                    temperature_quantity, "temperature", self.stderr.write, context
-                )
-
-                equiv_raw = common_props.get("equivalence-ratio")
-                equiv_quantity = create_value_with_unit(equiv_raw)
-                common_obj.equivalence_ratio_quantity = equiv_quantity
-                common_obj.equivalence_ratio = equiv_quantity.value if equiv_quantity else None
-
-                reactor_vol_raw = common_props.get("reactor-volume")
-                reactor_vol_quantity = create_value_with_unit(reactor_vol_raw)
-                common_obj.reactor_volume_quantity = reactor_vol_quantity
-                if reactor_vol_quantity:
-                    common_obj.reactor_volume = si_value(
-                        reactor_vol_quantity, "volume", self.stderr.write, context
-                    )
-                    common_obj.reactor_volume_units = "m3"
-
-                residence_time_raw = common_props.get("residence-time")
-                residence_time_quantity = create_value_with_unit(residence_time_raw)
-                common_obj.residence_time_quantity = residence_time_quantity
-                if residence_time_quantity:
-                    common_obj.residence_time = si_value(
-                        residence_time_quantity, "time", self.stderr.write, context
-                    )
-                    common_obj.residence_time_units = "s"
-
-                # A burner-stabilized flame file may give the burning velocity of its flame
-                lbv_quantity = create_value_with_unit(common_props.get("laminar-burning-velocity"))
-                common_obj.laminar_burning_velocity_quantity = lbv_quantity
-
-                flow_rate_raw = common_props.get("flow-rate")
-                flow_rate_quantity = create_value_with_unit(flow_rate_raw)
-                common_obj.flow_rate_quantity = flow_rate_quantity
-                common_obj.flow_rate = si_value(flow_rate_quantity, "mass_flux", self.stderr.write, context)
-
-                common_obj.save()
-
-            for datapoint_data in data.get("datapoints", []) or []:
-                temperature_quantity = create_value_with_unit(datapoint_data.get("temperature"))
-                pressure_quantity = create_value_with_unit(datapoint_data.get("pressure"))
-                ignition_delay_raw = datapoint_data.get("ignition-delay")
-                first_stage_raw = datapoint_data.get("first-stage-ignition-delay")
-                ignition_type = datapoint_data.get("ignition-type") or {}
-                pressure_rise_raw = datapoint_data.get("pressure-rise")
-
-                if dataset.experiment_type == ExperimentType.IGNITION_DELAY:
-                    if not ignition_delay_raw:
-                        self.stderr.write(
-                            f"Skipping datapoint in {rel_path}: ignition-delay required by schema"
-                        )
-                        continue
-                    if not ignition_type or not ignition_type.get("target") or not ignition_type.get("type"):
-                        self.stderr.write(
-                            f"Skipping datapoint in {rel_path}: ignition-type required by schema"
-                        )
-                        continue
-
-                if speciation:
-                    problem = speciation_problem(datapoint_data)
-                    if problem:
-                        self.stderr.write(f"Skipping datapoint in {rel_path}: {problem}")
-                        continue
-
-                if not temperature_quantity and not pressure_quantity:
-                    self.stderr.write(
-                        f"Skipping datapoint in {rel_path}: missing both temperature and pressure"
-                    )
-                    continue
-
-                # Parse per-datapoint equivalence ratio
-                equiv_raw = datapoint_data.get("equivalence-ratio")
-                equiv_quantity = create_value_with_unit(equiv_raw) if equiv_raw is not None else None
-                equiv_value = equiv_quantity.value if equiv_quantity else (
-                    float(equiv_raw) if isinstance(equiv_raw, (int, float)) else None
-                )
-
-                # Parse per-datapoint residence time
-                res_quantity = create_value_with_unit(datapoint_data.get("residence-time"))
-
-                # Temperature and pressure are required numbers, so a datapoint whose unit
-                # cannot be converted is skipped rather than stored in the wrong unit.
-                try:
-                    temperature = quantity_to_si(temperature_quantity, "temperature")
-                    pressure = quantity_to_si(pressure_quantity, "pressure")
-                except UnitConversionError as exc:
-                    self.stderr.write(f"Skipping datapoint in {rel_path}: {exc}")
-                    continue
-                context = f"{rel_path} datapoint"
-
-                datapoint = ExperimentDatapoint.objects.create(
-                    dataset=dataset,
-                    temperature=temperature if temperature is not None else 0.0,
-                    pressure=pressure if pressure is not None else 0.0,
-                    temperature_quantity=temperature_quantity,
-                    pressure_quantity=pressure_quantity,
-                    equivalence_ratio=equiv_value,
-                    equivalence_ratio_quantity=equiv_quantity,
-                    residence_time=si_value(res_quantity, "time", self.stderr.write, context),
-                    residence_time_units="s",
-                    composition=create_composition(
-                        datapoint_data.get("composition"),
-                        reporter=self.stderr.write,
-                        context=f"{rel_path} datapoint",
-                    ),
-                    independent_variables=(
-                        datapoint_data.get("independent-variables") if speciation else []
-                    ),
-                )
-
-                # --- Experiment-type-specific extensions ---
-                if speciation:
-                    self._store_speciation(datapoint, datapoint_data, dataset.experiment_type, context)
-
-                elif dataset.experiment_type == ExperimentType.IGNITION_DELAY:
-                    ignition_payload = {
-                        "ignition_delay": None,
-                        "ignition_delay_quantity": create_value_with_unit(ignition_delay_raw),
-                        "first_stage_ignition_delay": None,
-                        "first_stage_ignition_delay_quantity": create_value_with_unit(first_stage_raw),
-                        "ignition_target": ignition_type.get("target", ""),
-                        "ignition_type": ignition_type.get("type", ""),
-                        "pressure_rise": None,
-                        "pressure_rise_quantity": create_value_with_unit(pressure_rise_raw),
-                    }
-                    for field, kind in (
-                        ("ignition_delay", "time"),
-                        ("first_stage_ignition_delay", "time"),
-                        ("pressure_rise", "rate"),
-                    ):
-                        ignition_payload[field] = si_value(
-                            ignition_payload[f"{field}_quantity"], kind, self.stderr.write, context
-                        )
-                    create_experiment_extension(datapoint, dataset.experiment_type, ignition_payload)
-
-                elif dataset.experiment_type == ExperimentType.LAMINAR_BURNING_VELOCITY:
-                    lbv_quantity = create_value_with_unit(datapoint_data.get("laminar-burning-velocity"))
-                    lbv_payload = {
-                        "laminar_burning_velocity": si_value(
-                            lbv_quantity, "velocity", self.stderr.write, context
-                        ),
-                        "laminar_burning_velocity_quantity": lbv_quantity,
-                    }
-                    pr_quantity = create_value_with_unit(pressure_rise_raw)
-                    if pr_quantity:
-                        lbv_payload["pressure_rise"] = si_value(pr_quantity, "rate", self.stderr.write, context)
-                        lbv_payload["pressure_rise_quantity"] = pr_quantity
-                    create_experiment_extension(datapoint, dataset.experiment_type, lbv_payload)
-
-                elif dataset.experiment_type == ExperimentType.JSR_MEASUREMENT:
-                    measured_comp = create_composition(
-                        datapoint_data.get("measured-composition"),
-                        reporter=self.stderr.write,
-                        context=f"{rel_path} JSR measured-composition",
-                    )
-                    jsr_payload = {"measured_composition": measured_comp}
-                    create_experiment_extension(datapoint, dataset.experiment_type, jsr_payload)
-
-                elif dataset.experiment_type == ExperimentType.OUTLET_CONCENTRATION:
-                    measured_comp = create_composition(
-                        datapoint_data.get("measured-composition"),
-                        reporter=self.stderr.write,
-                        context=f"{rel_path} outlet measured-composition",
-                    )
-                    ocm_payload = {"measured_composition": measured_comp}
-                    ocm_res_quantity = create_value_with_unit(datapoint_data.get("residence-time"))
-                    if ocm_res_quantity:
-                        ocm_payload["residence_time"] = si_value(
-                            ocm_res_quantity, "time", self.stderr.write, context
-                        )
-                        ocm_payload["residence_time_quantity"] = ocm_res_quantity
-                    create_experiment_extension(datapoint, dataset.experiment_type, ocm_payload)
-
-                elif dataset.experiment_type == ExperimentType.BSFS_MEASUREMENT:
-                    measured_comp = create_composition(
-                        datapoint_data.get("measured-composition"),
-                        reporter=self.stderr.write,
-                        context=f"{rel_path} BSFS measured-composition",
-                    )
-                    distance_quantity = create_value_with_unit(datapoint_data.get("distance"))
-                    flow_rate_quantity = create_value_with_unit(datapoint_data.get("flow-rate"))
-                    bsfs_payload = {
-                        "measured_composition": measured_comp,
-                        "distance": si_value(distance_quantity, "length", self.stderr.write, context),
-                        "distance_quantity": distance_quantity,
-                        "flow_rate": si_value(flow_rate_quantity, "mass_flux", self.stderr.write, context),
-                        "flow_rate_quantity": flow_rate_quantity,
-                    }
-                    create_experiment_extension(datapoint, dataset.experiment_type, bsfs_payload)
-
-                elif dataset.experiment_type == ExperimentType.CONCENTRATION_TIME_PROFILE:
-                    create_experiment_extension(datapoint, dataset.experiment_type, {})
-
-                rcm_data = datapoint_data.get("rcm-data") or {}
-                if rcm_data:
-                    rcm = RCMData.objects.create(
-                        datapoint=datapoint,
-                        compressed_temperature_quantity=create_value_with_unit(rcm_data.get("compressed-temperature")),
-                        compressed_pressure_quantity=create_value_with_unit(rcm_data.get("compressed-pressure")),
-                        compression_time_quantity=create_value_with_unit(rcm_data.get("compression-time")),
-                        stroke_quantity=create_value_with_unit(rcm_data.get("stroke")),
-                        clearance_quantity=create_value_with_unit(rcm_data.get("clearance")),
-                        compression_ratio_quantity=create_value_with_unit(rcm_data.get("compression-ratio")),
-                    )
-                    for field, kind in (
-                        ("compressed_temperature", "temperature"),
-                        ("compressed_pressure", "pressure"),
-                        ("compression_time", "time"),
-                        ("stroke", "length"),
-                        ("clearance", "length"),
-                    ):
-                        quantity = getattr(rcm, f"{field}_quantity")
-                        if quantity:
-                            setattr(rcm, field, si_value(quantity, kind, self.stderr.write, f"{context} rcm-data"))
-                    if rcm.compression_ratio_quantity:
-                        rcm.compression_ratio = rcm.compression_ratio_quantity.value
-                    rcm.save()
-
-                for history in datapoint_data.get("time-histories", []) or []:
-                    values = history.get("values")
-                    if isinstance(values, dict):
-                        TimeHistory.objects.create(
-                            datapoint=datapoint,
-                            history_type=history.get("type"),
-                            time_units=(history.get("time") or {}).get("units", ""),
-                            quantity_units=(history.get("quantity") or {}).get("units", ""),
-                            values=None,
-                            source_filename=values.get("filename", ""),
-                        )
-                    else:
-                        TimeHistory.objects.create(
-                            datapoint=datapoint,
-                            history_type=history.get("type"),
-                            time_units=(history.get("time") or {}).get("units", ""),
-                            quantity_units=(history.get("quantity") or {}).get("units", ""),
-                            values=time_first(values, history.get("time"), history.get("quantity")),
-                        )
-
-                volume_history = datapoint_data.get("volume-history") or {}
-                if volume_history:
-                    VolumeHistory.objects.create(
-                        datapoint=datapoint,
-                        time_units=(volume_history.get("time") or {}).get("units", ""),
-                        volume_units=(volume_history.get("volume") or {}).get("units", ""),
-                        values=time_first(
-                            volume_history.get("values", []),
-                            volume_history.get("time"),
-                            volume_history.get("volume"),
-                        ),
-                    )
-
-            # A file none of whose datapoints could be stored is not imported, so it leaves
-            # no dataset without datapoints (an updated file leaves the stored one unchanged)
-            if not dataset.datapoints.exists():
-                raise ValueError("no datapoint could be stored")
-
-    def _store_speciation(
-        self,
-        datapoint: ExperimentDatapoint,
-        datapoint_data: Dict[str, Any],
-        experiment_type: str,
-        context: str,
-    ):
-        """Store a ChemKED speciation datapoint's profiles and its reactor's extension row.
-
-        Profiles keep the file's species name and identifiers, units, rows and uncertainty
-        block unchanged; the independent variables are on the datapoint.
-        """
-        report = self.stderr.write
-        time_units = next(
-            (
-                variable.get("units", "")
-                for variable in datapoint_data.get("independent-variables") or []
-                if variable.get("name") == "time"
-            ),
-            "",
-        )
-
-        payload: Dict[str, Any] = {}
-        if experiment_type == ExperimentType.JSR_MEASUREMENT:
-            quantity = create_value_with_unit(datapoint_data.get("environment-temperature"))
-            if quantity:
-                payload["environment_temperature"] = si_value(quantity, "temperature", report, context)
-                payload["environment_temperature_quantity"] = quantity
-        elif experiment_type == ExperimentType.OUTLET_CONCENTRATION:
-            quantity = create_value_with_unit(datapoint_data.get("residence-time"))
-            if quantity:
-                payload["residence_time"] = si_value(quantity, "time", report, context)
-                payload["residence_time_quantity"] = quantity
-            quantity = create_value_with_unit(datapoint_data.get("volumetric-flow-in-reference-state"))
-            if quantity:
-                payload["volumetric_flow_in_reference_state"] = si_value(
-                    quantity, "volumetric_flow", report, context
-                )
-                payload["volumetric_flow_quantity"] = quantity
-        elif experiment_type == ExperimentType.BSFS_MEASUREMENT:
-            quantity = create_value_with_unit(datapoint_data.get("flow-rate"))
-            if quantity:
-                payload["flow_rate"] = si_value(quantity, "mass_flux", report, context)
-                payload["flow_rate_quantity"] = quantity
-        elif experiment_type == ExperimentType.CONCENTRATION_TIME_PROFILE:
-            # The profiles are ConcentrationProfile rows, not this record's single profile
-            payload = {"time_units": time_units, "quantity_units": "", "values": []}
-            time_shift = datapoint_data.get("time-shift") or {}
-            if time_shift:
-                amount = create_value_with_unit(time_shift.get("amount"))
-                payload.update({
-                    "timeshift_target": time_shift.get("target", ""),
-                    "timeshift_type": time_shift.get("type", ""),
-                    "timeshift_amount": amount.value if amount else None,
-                    "timeshift_amount_quantity": amount,
-                })
-        create_experiment_extension(datapoint, experiment_type, payload)
-
-        for profile in datapoint_data.get("concentration-profiles") or []:
-            species = CompositionSpecies.objects.create(
-                composition=None,
-                species_name=profile["species-name"],
-                inchi=profile.get("InChI", ""),
-                smiles=profile.get("SMILES", ""),
-                amount=None,
-            )
-            ConcentrationProfile.objects.create(
-                datapoint=datapoint,
-                species=species,
-                time_units=time_units,
-                quantity_units=profile["quantity"]["units"],
-                values=profile["values"],
-                uncertainty=profile_uncertainty(profile.get("uncertainty")),
-            )
-
-        for profile in datapoint_data.get("auxiliary-profiles") or []:
-            independent = profile.get("independent") or {}
-            AuxiliaryProfile.objects.create(
-                datapoint=datapoint,
-                profile_type=profile.get("type", ""),
-                independent_name=independent.get("name", ""),
-                independent_units=independent.get("units", ""),
-                quantity_units=(profile.get("quantity") or {}).get("units", ""),
-                values=profile.get("values") or [],
-            )
+        store_chemked_data(data, str(yaml_path.relative_to(base_path)), self.stderr.write)

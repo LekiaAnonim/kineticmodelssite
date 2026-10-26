@@ -32,10 +32,9 @@ router.register(r"composition-species", chemked_views.CompositionSpeciesViewSet,
 router.register(r"ignition-delay", chemked_views.IgnitionDelayViewSet, basename="api-ignition-delay")
 router.register(r"laminar-burning-velocity", chemked_views.LaminarBurningVelocityViewSet, basename="api-laminar-burning-velocity")
 router.register(r"rate-coefficient", chemked_views.RateCoefficientViewSet, basename="api-rate-coefficient")
-router.register(r"concentration-time-profile", chemked_views.ConcentrationTimeProfileViewSet, basename="api-concentration-time-profile")
-router.register(r"jet-stirred-reactor", chemked_views.JetStirredReactorViewSet, basename="api-jet-stirred-reactor")
-router.register(r"outlet-concentration", chemked_views.OutletConcentrationViewSet, basename="api-outlet-concentration")
-router.register(r"burner-stabilized-flame", chemked_views.BurnerStabilizedFlameViewSet, basename="api-burner-stabilized-flame")
+router.register(r"speciation-measurement", chemked_views.SpeciationMeasurementViewSet, basename="api-speciation-measurement")
+router.register(r"concentration-profile", chemked_views.ConcentrationProfileViewSet, basename="api-concentration-profile")
+router.register(r"auxiliary-profile", chemked_views.AuxiliaryProfileViewSet, basename="api-auxiliary-profile")
 
 # analysis: simulation results and agreement metrics (read-only)
 router.register(r"simulation-run", analysis_views.SimulationRunViewSet, basename="api-simulation-run")

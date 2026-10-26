@@ -5,6 +5,7 @@ import io
 import shutil
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from django.apps import apps
 from django.core.management import call_command
@@ -21,6 +22,12 @@ from chemked_database.models import (
 from chemked_database.units import UnitConversionError, quantity_to_si, to_si
 
 migration = importlib.import_module("chemked_database.migrations.0031_store_numeric_values_in_si")
+
+# The fields of models that still exist; 0033 removed the four old speciation models
+CURRENT_QUANTITY_FIELDS = [
+    entry for entry in migration.QUANTITY_FIELDS
+    if entry[0] in {model.__name__ for model in apps.get_app_config("chemked_database").get_models()}
+]
 
 ATM = 101325.0
 TORR = ATM / 760.0
@@ -192,6 +199,7 @@ class ConvertExistingRowsTests(TestCase):
             **extra,
         )
 
+    @mock.patch.object(migration, "QUANTITY_FIELDS", CURRENT_QUANTITY_FIELDS)
     def test_converts_raw_numbers_and_keeps_converted_ones(self):
         raw = self._datapoint(660.0, ". K", 15.6, "atm", residence_time=3000.0, residence_time_units="ms")
         delay = IgnitionDelayDatapoint.objects.create(

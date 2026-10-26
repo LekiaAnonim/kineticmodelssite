@@ -2,21 +2,21 @@ from django.contrib import admin
 
 from .models import (
 	Apparatus,
-	BurnerStabilizedFlameSpeciationMeasurementDatapoint,
+	AuxiliaryProfile,
 	CommonProperties,
 	Composition,
 	CompositionSpecies,
-	ConcentrationTimeProfileMeasurementDatapoint,
+	ConcentrationProfile,
 	EvaluatedStandardDeviation,
 	ExperimentDataset,
 	ExperimentDatapoint,
 	FileAuthor,
 	IgnitionDelayDatapoint,
-	JetStirredReactorMeasurementDatapoint,
+	IndependentVariable,
 	LaminarBurningVelocityMeasurementDatapoint,
-	OutletConcentrationMeasurementDatapoint,
 	ReferenceAuthor,
 	RCMData,
+	SpeciationMeasurementDatapoint,
 	SpeciesThermo,
 	TimeHistory,
 	ValueWithUnit,
@@ -74,24 +74,37 @@ class LaminarBurningVelocityMeasurementDatapointAdmin(admin.ModelAdmin):
 	list_display = ("datapoint", "laminar_burning_velocity", "stretch")
 
 
-@admin.register(ConcentrationTimeProfileMeasurementDatapoint)
-class ConcentrationTimeProfileMeasurementDatapointAdmin(admin.ModelAdmin):
-	list_display = ("datapoint", "tracked_species")
+class IndependentVariableInline(admin.TabularInline):
+	model = IndependentVariable
+	extra = 0
 
 
-@admin.register(JetStirredReactorMeasurementDatapoint)
-class JetStirredReactorMeasurementDatapointAdmin(admin.ModelAdmin):
-	list_display = ("datapoint",)
+class ConcentrationProfileInline(admin.TabularInline):
+	model = ConcentrationProfile
+	extra = 0
+	fields = ("species", "quantity_units", "uncertainty_type", "uncertainty", "evaluated_standard_deviation")
+	raw_id_fields = ("species",)
 
 
-@admin.register(OutletConcentrationMeasurementDatapoint)
-class OutletConcentrationMeasurementDatapointAdmin(admin.ModelAdmin):
-	list_display = ("datapoint",)
+class AuxiliaryProfileInline(admin.TabularInline):
+	model = AuxiliaryProfile
+	extra = 0
+	fields = ("profile_type", "independent_name", "independent_units", "quantity_units")
 
 
-@admin.register(BurnerStabilizedFlameSpeciationMeasurementDatapoint)
-class BurnerStabilizedFlameSpeciationMeasurementDatapointAdmin(admin.ModelAdmin):
-	list_display = ("datapoint",)
+@admin.register(SpeciationMeasurementDatapoint)
+class SpeciationMeasurementDatapointAdmin(admin.ModelAdmin):
+	list_display = ("datapoint", "residence_time", "reactor_volume", "flow_rate")
+	search_fields = ("datapoint__dataset__chemked_file_path",)
+	raw_id_fields = ("datapoint",)
+	inlines = (IndependentVariableInline, ConcentrationProfileInline, AuxiliaryProfileInline)
+
+
+@admin.register(ConcentrationProfile)
+class ConcentrationProfileAdmin(admin.ModelAdmin):
+	list_display = ("measurement", "species", "quantity_units")
+	search_fields = ("species__species_name", "species__inchi")
+	raw_id_fields = ("measurement", "species")
 
 
 @admin.register(EvaluatedStandardDeviation)

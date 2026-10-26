@@ -28,9 +28,7 @@ class Command(BaseCommand):
 
             # The species of a concentration profile has no composition on purpose
             for species in CompositionSpecies.objects.filter(
-                composition__isnull=True,
-                concentration_profiles__isnull=True,
-                concentration_time_profiles__isnull=True,
+                composition__isnull=True, concentration_profiles__isnull=True
             ):
                 datapoint = getattr(species, "datapoint", None)
                 if datapoint and datapoint.composition:

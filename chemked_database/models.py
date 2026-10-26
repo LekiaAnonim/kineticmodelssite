@@ -1,8 +1,8 @@
 """
 ChemKED Database Models
 
-Models for storing experimental combustion data in ChemKED format.
-Supports ignition delay experiments from shock tubes and rapid compression machines.
+Models for storing experimental combustion data in ChemKED format: ignition delay, laminar
+burning velocity and speciation measurements, as PyKED's schema defines them.
 
 Reference: https://github.com/pr-omethe-us/ChemKED
 Schema: https://github.com/pr-omethe-us/PyKED
@@ -29,16 +29,18 @@ class ApparatusKind(models.TextChoices):
     FLAME = 'flame', 'Flame'
     OUTWARDLY_PROPAGATING_SPHERICAL_FLAME = 'outwardly propagating spherical flame', 'Outwardly Propagating Spherical Flame'
     HEAT_FLUX_BURNER = 'heat flux burner', 'Heat Flux Burner'
+    BURNER_STABILIZED_FLAME = 'burner stabilized flame', 'Burner Stabilized Flame'
+    COUNTERFLOW_TWIN_FLAME = 'counterflow twin flame', 'Counterflow Twin Flame'
+    BUNSEN_BURNER = 'bunsen burner', 'Bunsen Burner'
 
 
 class ExperimentType(models.TextChoices):
     """Types of experiments"""
     IGNITION_DELAY = 'ignition delay', 'Ignition Delay'
     LAMINAR_BURNING_VELOCITY = 'laminar burning velocity measurement', 'Laminar Burning Velocity Measurement'
-    JSR_MEASUREMENT = 'jet stirred reactor measurement', 'Jet Stirred Reactor Measurement'
-    OUTLET_CONCENTRATION = 'outlet concentration measurement', 'Outlet Concentration Measurement'
-    CONCENTRATION_TIME_PROFILE = 'concentration time profile measurement', 'Concentration Time Profile Measurement'
-    BSFS_MEASUREMENT = 'burner stabilized flame speciation measurement', 'Burner Stabilized Flame Speciation Measurement'
+    # Species profiles in jet stirred reactors, flow reactors, burner stabilized flames and shock
+    # tubes; ReSpecTh's four speciation types convert to it with PyKED
+    SPECIATION_MEASUREMENT = 'speciation measurement', 'Speciation Measurement'
     RATE_COEFFICIENT = 'rate coefficient', 'Rate Coefficient'
     THERMOCHEMICAL = 'thermochemical', 'Thermochemical'
 
@@ -76,6 +78,10 @@ class CompositionKind(models.TextChoices):
     MOLE_FRACTION = 'mole fraction', 'Mole Fraction'
     MASS_FRACTION = 'mass fraction', 'Mass Fraction'
     MOLE_PERCENT = 'mole percent', 'Mole Percent'
+    MOL_PER_CM3 = 'mol/cm3', 'mol/cm3'
+    MOL_PER_M3 = 'mol/m3', 'mol/m3'
+    MOL_PER_L = 'mol/L', 'mol/L'
+    MOL_PER_DM3 = 'mol/dm3', 'mol/dm3'
 
 
 class UncertaintyType(models.TextChoices):
@@ -159,6 +165,12 @@ class ValueWithUnit(models.Model):
     )
     upper_uncertainty = models.FloatField(null=True, blank=True)
     lower_uncertainty = models.FloatField(null=True, blank=True)
+    uncertainty_sourcetype = models.CharField(
+        max_length=100,
+        choices=PropertySourceType.choices,
+        blank=True,
+        help_text="How the uncertainty was obtained (reported, estimated, calculated, digitized)"
+    )
     sourcetype = models.CharField(
         max_length=20,
         choices=PropertySourceType.choices,
@@ -511,8 +523,11 @@ class ExperimentDatapoint(models.Model):
         related_name='datapoints'
     )
     
-    # Primary conditions (stored in SI units internally)
+    # Primary conditions (stored in SI units internally). A speciation datapoint may give no
+    # temperature (a temperature sweep has it as an independent variable).
     temperature = models.FloatField(
+        null=True,
+        blank=True,
         validators=[MinValueValidator(0)],
         help_text="Temperature in Kelvin"
     )
@@ -585,22 +600,13 @@ class ExperimentDatapoint(models.Model):
         related_name='datapoints'
     )
 
-    # Speciation measurement: the columns of each concentration profile's rows
-    independent_variables = models.JSONField(
-        default=list,
-        blank=True,
-        help_text=(
-            "ChemKED independent-variables in column order: name, units, primary, and the "
-            "species-name / InChI / SMILES a sweep may name"
-        )
-    )
-
     class Meta:
         db_table = 'chemked_datapoints'
-        ordering = ['dataset', 'temperature']
+        ordering = ['dataset', 'temperature', 'id']
 
     def __str__(self):
-        return f"T={self.temperature}K, P={self.pressure/1e5:.5f}bar"
+        temperature = f"{self.temperature}K" if self.temperature is not None else "n/a"
+        return f"T={temperature}, P={self.pressure/1e5:.5f}bar"
     
     def get_composition(self):
         """Get composition, falling back to dataset common composition"""
@@ -864,45 +870,121 @@ class RateCoefficientDatapoint(models.Model):
         return f"k = {self.rate_coefficient:.2e} {self.rate_coefficient_units}"
 
 
-class ConcentrationTimeProfileMeasurementDatapoint(models.Model):
+class IndependentVariableName(models.TextChoices):
+    """Independent variables of a ChemKED speciation measurement datapoint"""
+    TEMPERATURE = 'temperature', 'Temperature'
+    RESIDENCE_TIME = 'residence-time', 'Residence Time'
+    DISTANCE = 'distance', 'Distance'
+    TIME = 'time', 'Time'
+    EQUIVALENCE_RATIO = 'equivalence-ratio', 'Equivalence Ratio'
+    INITIAL_COMPOSITION = 'initial-composition', 'Initial Composition'
+    PRESSURE = 'pressure', 'Pressure'
+
+
+class AuxiliaryProfileType(models.TextChoices):
+    """Properties a speciation datapoint can record along with its species profiles"""
+    TEMPERATURE = 'temperature', 'Temperature'
+    PRESSURE = 'pressure', 'Pressure'
+    VOLUME = 'volume', 'Volume'
+    VELOCITY = 'velocity', 'Velocity'
+
+
+class SpeciationMeasurementDatapoint(models.Model):
     """
-    Concentration time profile measurement datapoint.
-    Stores species concentration vs. time data from shock tube or flow reactor experiments.
+    ChemKED speciation measurement datapoint: species profiles measured in a jet stirred
+    reactor, flow reactor, burner stabilized flame or shock tube.
+
+    Mirrors PyKED's speciation measurement schema. Pressure, temperature, composition and
+    equivalence ratio are on the ExperimentDatapoint; the apparatus of the dataset tells the
+    reactor apart. Each quantity keeps the file's value and unit in ``<field>_quantity`` and its
+    SI value in ``<field>``.
     """
+    # Its ChemKED value-unit keys: (ChemKED key, field, kind of SI unit in units.SI_UNITS)
+    CHEMKED_QUANTITIES = (
+        ("environment-temperature", "environment_temperature", "temperature"),
+        ("residence-time", "residence_time", "time"),
+        ("reactor-volume", "reactor_volume", "volume"),
+        ("reactor-length", "reactor_length", "length"),
+        ("reactor-diameter", "reactor_diameter", "length"),
+        ("flow-rate", "flow_rate", "mass_flux"),
+        ("volumetric-flow-in-reference-state", "volumetric_flow_in_reference_state", "volumetric_flow"),
+        ("pressure-in-reference-state", "pressure_in_reference_state", "pressure"),
+        ("temperature-in-reference-state", "temperature_in_reference_state", "temperature"),
+        ("global-heat-exchange-coefficient", "global_heat_exchange_coefficient", "heat_transfer_coefficient"),
+        ("exchange-area", "exchange_area", "area"),
+        # PyKED applies every common property to each datapoint, and a burner stabilized
+        # flame file may give the burning velocity of its flame (hydrogen/Vandooren_1991)
+        ("laminar-burning-velocity", "laminar_burning_velocity", "velocity"),
+    )
+
     datapoint = models.OneToOneField(
         ExperimentDatapoint,
         on_delete=models.CASCADE,
-        related_name='concentration_time_profile_measurement'
+        related_name='speciation_measurement'
     )
 
-    # Tracked species (link to CompositionSpecies for proper identification)
-    tracked_species = models.ForeignKey(
-        'CompositionSpecies',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='concentration_time_profiles',
-        help_text="Species being tracked over time"
+    environment_temperature = models.FloatField(null=True, blank=True, help_text="Environment temperature in K")
+    environment_temperature_quantity = models.ForeignKey(
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    residence_time = models.FloatField(null=True, blank=True, help_text="Residence time in s")
+    residence_time_quantity = models.ForeignKey(
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    reactor_volume = models.FloatField(null=True, blank=True, help_text="Reactor volume in m³")
+    reactor_volume_quantity = models.ForeignKey(
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    reactor_length = models.FloatField(null=True, blank=True, help_text="Flow reactor length in m")
+    reactor_length_quantity = models.ForeignKey(
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    reactor_diameter = models.FloatField(null=True, blank=True, help_text="Flow reactor diameter in m")
+    reactor_diameter_quantity = models.ForeignKey(
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    flow_rate = models.FloatField(null=True, blank=True, help_text="Mass flow rate in kg m⁻² s⁻¹")
+    flow_rate_quantity = models.ForeignKey(
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    volumetric_flow_in_reference_state = models.FloatField(
+        null=True, blank=True, help_text="Volumetric flow rate at the reference state in m³/s"
+    )
+    volumetric_flow_in_reference_state_quantity = models.ForeignKey(
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    pressure_in_reference_state = models.FloatField(
+        null=True, blank=True, help_text="Reference state pressure in Pa"
+    )
+    pressure_in_reference_state_quantity = models.ForeignKey(
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    temperature_in_reference_state = models.FloatField(
+        null=True, blank=True, help_text="Reference state temperature in K"
+    )
+    temperature_in_reference_state_quantity = models.ForeignKey(
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    global_heat_exchange_coefficient = models.FloatField(
+        null=True, blank=True, help_text="Jet stirred reactor heat exchange coefficient in W m⁻² K⁻¹"
+    )
+    global_heat_exchange_coefficient_quantity = models.ForeignKey(
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    exchange_area = models.FloatField(
+        null=True, blank=True, help_text="Jet stirred reactor heat exchange area in m²"
+    )
+    exchange_area_quantity = models.ForeignKey(
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    laminar_burning_velocity = models.FloatField(
+        null=True, blank=True, help_text="Burning velocity of a burner stabilized flame in m/s"
+    )
+    laminar_burning_velocity_quantity = models.ForeignKey(
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
     )
 
-    time_units = models.CharField(max_length=20, default='s')
-    quantity_units = models.CharField(
-        max_length=50,
-        help_text="Species concentration units (e.g., mole fraction, ppm)"
-    )
-
-    values = models.JSONField(
-        help_text="Array of [time, value] or [time, value, uncertainty] pairs"
-    )
-
-    uncertainty_type = models.CharField(
-        max_length=20,
-        choices=UncertaintyType.choices,
-        blank=True
-    )
-    uncertainty_value = models.FloatField(null=True, blank=True)
-
-    # Time shift reference (for defining t=0)
+    # t = 0 reference of a profile against time
     timeshift_target = models.CharField(
         max_length=255,
         blank=True,
@@ -914,51 +996,68 @@ class ConcentrationTimeProfileMeasurementDatapoint(models.Model):
         blank=True,
         help_text="Method for determining time shift"
     )
-    timeshift_amount = models.FloatField(
-        null=True,
-        blank=True,
-        help_text="Time shift amount in time_units"
-    )
+    timeshift_amount = models.FloatField(null=True, blank=True, help_text="Time shift amount in s")
     timeshift_amount_quantity = models.ForeignKey(
-        ValueWithUnit,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='ctpm_timeshift_amounts'
+        ValueWithUnit, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
     )
 
     class Meta:
-        db_table = 'chemked_concentration_time_profile_measurement'
-        verbose_name = 'Concentration Time Profile Measurement Datapoint'
-        verbose_name_plural = 'Concentration Time Profile Measurement Datapoints'
+        db_table = 'chemked_speciation_measurement'
+        verbose_name = 'Speciation Measurement Datapoint'
+        verbose_name_plural = 'Speciation Measurement Datapoints'
 
     def __str__(self):
-        species = self.tracked_species.species_name if self.tracked_species else 'unknown'
-        count = len(self.values) if self.values else 0
-        return f"Concentration time profile: {species} ({count} points)"
+        names = ', '.join(variable.name for variable in self.independent_variables.all())
+        return f"Speciation measurement against {names or 'n/a'}"
+
+
+class IndependentVariable(models.Model):
+    """
+    One independent variable of a speciation datapoint (ChemKED independent-variables), in
+    column order: each concentration profile row holds one value per variable, then the amount.
+    """
+    measurement = models.ForeignKey(
+        SpeciationMeasurementDatapoint,
+        on_delete=models.CASCADE,
+        related_name='independent_variables'
+    )
+    column = models.PositiveSmallIntegerField(help_text="Column of the variable in the profile rows")
+    name = models.CharField(max_length=30, choices=IndependentVariableName.choices)
+    units = models.CharField(max_length=50)
+    primary = models.BooleanField(
+        null=True,
+        blank=True,
+        help_text="The swept axis, for plotting and comparison"
+    )
+    # The swept inlet species when name is initial-composition
+    species_name = models.CharField(max_length=255, blank=True)
+    inchi = models.CharField(max_length=500, blank=True)
+    smiles = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        db_table = 'chemked_independent_variables'
+        ordering = ['measurement', 'column']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['measurement', 'column'], name='chemked_unique_independent_variable_column'
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.units})"
 
 
 class ConcentrationProfile(models.Model):
     """
     One species profile of a speciation datapoint (ChemKED concentration-profiles).
 
-    A datapoint has one profile per measured species. Each row of ``values`` holds one value
-    per independent variable of the datapoint (``ExperimentDatapoint.independent_variables``),
-    then the amount, then optionally its uncertainty, as in the ChemKED file.
+    Each row of ``values`` holds one value per independent variable of the datapoint, then
+    the amount, then optionally its uncertainty, as in the ChemKED file. The uncertainty fields
+    describe the amounts of the whole profile.
     """
-    datapoint = models.ForeignKey(
-        ExperimentDatapoint,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        related_name='concentration_profiles'
-    )
-    # Older single-measurement form; profiles imported from ChemKED files use ``datapoint``
     measurement = models.ForeignKey(
-        ConcentrationTimeProfileMeasurementDatapoint,
+        SpeciationMeasurementDatapoint,
         on_delete=models.CASCADE,
-        null=True,
-        blank=True,
         related_name='concentration_profiles'
     )
 
@@ -972,12 +1071,6 @@ class ConcentrationProfile(models.Model):
         help_text="Tracked species for this concentration profile"
     )
 
-    time_units = models.CharField(
-        max_length=20,
-        default='s',
-        blank=True,
-        help_text="Units of the time column; blank when the profile has no time column"
-    )
     quantity_units = models.CharField(
         max_length=50,
         help_text="Species concentration units (e.g., mole fraction, ppm)"
@@ -987,15 +1080,33 @@ class ConcentrationProfile(models.Model):
         help_text="Rows of [independent values..., amount] or [independent values..., amount, uncertainty]"
     )
 
-    uncertainty = models.JSONField(
-        null=True,
+    uncertainty_type = models.CharField(max_length=20, choices=UncertaintyType.choices, blank=True)
+    uncertainty = models.FloatField(null=True, blank=True)
+    upper_uncertainty = models.FloatField(null=True, blank=True)
+    lower_uncertainty = models.FloatField(null=True, blank=True)
+    uncertainty_text = models.CharField(
+        max_length=100,
         blank=True,
-        help_text=(
-            "The profile's ChemKED uncertainty block as in the file (uncertainty-type, "
-            "uncertainty, upper/lower-uncertainty, uncertainty-sourcetype, "
-            "evaluated-standard-deviation and its type, sourcetype and method)"
-        )
+        help_text="Raw uncertainty string if provided as text"
     )
+    uncertainty_sourcetype = models.CharField(
+        max_length=100,
+        choices=PropertySourceType.choices,
+        blank=True,
+        help_text="How the uncertainty was obtained"
+    )
+    evaluated_standard_deviation = models.FloatField(null=True, blank=True)
+    evaluated_standard_deviation_type = models.CharField(
+        max_length=20,
+        choices=UncertaintyType.choices,
+        blank=True
+    )
+    evaluated_standard_deviation_sourcetype = models.CharField(
+        max_length=100,
+        choices=PropertySourceType.choices,
+        blank=True
+    )
+    evaluated_standard_deviation_method = models.CharField(max_length=100, blank=True)
 
     class Meta:
         db_table = 'chemked_concentration_profiles'
@@ -1012,21 +1123,18 @@ class AuxiliaryProfile(models.Model):
     A profile measured along with the species of a speciation datapoint (ChemKED
     auxiliary-profiles), e.g. the temperature against height above a burner.
     """
-    datapoint = models.ForeignKey(
-        ExperimentDatapoint,
+    measurement = models.ForeignKey(
+        SpeciationMeasurementDatapoint,
         on_delete=models.CASCADE,
         related_name='auxiliary_profiles'
     )
 
-    profile_type = models.CharField(
-        max_length=30,
-        help_text="Measured property: temperature, pressure, volume or velocity"
-    )
+    profile_type = models.CharField(max_length=30, choices=AuxiliaryProfileType.choices)
     independent_name = models.CharField(
         max_length=30,
         help_text="Independent variable: distance or time"
     )
-    independent_units = models.CharField(max_length=20)
+    independent_units = models.CharField(max_length=50)
     quantity_units = models.CharField(max_length=50)
 
     values = models.JSONField(
@@ -1042,183 +1150,33 @@ class AuxiliaryProfile(models.Model):
         return f"{self.profile_type} against {self.independent_name} ({count} points)"
 
 
-class JetStirredReactorMeasurementDatapoint(models.Model):
-    """
-    Jet stirred reactor measurement datapoint.
-    Stores species composition vs. temperature at steady state.
-    Common properties (volume, pressure, residence time) come from CommonProperties.
-    """
-    datapoint = models.OneToOneField(
-        ExperimentDatapoint,
-        on_delete=models.CASCADE,
-        related_name='jet_stirred_reactor_measurement'
-    )
-
-    # Measured output composition at this datapoint's conditions
-    measured_composition = models.ForeignKey(
-        'Composition',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='jsr_measurement_datapoints',
-        help_text="Measured species compositions at this T/P condition"
-    )
-
-    # Per-datapoint environment temperature (optional, from schema)
-    environment_temperature = models.FloatField(
-        null=True,
-        blank=True,
-        help_text="Environment temperature in Kelvin"
-    )
-    environment_temperature_quantity = models.ForeignKey(
-        ValueWithUnit,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='jsr_environment_temperatures'
-    )
-
-    class Meta:
-        db_table = 'chemked_jet_stirred_reactor_measurement'
-        verbose_name = 'Jet Stirred Reactor Measurement Datapoint'
-        verbose_name_plural = 'Jet Stirred Reactor Measurement Datapoints'
-
-    def __str__(self):
-        return f"JSR measurement at T={self.datapoint.temperature}K"
-
-
-class OutletConcentrationMeasurementDatapoint(models.Model):
-    """
-    Outlet concentration measurement datapoint.
-    Stores species compositions at reactor outlet for different conditions.
-    """
-    datapoint = models.OneToOneField(
-        ExperimentDatapoint,
-        on_delete=models.CASCADE,
-        related_name='outlet_concentration_measurement'
-    )
-
-    # Measured output composition at this datapoint's conditions
-    measured_composition = models.ForeignKey(
-        'Composition',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='ocm_datapoints',
-        help_text="Measured species compositions at outlet"
-    )
-
-    # Per-datapoint residence time override (may differ from common properties)
-    residence_time = models.FloatField(
-        null=True,
-        blank=True,
-        help_text="Residence time in seconds (per-datapoint override)"
-    )
-    residence_time_quantity = models.ForeignKey(
-        ValueWithUnit,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='ocm_residence_times'
-    )
-
-    # Volumetric flow in reference state
-    volumetric_flow_in_reference_state = models.FloatField(
-        null=True,
-        blank=True,
-        help_text="Volumetric flow rate at reference conditions (m³/s)"
-    )
-    volumetric_flow_quantity = models.ForeignKey(
-        ValueWithUnit,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='ocm_volumetric_flows'
-    )
-
-    # Optional initial composition if different from common properties
-    initial_composition = models.ForeignKey(
-        'Composition',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='ocm_initial_compositions',
-        help_text="Initial composition if different from common properties"
-    )
-
-    class Meta:
-        db_table = 'chemked_outlet_concentration_measurement'
-        verbose_name = 'Outlet Concentration Measurement Datapoint'
-        verbose_name_plural = 'Outlet Concentration Measurement Datapoints'
-
-    def __str__(self):
-        return f"Outlet concentration at T={self.datapoint.temperature}K"
-
-
-class BurnerStabilizedFlameSpeciationMeasurementDatapoint(models.Model):
-    """
-    Burner stabilized flame speciation measurement datapoint.
-    Stores species profiles as a function of distance from burner.
-    """
-    datapoint = models.OneToOneField(
-        ExperimentDatapoint,
-        on_delete=models.CASCADE,
-        related_name='burner_stabilized_flame_speciation_measurement'
-    )
-
-    # Measured species composition at this distance
-    measured_composition = models.ForeignKey(
-        'Composition',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='bsfsm_datapoints',
-        help_text="Measured species compositions at this distance"
-    )
-
-    # Distance from burner
-    distance = models.FloatField(
-        null=True,
-        blank=True,
-        help_text="Distance from burner in meters"
-    )
-    distance_quantity = models.ForeignKey(
-        ValueWithUnit,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='bsfsm_distances'
-    )
-
-    # Flow rate
-    flow_rate = models.FloatField(
-        null=True,
-        blank=True,
-        help_text="Mass flow rate in kg m⁻² s⁻¹"
-    )
-    flow_rate_quantity = models.ForeignKey(
-        ValueWithUnit,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='bsfsm_flow_rates'
-    )
-
-    class Meta:
-        db_table = 'chemked_burner_stabilized_flame_speciation_measurement'
-        verbose_name = 'Burner Stabilized Flame Speciation Measurement Datapoint'
-        verbose_name_plural = 'Burner Stabilized Flame Speciation Measurement Datapoints'
-
-    def __str__(self):
-        d_mm = self.distance * 1000 if self.distance is not None else None
-        d_str = f"{d_mm:.2f}mm" if d_mm is not None else "n/a"
-        return f"BSFS measurement at d={d_str}"
-
-
 class CommonProperties(models.Model):
     """
     Properties shared across all datapoints in a dataset (ChemKED common-properties).
+
+    PyKED applies each of them to every datapoint, which keeps its own copy as well.
     """
+    # ChemKED value-unit keys and the fields that keep the file's value and unit
+    CHEMKED_QUANTITIES = (
+        ("pressure", "pressure_quantity"),
+        ("temperature", "temperature_quantity"),
+        ("ignition-delay", "ignition_delay_quantity"),
+        ("pressure-rise", "pressure_rise_quantity"),
+        ("equivalence-ratio", "equivalence_ratio_quantity"),
+        ("residence-time", "residence_time_quantity"),
+        ("reactor-volume", "reactor_volume_quantity"),
+        ("flow-rate", "flow_rate_quantity"),
+        ("laminar-burning-velocity", "laminar_burning_velocity_quantity"),
+        ("environment-temperature", "environment_temperature_quantity"),
+        ("global-heat-exchange-coefficient", "global_heat_exchange_coefficient_quantity"),
+        ("exchange-area", "exchange_area_quantity"),
+        ("reactor-length", "reactor_length_quantity"),
+        ("reactor-diameter", "reactor_diameter_quantity"),
+        ("pressure-in-reference-state", "pressure_in_reference_state_quantity"),
+        ("temperature-in-reference-state", "temperature_in_reference_state_quantity"),
+        ("volumetric-flow-in-reference-state", "volumetric_flow_in_reference_state_quantity"),
+    )
+
     dataset = models.OneToOneField(
         ExperimentDataset,
         on_delete=models.CASCADE,
@@ -1406,6 +1364,20 @@ class CommonProperties(models.Model):
         null=True,
         blank=True,
         related_name='common_temperature_ref_state_sets'
+    )
+    volumetric_flow_in_reference_state_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='common_volumetric_flow_ref_state_sets'
+    )
+    ignition_delay_quantity = models.ForeignKey(
+        ValueWithUnit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='common_ignition_delay_sets'
     )
 
     class Meta:

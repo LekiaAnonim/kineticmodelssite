@@ -153,7 +153,8 @@ class DatasetExportYamlTests(TestCase):
         block = self._point(self._export(), "1213")["ignition-delay"][1]
 
         self.assertNotIn("uncertainty-type", block)
-        self.assertEqual(block["evaluated-standard-deviation"], 0.155261)
+        # Written as the file gives it, as text
+        self.assertEqual(block["evaluated-standard-deviation"], "0.155261")
         self.assertEqual(block["evaluated-standard-deviation-type"], "relative")
 
     def test_uncertainty_without_type_is_left_out(self):
@@ -284,7 +285,9 @@ apparatus:
 common-properties:
   reactor-volume: &volume [30 cm3]
   pressure: &pressure [1.05 atm]
-  residence-time: &time [2000.0 ms]
+  residence-time: &time
+    - 2000.0 ms
+    - {uncertainty-type: relative, uncertainty: '0.05', uncertainty-sourcetype: reported}
   composition: &comp
     kind: mole fraction
     species:
@@ -345,6 +348,7 @@ class SpeciationExportTests(TestCase):
             reverse("chemked_database:dataset-export", args=[dataset.pk]), {"format": "yaml"}
         )
         self.assertEqual(response.status_code, 200, response.content[:300])
+        self.content = response.content.decode()
         return yaml.safe_load(text), yaml.safe_load(response.content)
 
     def test_profiles_are_written_as_stored(self):
@@ -380,8 +384,12 @@ class SpeciationExportTests(TestCase):
 
         # A temperature sweep has no datapoint temperature, so none is written
         self.assertNotIn("temperature", first)
-        self.assertEqual(first["residence-time"], ["2000.0 ms"])
-        self.assertEqual(second["residence-time"], ["1.0 s"])
+        self.assertEqual(first["residence-time"], [
+            "2000.0 ms",
+            {"uncertainty-type": "relative", "uncertainty": "0.05", "uncertainty-sourcetype": "reported"},
+        ])
+        # The second datapoint's own residence time, not the common one
+        self.assertEqual(second["residence-time"], ["1000.0 ms"])
         self.assertEqual(first["reactor-volume"], ["30.0 cm3"])
         self.assertIn(
             {"species-name": "NC5H12", "amount": [0.01]}, first["composition"]["species"]
@@ -406,5 +414,20 @@ class SpeciationExportTests(TestCase):
 
         exported = self._round_trip(yaml.safe_dump(document), "x/flame.yaml")[1]
 
+        self.assertEqual(exported["common-properties"]["laminar-burning-velocity"], ["131.0 cm/s"])
         self.assertEqual(exported["datapoints"][0]["laminar-burning-velocity"], ["131.0 cm/s"])
         load_in_pyked(exported)
+
+    def test_common_properties_are_written_apart(self):
+        source, exported = self._round_trip(JSR_FILE, "x/jsr.yaml")
+
+        common = exported["common-properties"]
+        self.assertEqual(sorted(common), sorted(source["common-properties"]))
+        self.assertEqual(common["reactor-volume"], ["30.0 cm3"])
+        # Values the datapoints share with them are YAML aliases of their anchors, as in
+        # PyKED files
+        first, second = exported["datapoints"]
+        self.assertIs(first["reactor-volume"], common["reactor-volume"])
+        self.assertIs(first["residence-time"], common["residence-time"])
+        self.assertIsNot(second["residence-time"], common["residence-time"])
+        self.assertIn("reactor-volume: &", self.content)

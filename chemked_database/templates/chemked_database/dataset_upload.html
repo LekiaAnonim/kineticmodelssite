@@ -219,7 +219,7 @@
                         <div class="alert {% if preview_data.duplicate_match.match_type == 'exact' or not preview_data.duplicate_match.has_diff %}alert-warning{% else %}alert-info{% endif %} d-flex align-items-start py-2" role="alert">
                             <i class="bi {% if preview_data.duplicate_match.match_type == 'exact' or not preview_data.duplicate_match.has_diff %}bi-exclamation-triangle{% else %}bi-files{% endif %} me-2 mt-1"></i>
                             <div>
-                                {% if preview_data.duplicate_match.match_type == 'exact' or not preview_data.duplicate_match.has_diff %}
+                                {% if preview_data.duplicate_match.match_type == 'exact' %}
                                 <strong>Identical file already in repository</strong>
                                 <div class="small">
                                     Your file is byte-identical to
@@ -812,8 +812,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
         if (d) {
             let msg = '';
-            if (d.match_type === 'exact' || !d.has_diff) {
+            if (d.match_type === 'exact') {
                 msg = `Byte-identical to <code>${escapeHtml(d.path)}</code>. A PR will show no changes.`;
+            } else if (!d.has_diff) {
+                msg = `Same data as <code>${escapeHtml(d.path)}</code>; only formatting differs. A PR will show no changes.`;
             } else if (d.match_type === 'filename') {
                 msg = `Matches existing <code>${escapeHtml(d.path)}</code>. Your submission will update it &mdash; see diff below.`;
             } else {

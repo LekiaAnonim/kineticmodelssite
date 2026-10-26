@@ -6,7 +6,6 @@ Designed for combustion research community and scientists.
 """
 
 import html as html_mod
-import math
 import os
 import re
 import tempfile
@@ -18,7 +17,6 @@ from pathlib import Path
 
 from django.conf import settings
 from django.contrib import messages
-from django.core.exceptions import ObjectDoesNotExist
 from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage
 from django.db import transaction
 from django.db.models import Count, Avg, Min, Max, Q
@@ -41,11 +39,8 @@ from .models import (
     IgnitionDelayDatapoint,
     LaminarBurningVelocityMeasurementDatapoint,
     RateCoefficientDatapoint,
-    ConcentrationTimeProfileMeasurementDatapoint,
-    JetStirredReactorMeasurementDatapoint,
-    OutletConcentrationMeasurementDatapoint,
-    BurnerStabilizedFlameSpeciationMeasurementDatapoint,
     MeasurementType,
+    SpeciationMeasurementDatapoint,
     Apparatus,
     FileAuthor,
     ReferenceAuthor,
@@ -56,6 +51,12 @@ from .models import (
     Submission,
 )
 from .filters import DatasetFilter, DatapointFilter
+from .speciation import (
+    profile_chart_data,
+    profile_uncertainty_block,
+    speciation_conditions,
+    stored_rows,
+)
 from .forms import (
     FileMetadataForm,
     FileAuthorFormSet,
@@ -69,10 +70,6 @@ from .forms import (
     IgnitionDelayFormSet,
     LaminarBurningVelocityFormSet,
     RateCoefficientFormSet,
-    JetStirredReactorFormSet,
-    OutletConcentrationFormSet,
-    ConcentrationTimeProfileFormSet,
-    BurnerStabilizedFlameSpeciationFormSet,
     ChemKEDUploadForm,
     ExportOptionsForm,
 )
@@ -290,13 +287,25 @@ class DatasetDetailView(DetailView):
         context = super().get_context_data(**kwargs)
         dataset = self.object
 
-        # Paginate datapoints
+        # Paginate datapoints; a speciation measurement keeps file order, as a temperature
+        # sweep has no datapoint temperature
+        speciation = dataset.experiment_type == ExperimentType.SPECIATION_MEASUREMENT
+        context["speciation"] = speciation
         datapoints = dataset.datapoints.select_related(
             "ignition_delay",
             "composition",
             "temperature_quantity",
             "pressure_quantity",
-        ).order_by("temperature")
+            "speciation_measurement",
+        )
+        if speciation:
+            datapoints = datapoints.prefetch_related(
+                "speciation_measurement__independent_variables",
+                "speciation_measurement__concentration_profiles__species",
+                "speciation_measurement__auxiliary_profiles",
+            ).order_by("pk")
+        else:
+            datapoints = datapoints.order_by("temperature")
 
         page = self.request.GET.get("page", 1)
         paginator = Paginator(datapoints, 25)
@@ -313,6 +322,22 @@ class DatasetDetailView(DetailView):
             context["common_properties"] = common_props
             if common_props.composition:
                 context["common_species"] = common_props.composition.species.all()
+            context["common_conditions"] = [
+                {"key": key, "quantity": getattr(common_props, field)}
+                for key, field in CommonProperties.CHEMKED_QUANTITIES
+                if getattr(common_props, field)
+            ]
+
+        # Profiles of the first speciation datapoint
+        first = datapoints.first() if speciation else None
+        measurement = getattr(first, "speciation_measurement", None)
+        if measurement:
+            context["chart_datapoint"] = first
+            context["profile_chart"] = profile_chart_data(
+                list(measurement.independent_variables.all()),
+                list(measurement.concentration_profiles.all()),
+                list(measurement.auxiliary_profiles.all()),
+            )
 
         # Temperature and pressure ranges for this dataset
         context["temp_range"] = datapoints.aggregate(
@@ -385,14 +410,20 @@ class DatapointDetailView(DetailView):
             context["ignition_delay"] = datapoint.ignition_delay
         if hasattr(datapoint, "laminar_burning_velocity_measurement"):
             context["laminar_burning_velocity_measurement"] = datapoint.laminar_burning_velocity_measurement
-        if hasattr(datapoint, "concentration_time_profile_measurement"):
-            context["concentration_time_profile_measurement"] = datapoint.concentration_time_profile_measurement
-        if hasattr(datapoint, "jet_stirred_reactor_measurement"):
-            context["jet_stirred_reactor_measurement"] = datapoint.jet_stirred_reactor_measurement
-        if hasattr(datapoint, "outlet_concentration_measurement"):
-            context["outlet_concentration_measurement"] = datapoint.outlet_concentration_measurement
-        if hasattr(datapoint, "burner_stabilized_flame_speciation_measurement"):
-            context["burner_stabilized_flame_speciation_measurement"] = datapoint.burner_stabilized_flame_speciation_measurement
+        if hasattr(datapoint, "speciation_measurement"):
+            measurement = datapoint.speciation_measurement
+            context["speciation_measurement"] = measurement
+            context["independent_variables"] = list(measurement.independent_variables.all())
+            context["concentration_profiles"] = list(
+                measurement.concentration_profiles.select_related("species")
+            )
+            context["auxiliary_profiles"] = list(measurement.auxiliary_profiles.all())
+            context["speciation_conditions"] = speciation_conditions(measurement)
+            context["profile_chart"] = profile_chart_data(
+                context["independent_variables"],
+                context["concentration_profiles"],
+                context["auxiliary_profiles"],
+            )
 
         # RCM data
         if hasattr(datapoint, "rcm_data"):
@@ -457,7 +488,7 @@ class SpeciesDatapointsView(ListView):
             .filter(
                 Q(composition__species__species_name=species_name) |
                 Q(dataset__common_properties__composition__species__species_name=species_name) |
-                Q(concentration_profiles__species__species_name=species_name)
+                Q(speciation_measurement__concentration_profiles__species__species_name=species_name)
             )
             .select_related("dataset", "ignition_delay", "temperature_quantity", "pressure_quantity")
             .distinct()
@@ -639,22 +670,6 @@ class DatasetCreateWizardView(TemplateView):
             initial=session_data.get('rate_coefficients', []),
             prefix='rate_coefficients'
         )
-        context['jsr_formset'] = JetStirredReactorFormSet(
-            initial=session_data.get('jsr_data', []),
-            prefix='jsr'
-        )
-        context['outlet_concentration_formset'] = OutletConcentrationFormSet(
-            initial=session_data.get('outlet_concentration_data', []),
-            prefix='outlet_conc'
-        )
-        context['ctp_formset'] = ConcentrationTimeProfileFormSet(
-            initial=session_data.get('ctp_data', []),
-            prefix='ctp'
-        )
-        context['bsfs_formset'] = BurnerStabilizedFlameSpeciationFormSet(
-            initial=session_data.get('bsfs_data', []),
-            prefix='bsfs'
-        )
         
         # Active tab (default to first)
         context['active_tab'] = self.request.GET.get('tab', 'metadata')
@@ -678,10 +693,6 @@ class DatasetCreateWizardView(TemplateView):
         ignition_delay_formset = IgnitionDelayFormSet(request.POST, prefix='ignition_delays')
         lbv_formset = LaminarBurningVelocityFormSet(request.POST, prefix='lbv')
         rate_coefficient_formset = RateCoefficientFormSet(request.POST, prefix='rate_coefficients')
-        jsr_formset = JetStirredReactorFormSet(request.POST, prefix='jsr')
-        outlet_concentration_formset = OutletConcentrationFormSet(request.POST, prefix='outlet_conc')
-        ctp_formset = ConcentrationTimeProfileFormSet(request.POST, prefix='ctp')
-        bsfs_formset = BurnerStabilizedFlameSpeciationFormSet(request.POST, prefix='bsfs')
         
         # Collect data into session
         wizard_data = {
@@ -697,10 +708,6 @@ class DatasetCreateWizardView(TemplateView):
             'ignition_delays': [f.cleaned_data for f in ignition_delay_formset if f.is_valid() and f.cleaned_data],
             'lbv_data': [f.cleaned_data for f in lbv_formset if f.is_valid() and f.cleaned_data],
             'rate_coefficients': [f.cleaned_data for f in rate_coefficient_formset if f.is_valid() and f.cleaned_data],
-            'jsr_data': [f.cleaned_data for f in jsr_formset if f.is_valid() and f.cleaned_data],
-            'outlet_concentration_data': [f.cleaned_data for f in outlet_concentration_formset if f.is_valid() and f.cleaned_data],
-            'ctp_data': [f.cleaned_data for f in ctp_formset if f.is_valid() and f.cleaned_data],
-            'bsfs_data': [f.cleaned_data for f in bsfs_formset if f.is_valid() and f.cleaned_data],
         }
         request.session['chemked_wizard'] = wizard_data
         
@@ -732,14 +739,6 @@ class DatasetCreateWizardView(TemplateView):
                 all_valid = all_valid and lbv_formset.is_valid()
             elif experiment_type == ExperimentType.RATE_COEFFICIENT:
                 all_valid = all_valid and rate_coefficient_formset.is_valid()
-            elif experiment_type == ExperimentType.JSR_MEASUREMENT:
-                all_valid = all_valid and jsr_formset.is_valid()
-            elif experiment_type == ExperimentType.OUTLET_CONCENTRATION:
-                all_valid = all_valid and outlet_concentration_formset.is_valid()
-            elif experiment_type == ExperimentType.CONCENTRATION_TIME_PROFILE:
-                all_valid = all_valid and ctp_formset.is_valid()
-            elif experiment_type == ExperimentType.BSFS_MEASUREMENT:
-                all_valid = all_valid and bsfs_formset.is_valid()
             
             if all_valid:
                 try:
@@ -769,10 +768,6 @@ class DatasetCreateWizardView(TemplateView):
             'ignition_delay_formset': ignition_delay_formset,
             'lbv_formset': lbv_formset,
             'rate_coefficient_formset': rate_coefficient_formset,
-            'jsr_formset': jsr_formset,
-            'outlet_concentration_formset': outlet_concentration_formset,
-            'ctp_formset': ctp_formset,
-            'bsfs_formset': bsfs_formset,
         })
         return self.render_to_response(context)
     
@@ -1012,10 +1007,6 @@ class DatasetCreateWizardView(TemplateView):
         ignition_delays_data = data.get('ignition_delays', [])
         lbv_data = data.get('lbv_data', [])
         rate_coefficients_data = data.get('rate_coefficients', [])
-        jsr_data = data.get('jsr_data', [])
-        outlet_concentration_data = data.get('outlet_concentration_data', [])
-        ctp_data = data.get('ctp_data', [])
-        bsfs_data = data.get('bsfs_data', [])
         
         for idx, dp_data in enumerate(datapoints_data):
             # Parse temperature
@@ -1127,124 +1118,6 @@ class DatasetCreateWizardView(TemplateView):
                     method=rc_data.get('method', ''),
                 )
             
-            elif dataset.experiment_type == ExperimentType.JSR_MEASUREMENT and idx < len(jsr_data):
-                jsr = jsr_data[idx]
-                
-                env_temp = None
-                env_temp_quantity = None
-                if jsr.get('environment_temperature'):
-                    env_val, env_unit = self._parse_value_with_unit(jsr['environment_temperature'])
-                    if env_val is not None:
-                        env_temp, _ = self._convert_to_si(env_val, env_unit)
-                        env_temp_quantity = ValueWithUnit.objects.create(
-                            value=env_val, units=env_unit
-                        )
-                
-                JetStirredReactorMeasurementDatapoint.objects.create(
-                    datapoint=datapoint,
-                    environment_temperature=env_temp,
-                    environment_temperature_quantity=env_temp_quantity,
-                )
-            
-            elif dataset.experiment_type == ExperimentType.OUTLET_CONCENTRATION and idx < len(outlet_concentration_data):
-                oc_data = outlet_concentration_data[idx]
-                
-                oc_res_time = None
-                oc_res_time_quantity = None
-                if oc_data.get('residence_time'):
-                    rt_val, rt_unit = self._parse_value_with_unit(oc_data['residence_time'])
-                    if rt_val is not None:
-                        oc_res_time, _ = self._convert_to_si(rt_val, rt_unit)
-                        oc_res_time_quantity = ValueWithUnit.objects.create(
-                            value=rt_val, units=rt_unit
-                        )
-                
-                oc_vol_flow = None
-                oc_vol_flow_quantity = None
-                if oc_data.get('volumetric_flow'):
-                    vf_val, vf_unit = self._parse_value_with_unit(oc_data['volumetric_flow'])
-                    if vf_val is not None:
-                        oc_vol_flow, _ = self._convert_to_si(vf_val, vf_unit)
-                        oc_vol_flow_quantity = ValueWithUnit.objects.create(
-                            value=vf_val, units=vf_unit
-                        )
-                
-                OutletConcentrationMeasurementDatapoint.objects.create(
-                    datapoint=datapoint,
-                    residence_time=oc_res_time,
-                    residence_time_quantity=oc_res_time_quantity,
-                    volumetric_flow_in_reference_state=oc_vol_flow,
-                    volumetric_flow_quantity=oc_vol_flow_quantity,
-                )
-            
-            elif dataset.experiment_type == ExperimentType.CONCENTRATION_TIME_PROFILE and idx < len(ctp_data):
-                ctp = ctp_data[idx]
-                
-                # Parse values_text into list of [time, value] pairs
-                values = []
-                values_text = ctp.get('values_text', '')
-                for line in values_text.strip().splitlines():
-                    parts = [p.strip() for p in line.split(',')]
-                    if len(parts) >= 2:
-                        try:
-                            values.append([float(parts[0]), float(parts[1])])
-                        except ValueError:
-                            continue
-                
-                timeshift_amount_val = None
-                timeshift_amount_quantity = None
-                if ctp.get('timeshift_amount'):
-                    ts_val, ts_unit = self._parse_value_with_unit(ctp['timeshift_amount'])
-                    if ts_val is not None:
-                        timeshift_amount_val = ts_val
-                        timeshift_amount_quantity = ValueWithUnit.objects.create(
-                            value=ts_val, units=ts_unit
-                        )
-                
-                ConcentrationTimeProfileMeasurementDatapoint.objects.create(
-                    datapoint=datapoint,
-                    time_units=ctp.get('time_units', 's'),
-                    quantity_units=ctp.get('quantity_units', ''),
-                    values=values,
-                    uncertainty_type=ctp.get('uncertainty_type', ''),
-                    uncertainty_value=ctp.get('uncertainty_value'),
-                    timeshift_target=ctp.get('timeshift_target', ''),
-                    timeshift_type=ctp.get('timeshift_type', ''),
-                    timeshift_amount=timeshift_amount_val,
-                    timeshift_amount_quantity=timeshift_amount_quantity,
-                )
-            
-            elif dataset.experiment_type == ExperimentType.BSFS_MEASUREMENT and idx < len(bsfs_data):
-                bsfs = bsfs_data[idx]
-                
-                dist_val = None
-                dist_quantity = None
-                if bsfs.get('distance'):
-                    d_val, d_unit = self._parse_value_with_unit(bsfs['distance'])
-                    if d_val is not None:
-                        dist_val, _ = self._convert_to_si(d_val, d_unit)
-                        dist_quantity = ValueWithUnit.objects.create(
-                            value=d_val, units=d_unit
-                        )
-                
-                bsfs_flow_rate = None
-                bsfs_flow_rate_quantity = None
-                if bsfs.get('flow_rate'):
-                    fr_val, fr_unit = self._parse_value_with_unit(bsfs['flow_rate'])
-                    if fr_val is not None:
-                        bsfs_flow_rate, _ = self._convert_to_si(fr_val, fr_unit)
-                        bsfs_flow_rate_quantity = ValueWithUnit.objects.create(
-                            value=fr_val, units=fr_unit
-                        )
-                
-                BurnerStabilizedFlameSpeciationMeasurementDatapoint.objects.create(
-                    datapoint=datapoint,
-                    distance=dist_val,
-                    distance_quantity=dist_quantity,
-                    flow_rate=bsfs_flow_rate,
-                    flow_rate_quantity=bsfs_flow_rate_quantity,
-                )
-        
         return dataset
     
     def _export_yaml(self, data):
@@ -1293,10 +1166,6 @@ class DatasetCreateWizardView(TemplateView):
         ignition_delays = data.get('ignition_delays', [])
         lbv_data = data.get('lbv_data', [])
         rate_coefficients = data.get('rate_coefficients', [])
-        jsr_data = data.get('jsr_data', [])
-        outlet_concentration_data = data.get('outlet_concentration_data', [])
-        ctp_data = data.get('ctp_data', [])
-        bsfs_data = data.get('bsfs_data', [])
         
         experiment_type = exp_data.get('experiment_type', 'ignition delay')
         
@@ -1431,34 +1300,6 @@ class DatasetCreateWizardView(TemplateView):
                 if rc.get('method'):
                     dp_dict['method'] = rc['method']
             
-            elif experiment_type == ExperimentType.JSR_MEASUREMENT and idx < len(jsr_data):
-                jsr = jsr_data[idx]
-                if jsr.get('environment_temperature'):
-                    dp_dict['environment-temperature'] = [jsr['environment_temperature']]
-            
-            elif experiment_type == ExperimentType.OUTLET_CONCENTRATION and idx < len(outlet_concentration_data):
-                oc = outlet_concentration_data[idx]
-                if oc.get('residence_time'):
-                    dp_dict['residence-time'] = [oc['residence_time']]
-                if oc.get('volumetric_flow'):
-                    dp_dict['volumetric-flow-in-reference-state'] = [oc['volumetric_flow']]
-            
-            elif experiment_type == ExperimentType.CONCENTRATION_TIME_PROFILE and idx < len(ctp_data):
-                ctp = ctp_data[idx]
-                if ctp.get('tracked_species_name'):
-                    dp_dict['tracked-species'] = ctp['tracked_species_name']
-                if ctp.get('quantity_units'):
-                    dp_dict['quantity-units'] = ctp['quantity_units']
-                if ctp.get('time_units'):
-                    dp_dict['time-units'] = ctp['time_units']
-            
-            elif experiment_type == ExperimentType.BSFS_MEASUREMENT and idx < len(bsfs_data):
-                bsfs = bsfs_data[idx]
-                if bsfs.get('distance'):
-                    dp_dict['distance'] = [bsfs['distance']]
-                if bsfs.get('flow_rate'):
-                    dp_dict['flow-rate'] = [bsfs['flow_rate']]
-            
             datapoints.append(dp_dict)
         
         # Build apparatus dict
@@ -1499,21 +1340,54 @@ class DatasetCreateWizardView(TemplateView):
         return chemked_dict
 
 
+def respecth_to_chemked_dict(path, original_filename='', file_author='', file_author_orcid=''):
+    """ChemKED dict of a ReSpecTh XML file.
+
+    Experiment files (ignition delay, burning velocity and the four ReSpecTh speciation types,
+    which become one speciation measurement) are converted with PyKED's ReSpecTh_to_ChemKED.
+    kdetermination and tdetermination files need pyked.batch_convert.
+    """
+    import xml.etree.ElementTree as ET
+
+    if ET.parse(path).getroot().tag == 'experiment':
+        from pyked.converters import ReSpecTh_to_ChemKED
+
+        return ReSpecTh_to_ChemKED(
+            path, file_author or '', file_author_orcid if file_author else '', validate=False
+        )
+    from pyked.batch_convert import convert_file
+
+    return convert_file(path, original_filename=original_filename)
+
+
+class _ChemKEDDumper(yaml.Dumper):
+    """YAML dumper of ChemKED-database files: insertion key order, indented block sequences."""
+
+    def increase_indent(self, flow=False, indentless=False):
+        return super().increase_indent(flow=flow, indentless=False)
+
+
+_ChemKEDDumper.add_representer(
+    dict,
+    lambda dumper, data: dumper.represent_mapping(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, data.items()
+    ),
+)
+
+
 def format_chemked_yaml(chemked_dict):
     """Serialize a ChemKED property dict to YAML matching database conventions.
 
-    Delegates to ``pyked.batch_convert.yaml_dump`` — the same serializer that
-    produced every file in ChemKED-database — so output is byte-identical.
+    Writes as ``yaml_dump`` of the former ``pyked.batch_convert`` did — the serializer that
+    produced every file in ChemKED-database — so output is byte-identical. PyKED no longer
+    ships batch_convert.
     """
-    from io import StringIO
-    from pyked.batch_convert import yaml_dump
-
     d = dict(chemked_dict)
     d.pop('file-type', None)          # internal-only key
 
-    buf = StringIO()
-    yaml_dump(d, buf)
-    return buf.getvalue()
+    return '---\n' + yaml.dump(
+        d, Dumper=_ChemKEDDumper, default_flow_style=False, allow_unicode=True
+    ) + '...\n'
 
 
 def _sort_keys(obj):
@@ -1715,9 +1589,9 @@ class DatasetUploadView(FormView):
                 with open(temp_file_path, 'r') as fh:
                     chemked_dict = yaml.safe_load(fh)
             else:
-                # XML files: convert via batch_convert
-                from pyked.batch_convert import convert_file
-                chemked_dict = convert_file(temp_file_path, original_filename=original_filename)
+                chemked_dict = respecth_to_chemked_dict(
+                    temp_file_path, original_filename, file_author, file_author_orcid
+                )
 
             data = ChemKEDDictAdapter(chemked_dict)
             
@@ -1983,8 +1857,7 @@ class DatasetUploadView(FormView):
                         raw_content = fh.read()
 
                     if is_xml:
-                        from pyked.batch_convert import convert_file as _conv
-                        chemked_dict = _conv(tf['temp_path'], original_filename=tf['original_name'])
+                        chemked_dict = respecth_to_chemked_dict(tf['temp_path'], tf['original_name'])
                         check_content = format_chemked_yaml(chemked_dict)
                         check_filename = os.path.splitext(tf['original_name'])[0] + '.yaml'
                     else:
@@ -2103,10 +1976,11 @@ class DatasetUploadView(FormView):
     
     def _import_respecth_xml_batch(self, temp_path, original_filename, file_author, file_author_orcid):
         """Import ReSpecTh XML in batch mode (no preview)."""
-        from pyked.batch_convert import convert_file
         from .chemked_adapter import ChemKEDDictAdapter
         
-        chemked_dict = convert_file(temp_path, original_filename=original_filename)
+        chemked_dict = respecth_to_chemked_dict(
+            temp_path, original_filename, file_author, file_author_orcid
+        )
         data = ChemKEDDictAdapter(chemked_dict)
         
         # Log duplicate info but proceed — the GitHub PR will show
@@ -2114,7 +1988,7 @@ class DatasetUploadView(FormView):
         if data.file_doi:
             existing = ExperimentDataset.objects.filter(file_doi=data.file_doi).first()
             if existing:
-                log.info(
+                logger.info(
                     'Dataset with DOI "%s" already exists as "%s" (ID: %s). '
                     'Proceeding — PR will show diff for review.',
                     data.file_doi, existing.chemked_file_path, existing.pk,
@@ -2129,7 +2003,7 @@ class DatasetUploadView(FormView):
                 )
             existing = similar.first()
             if existing:
-                log.info(
+                logger.info(
                     'Possible duplicate: reference DOI "%s" with %d datapoints '
                     'matches "%s" (ID: %s). Proceeding — PR will show diff for review.',
                     data.reference.doi, len(data.datapoints),
@@ -2761,20 +2635,18 @@ class DatasetUploadView(FormView):
             return ExperimentType.IGNITION_DELAY
 
         exp_lower = experiment_type.lower()
-        if 'jet stirred reactor' in exp_lower or 'jsr' in exp_lower:
-            return ExperimentType.JSR_MEASUREMENT
-        if 'outlet' in exp_lower and 'concentration' in exp_lower:
-            return ExperimentType.OUTLET_CONCENTRATION
-        if 'concentration' in exp_lower and 'profile' in exp_lower:
-            return ExperimentType.CONCENTRATION_TIME_PROFILE
+        # ReSpecTh's jet stirred reactor, outlet concentration, concentration time profile and
+        # burner stabilized flame speciation types are one ChemKED speciation measurement
+        if (
+            'speciation' in exp_lower or 'concentration' in exp_lower
+            or 'jet stirred reactor' in exp_lower or 'jsr' in exp_lower
+            or ('species' in exp_lower and 'profile' in exp_lower)
+        ):
+            return ExperimentType.SPECIATION_MEASUREMENT
         if 'ignition' in exp_lower or 'delay' in exp_lower:
             return ExperimentType.IGNITION_DELAY
         if 'flame' in exp_lower or 'speed' in exp_lower or 'burning' in exp_lower or 'velocity' in exp_lower:
             return ExperimentType.LAMINAR_BURNING_VELOCITY
-        if 'burner' in exp_lower and 'stabilized' in exp_lower:
-            return ExperimentType.BSFS_MEASUREMENT
-        if 'species' in exp_lower and 'profile' in exp_lower:
-            return ExperimentType.CONCENTRATION_TIME_PROFILE
         if 'rate' in exp_lower or 'coefficient' in exp_lower:
             return ExperimentType.RATE_COEFFICIENT
         if 'thermo' in exp_lower:
@@ -2924,11 +2796,12 @@ class DatasetUploadView(FormView):
         Import ReSpecTh v2.x format file (kdetermination, tdetermination, etc.).
         Shows a preview step first so user can edit the dataset name.
         """
-        from pyked.batch_convert import convert_file
         from .chemked_adapter import ChemKEDDictAdapter
         
         try:
-            chemked_dict = convert_file(temp_path, original_filename=original_filename)
+            chemked_dict = respecth_to_chemked_dict(
+                temp_path, original_filename, file_author, file_author_orcid
+            )
             data = ChemKEDDictAdapter(chemked_dict)
 
             validation_error = None
@@ -3085,6 +2958,9 @@ class DatasetUploadView(FormView):
             exp_type = ExperimentType.THERMOCHEMICAL
         else:
             exp_type = self._map_experiment_type(exp_type_str, strict=True)
+
+        if exp_type == ExperimentType.SPECIATION_MEASUREMENT:
+            return self._import_speciation_dict(chemked_dict, readable_name, file_author)
         
         # Apparatus
         apparatus_kind_str = data.apparatus_kind or (data.method if file_type == 'kdetermination' else '')
@@ -3798,8 +3674,23 @@ class DatasetUploadView(FormView):
             return value
 
     @transaction.atomic
+    def _import_speciation_dict(self, chemked_dict, dataset_name, file_author=''):
+        """Store a ChemKED speciation measurement as sync_chemked does, keeping every field."""
+        from .management.commands.sync_chemked import store_chemked_data
+
+        problems = []
+        dataset = store_chemked_data(chemked_dict, dataset_name, problems.append)
+        for problem in problems:
+            logger.warning("%s", problem)
+        if file_author:
+            author, _ = FileAuthor.objects.get_or_create(name=file_author, defaults={'orcid': ''})
+            dataset.file_authors.add(author)
+        return dataset
+
     def _import_chemked(self, ck, original_filename):
         """Import a ChemKED object into the database."""
+        if ck.experiment_type == ExperimentType.SPECIATION_MEASUREMENT:
+            return self._import_speciation_dict(ck._properties, original_filename)
         
         # Get or create apparatus
         apparatus, _ = Apparatus.objects.get_or_create(
@@ -3973,12 +3864,9 @@ class DatasetExportView(View):
                 'datapoints__composition__species',
                 'datapoints__time_histories',
                 'datapoints__volume_history',
-                'datapoints__concentration_profiles__species',
-                'datapoints__auxiliary_profiles',
-                'datapoints__jet_stirred_reactor_measurement',
-                'datapoints__outlet_concentration_measurement',
-                'datapoints__burner_stabilized_flame_speciation_measurement',
-                'datapoints__concentration_time_profile_measurement',
+                'datapoints__speciation_measurement__independent_variables',
+                'datapoints__speciation_measurement__concentration_profiles__species',
+                'datapoints__speciation_measurement__auxiliary_profiles',
             ),
             pk=pk
         )
@@ -3995,34 +3883,30 @@ class DatasetExportView(View):
             messages.error(request, f'Unknown export format: {export_format}')
             return redirect('chemked_database:dataset-detail', pk=pk)
     
+    # Top-level key order of ChemKED-database files
+    CHEMKED_KEY_ORDER = (
+        'file-authors', 'file-version', 'chemked-version', 'reference', 'experiment-type',
+        'apparatus', 'comments', 'common-properties', 'datapoints',
+    )
+
     def _export_yaml(self, dataset):
-        """Export dataset to ChemKED YAML format."""
+        """Export dataset to ChemKED YAML format.
+
+        Written with the serializer of ChemKED-database files (YAML aliases for the values a
+        datapoint shares with common-properties), without building a PyKED object, so a
+        dataset whose source lacks a required key (e.g. a ReSpecTh file with no inlet
+        composition) is still exported rather than failing.
+        """
         try:
-            from pyked import chemked
-            
-            # Build ChemKED dictionary from dataset
             chemked_dict = self._dataset_to_chemked_dict(dataset)
-            
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-                temp_path = f.name
-            
-            try:
-                ck = chemked.ChemKED(dict_input=chemked_dict, skip_validation=True)
-                ck.write_file(temp_path, overwrite=True)
-                
-                with open(temp_path, 'r') as f:
-                    yaml_content = f.read()
-                
-                filename = Path(dataset.chemked_file_path).stem + '.yaml'
-                response = HttpResponse(yaml_content, content_type='application/x-yaml')
-                response['Content-Disposition'] = f'attachment; filename="{filename}"'
-                return response
-            finally:
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-                    
-        except ImportError:
-            return HttpResponse('PyKED not installed', status=500)
+            ordered = {key: chemked_dict[key] for key in self.CHEMKED_KEY_ORDER if key in chemked_dict}
+            ordered.update(chemked_dict)
+            yaml_content = format_chemked_yaml(ordered)
+
+            filename = Path(dataset.chemked_file_path).stem + '.yaml'
+            response = HttpResponse(yaml_content, content_type='application/x-yaml')
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            return response
         except Exception as e:
             logger.exception("Error exporting YAML")
             return HttpResponse(f'Error: {str(e)}', status=500)
@@ -4056,6 +3940,9 @@ class DatasetExportView(View):
                     if os.path.exists(p):
                         os.unlink(p)
                         
+        except NotImplementedError as e:
+            # PyKED writes ReSpecTh XML for ignition delay datasets only
+            return HttpResponse(f'ReSpecTh XML export is not available: {e}', status=501)
         except Exception as e:
             logger.exception("Error exporting XML")
             return HttpResponse(f'Error: {str(e)}', status=500)
@@ -4136,28 +4023,16 @@ class DatasetExportView(View):
         if not ref_authors:
             ref_authors = [{'name': 'Unknown'}]
         
-        # Build composition from common properties or first datapoint
-        composition = None
-        if hasattr(dataset, 'common_properties') and dataset.common_properties:
-            cp = dataset.common_properties
-            if cp.composition:
-                composition = {
-                    'kind': str(cp.composition.kind) if cp.composition.kind else 'mole fraction',
-                    'species': []
-                }
-                for sp in cp.composition.species.all():
-                    composition['species'].append(self._composition_species_entry(sp))
-        
+        common = getattr(dataset, 'common_properties', None)
+
         # Ignition type from common properties
         ignition_type = None
-        if hasattr(dataset, 'common_properties') and dataset.common_properties:
-            cp = dataset.common_properties
-            if cp.ignition_target or cp.ignition_type:
-                ignition_type = {}
-                if cp.ignition_target:
-                    ignition_type['target'] = cp.ignition_target
-                if cp.ignition_type:
-                    ignition_type['type'] = cp.ignition_type
+        if common and (common.ignition_target or common.ignition_type):
+            ignition_type = {}
+            if common.ignition_target:
+                ignition_type['target'] = common.ignition_target
+            if common.ignition_type:
+                ignition_type['type'] = common.ignition_type
         
         # Build datapoints
         datapoints = []
@@ -4165,18 +4040,20 @@ class DatasetExportView(View):
         def _uncertainty_entry(number, uncertainty_type, quantity):
             """An uncertainty number as ChemKED writes it.
 
-            PyKED converts an absolute uncertainty to the unit of its value, so it needs a
-            unit. The file's text keeps the unit it was given in; without it, the unit of
-            the value is used.
+            The file's text is kept when it gives this number ("25 K", "0.05"). PyKED converts
+            an absolute uncertainty to the unit of its value, so without the text an absolute
+            uncertainty takes the unit of the value.
             """
-            if uncertainty_type != 'absolute' or not quantity.units:
-                return number
             match = re.match(
-                r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*(\S.*)$",
+                r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*(.*)$",
                 quantity.uncertainty_text or '',
             )
-            if match and float(match.group(1)) == number:
+            if match and float(match.group(1)) == number and (
+                match.group(2).strip() or uncertainty_type != 'absolute' or not quantity.units
+            ):
                 return quantity.uncertainty_text.strip()
+            if uncertainty_type != 'absolute' or not quantity.units:
+                return number
             return f"{number} {quantity.units}"
 
         def _serialize_quantity(quantity, fallback_value=None, fallback_units=None):
@@ -4206,6 +4083,8 @@ class DatasetExportView(View):
                         metadata[key] = _uncertainty_entry(
                             number, quantity.uncertainty_type, quantity
                         )
+                    if quantity.uncertainty_sourcetype:
+                        metadata['uncertainty-sourcetype'] = quantity.uncertainty_sourcetype
                 elif uncertainties:
                     logger.warning(
                         "ValueWithUnit %s has an uncertainty without uncertainty-type;"
@@ -4229,21 +4108,33 @@ class DatasetExportView(View):
 
             return serialized
 
-        # A speciation measurement (ChemKED 0.5) keeps species profiles. Its datapoints are
-        # written in file order: a temperature sweep has no datapoint temperature to sort by.
+        # common-properties, as PyKED files give them; PyKED applies each to every datapoint,
+        # which the datapoints below repeat
+        common_properties = {}
+        if common:
+            for key, field in CommonProperties.CHEMKED_QUANTITIES:
+                entry = _serialize_quantity(getattr(common, field))
+                if entry:
+                    common_properties[key] = entry
+            if common.composition:
+                common_properties['composition'] = self._composition_entry(common.composition)
+            if ignition_type:
+                common_properties['ignition-type'] = ignition_type
+
+        # A speciation measurement keeps species profiles. Its datapoints are written in file
+        # order: a temperature sweep has no datapoint temperature to sort by.
+        speciation = dataset.experiment_type == ExperimentType.SPECIATION_MEASUREMENT
         all_datapoints = list(dataset.datapoints.all())
-        speciation = any(dp.concentration_profiles.all() for dp in all_datapoints)
         if speciation:
             all_datapoints.sort(key=lambda dp: dp.pk)
-        common = getattr(dataset, 'common_properties', None)
 
         for dp in all_datapoints:
             dp_dict = {}
             
-            # Temperature (a speciation datapoint stores 0 K when it gives none)
+            # Temperature (a speciation datapoint may give none)
             temp_entry = _serialize_quantity(
                 dp.temperature_quantity,
-                fallback_value=None if speciation else dp.temperature,
+                fallback_value=dp.temperature,
                 fallback_units='kelvin',
             )
             if temp_entry:
@@ -4267,17 +4158,11 @@ class DatasetExportView(View):
             if equiv_entry:
                 dp_dict['equivalence-ratio'] = equiv_entry
             
-            # Composition
-            if composition:
-                dp_dict['composition'] = composition
-            elif dp.composition:
-                dp_dict['composition'] = {
-                    'kind': str(dp.composition.kind) if dp.composition.kind else 'mole fraction',
-                    'species': [
-                        self._composition_species_entry(sp)
-                        for sp in dp.composition.species.all()
-                    ]
-                }
+            # Composition: the datapoint's own, else the common one
+            if dp.composition:
+                dp_dict['composition'] = self._composition_entry(dp.composition)
+            elif 'composition' in common_properties:
+                dp_dict['composition'] = common_properties['composition']
             
             # Ignition type: the datapoint's own where it differs from the common one (some
             # RCM files give it per datapoint only)
@@ -4360,15 +4245,21 @@ class DatasetExportView(View):
                 except dp.__class__.rate_coefficient.RelatedObjectDoesNotExist:
                     pass
 
-            if speciation:
-                dp_dict.update(self._speciation_entries(dp, common, _serialize_quantity))
+            measurement = getattr(dp, 'speciation_measurement', None)
+            if measurement:
+                dp_dict.update(self._speciation_entries(measurement, _serialize_quantity))
+
+            # A value equal to the common one is the same object, which YAML writes as an alias
+            # of the common-properties anchor, as in PyKED files
+            for key, value in dp_dict.items():
+                if key in common_properties and common_properties[key] == value:
+                    dp_dict[key] = common_properties[key]
 
             datapoints.append(dp_dict)
         
-        # Ensure experiment-type is a plain string (not Django TextChoices enum). The site's
-        # jet stirred reactor, outlet, flame and time profile types are one type in ChemKED.
+        # Ensure experiment-type is a plain string (not Django TextChoices enum)
         exp_type = dataset.experiment_type or 'ignition delay'
-        exp_type_str = 'speciation measurement' if speciation else f"{exp_type}"
+        exp_type_str = f"{exp_type}"  # Force plain str from TextChoices
 
         chemked_dict = {
             'file-version': dataset.file_version or 0,
@@ -4391,6 +4282,8 @@ class DatasetExportView(View):
             }.items() if v},
             'datapoints': datapoints,
         }
+        if common_properties:
+            chemked_dict['common-properties'] = common_properties
         
         if dataset.reference_volume:
             chemked_dict['reference']['volume'] = dataset.reference_volume
@@ -4455,61 +4348,40 @@ class DatasetExportView(View):
         entry['amount'] = [sp.amount, metadata] if metadata else [sp.amount]
         return entry
 
-    @staticmethod
-    def _speciation_entries(dp, common, serialize_quantity):
-        """The speciation measurement keys of a ChemKED 0.5 datapoint.
-
-        Profiles are written as sync_chemked stored them: species name and identifiers, units,
-        rows and uncertainty block unchanged. A reactor condition the datapoint does not store
-        itself (reactor volume, a flame's burning velocity, and residence time or flow rate
-        outside the outlet and flame records) is the dataset's common value, which every
-        datapoint of ChemKED-database repeats.
-        """
-        def extension(name):
-            try:
-                return getattr(dp, name)
-            except ObjectDoesNotExist:
-                return None
-
-        def common_quantity(field):
-            return getattr(common, f'{field}_quantity', None) if common else None
-
-        jsr = extension('jet_stirred_reactor_measurement')
-        outlet = extension('outlet_concentration_measurement')
-        flame = extension('burner_stabilized_flame_speciation_measurement')
-        time_profile = extension('concentration_time_profile_measurement')
-
-        entries = {}
-        if outlet and outlet.residence_time_quantity:
-            residence_time = serialize_quantity(outlet.residence_time_quantity)
-        elif dp.residence_time is not None and (
-            not common or common.residence_time is None
-            or not math.isclose(dp.residence_time, common.residence_time, rel_tol=1e-9)
-        ):
-            residence_time = serialize_quantity(None, fallback_value=dp.residence_time, fallback_units='s')
-        else:
-            residence_time = serialize_quantity(common_quantity('residence_time'))
-        conditions = {
-            'residence-time': residence_time,
-            'reactor-volume': serialize_quantity(common_quantity('reactor_volume')),
-            'flow-rate': serialize_quantity(
-                flame.flow_rate_quantity if flame and flame.flow_rate_quantity
-                else common_quantity('flow_rate')
-            ),
-            'environment-temperature': serialize_quantity(
-                jsr.environment_temperature_quantity if jsr else None
-            ),
-            'volumetric-flow-in-reference-state': serialize_quantity(
-                outlet.volumetric_flow_quantity if outlet else None
-            ),
-            'laminar-burning-velocity': serialize_quantity(common_quantity('laminar_burning_velocity')),
+    @classmethod
+    def _composition_entry(cls, composition):
+        """A composition block as ChemKED writes it."""
+        return {
+            'kind': str(composition.kind) if composition.kind else 'mole fraction',
+            'species': [cls._composition_species_entry(sp) for sp in composition.species.all()],
         }
-        entries.update({key: value for key, value in conditions.items() if value})
 
-        entries['independent-variables'] = dp.independent_variables
+    @staticmethod
+    def _speciation_entries(measurement, serialize_quantity):
+        """The speciation keys of a ChemKED 0.5 datapoint, as sync_chemked stored them."""
+        entries = {}
+        for key, field, _kind in SpeciationMeasurementDatapoint.CHEMKED_QUANTITIES:
+            entry = serialize_quantity(getattr(measurement, f'{field}_quantity'))
+            if entry:
+                entries[key] = entry
+
+        variables = []
+        for variable in measurement.independent_variables.all():
+            entry = {'name': variable.name, 'units': variable.units}
+            if variable.primary is not None:
+                entry['primary'] = variable.primary
+            for key, value in (
+                ('species-name', variable.species_name),
+                ('InChI', variable.inchi),
+                ('SMILES', variable.smiles),
+            ):
+                if value:
+                    entry[key] = value
+            variables.append(entry)
+        entries['independent-variables'] = variables
 
         profiles = []
-        for profile in dp.concentration_profiles.all():
+        for profile in measurement.concentration_profiles.all():
             species = profile.species
             entry = {'species-name': species.species_name if species else ''}
             # SMILES derived from the InChI on import is not the file's
@@ -4518,12 +4390,10 @@ class DatasetExportView(View):
             elif species and species.smiles:
                 entry['SMILES'] = species.smiles
             entry['quantity'] = {'units': profile.quantity_units}
-            entry['values'] = profile.values
-            if profile.uncertainty:
-                entry['uncertainty'] = (
-                    [profile.uncertainty] if isinstance(profile.uncertainty, dict)
-                    else profile.uncertainty
-                )
+            entry['values'] = stored_rows(profile.values)
+            uncertainty = profile_uncertainty_block(profile)
+            if uncertainty:
+                entry['uncertainty'] = [uncertainty]
             profiles.append(entry)
         entries['concentration-profiles'] = profiles
 
@@ -4535,19 +4405,19 @@ class DatasetExportView(View):
                     'units': profile.independent_units,
                 },
                 'quantity': {'units': profile.quantity_units},
-                'values': profile.values,
+                'values': stored_rows(profile.values),
             }
-            for profile in dp.auxiliary_profiles.all()
+            for profile in measurement.auxiliary_profiles.all()
         ]
         if auxiliary:
             entries['auxiliary-profiles'] = auxiliary
 
-        if time_profile and time_profile.timeshift_target:
+        if measurement.timeshift_target:
             time_shift = {
-                'target': time_profile.timeshift_target,
-                'type': time_profile.timeshift_type,
+                'target': measurement.timeshift_target,
+                'type': measurement.timeshift_type,
             }
-            amount = serialize_quantity(time_profile.timeshift_amount_quantity)
+            amount = serialize_quantity(measurement.timeshift_amount_quantity)
             if amount:
                 time_shift['amount'] = amount
             entries['time-shift'] = time_shift
@@ -4644,8 +4514,7 @@ class DatasetProcessView(View):
                         # For XML files, convert to YAML so the PR
                         # contributes ChemKED YAML to the database repo.
                         try:
-                            from pyked.batch_convert import convert_file as _conv
-                            chemked_dict = _conv(temp_path, original_filename=original_name)
+                            chemked_dict = respecth_to_chemked_dict(temp_path, original_name)
                             file_content_for_pr = format_chemked_yaml(chemked_dict).encode('utf-8')
                         except Exception:
                             logger.debug("XML→YAML conversion for PR failed; will use raw content")

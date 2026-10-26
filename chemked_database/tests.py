@@ -25,7 +25,8 @@ from .models import (
 	RateCoefficientDatapoint,
 	RCMData,
 	SpeciesThermo,
-	ConcentrationTimeProfileMeasurementDatapoint,
+	SpeciationMeasurementDatapoint,
+	ConcentrationProfile,
 	TimeHistory,
 	TimeHistoryType,
 	UncertaintyType,
@@ -236,25 +237,22 @@ class ChemKEDModelTests(TestCase):
 
 		self.assertEqual(lbv.laminar_burning_velocity, 0.35)
 
-	def test_concentration_time_profile_extension(self):
+	def test_speciation_measurement_extension(self):
 		datapoint = ExperimentDatapoint.objects.create(
 			dataset=self.dataset,
 			temperature=1200.0,
 			pressure=101325.0,
 		)
-		composition = Composition.objects.create(kind=CompositionKind.MOLE_FRACTION)
-		tracked = CompositionSpecies.objects.create(
-			composition=composition,
-			species_name="CO",
-			amount=0.01,
-		)
-		profile = ConcentrationTimeProfileMeasurementDatapoint.objects.create(
-			datapoint=datapoint,
-			tracked_species=tracked,
+		measurement = SpeciationMeasurementDatapoint.objects.create(datapoint=datapoint)
+		tracked = CompositionSpecies.objects.create(species_name="CO", amount=None)
+		profile = ConcentrationProfile.objects.create(
+			measurement=measurement,
+			species=tracked,
+			quantity_units="mole fraction",
 			values=[[0.0, 0.01], [0.001, 0.009]],
 		)
 
-		self.assertEqual(profile.tracked_species.species_name, "CO")
+		self.assertEqual(profile.species.species_name, "CO")
 
 	def test_dispatcher_creates_extensions(self):
 		datapoint = ExperimentDatapoint.objects.create(
@@ -277,21 +275,12 @@ class ChemKEDModelTests(TestCase):
 		)
 		self.assertIsInstance(flame, LaminarBurningVelocityMeasurementDatapoint)
 
-		composition = Composition.objects.create(kind=CompositionKind.MOLE_FRACTION)
-		tracked = CompositionSpecies.objects.create(
-			composition=composition,
-			species_name="CO2",
-			amount=0.1,
-		)
-		profile = create_experiment_extension(
+		measurement = create_experiment_extension(
 			datapoint,
-			ExperimentType.CONCENTRATION_TIME_PROFILE,
-			{
-				"tracked_species": tracked,
-				"values": [[0.0, 0.1], [0.5, 0.08]],
-			},
+			ExperimentType.SPECIATION_MEASUREMENT,
+			{"residence_time": 0.07},
 		)
-		self.assertIsInstance(profile, ConcentrationTimeProfileMeasurementDatapoint)
+		self.assertIsInstance(measurement, SpeciationMeasurementDatapoint)
 
 	def test_inchi_inference_helpers(self):
 		if not rdkit_available():

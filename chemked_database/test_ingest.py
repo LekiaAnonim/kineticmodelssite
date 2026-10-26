@@ -18,12 +18,16 @@ from django.core.management.base import CommandError
 from django.test import SimpleTestCase, TestCase
 
 from .import_dispatcher import import_chemked_to_db
-from .management.commands.sync_chemked import (
-    experiment_type_of,
-    speciation_experiment_type,
-    time_first,
+from .management.commands.sync_chemked import experiment_type_of, time_first
+from .models import (
+    CompositionSpecies,
+    ConcentrationProfile,
+    ExperimentDataset,
+    ExperimentType,
+    SpeciationMeasurementDatapoint,
 )
-from .models import CompositionSpecies, ConcentrationProfile, ExperimentDataset, ExperimentType
+from .speciation import profile_uncertainty_block
+from .views import DatasetUploadView, respecth_to_chemked_dict
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
 FIXTURE_NAME = "Test_2020_ST_7.yaml"
@@ -56,9 +60,10 @@ class SyncChemkedIngestTests(TestCase):
             self._sync("no-such-dir/missing.yaml", path=str(TESTDATA))
 
 
-# A jet-stirred reactor file of ChemKED-database (hydrogen/Cong_2009), shortened. The second
-# profile adds what other files have: no InChI (pentane/Bugler_2017), a row uncertainty column
-# (ammonia/Dagaut_2022), a repeated x value (H2_O2_NOx/Seery_1981), and ppm.
+# A jet-stirred reactor file of ChemKED-database (hydrogen/Cong_2009), shortened. It adds what
+# other files have: reactor conditions with a reported uncertainty (ammonia/Dagaut_2022), and a
+# profile with no InChI (pentane/Bugler_2017), a row uncertainty column, a repeated x value
+# (H2_O2_NOx/Seery_1981) and ppm.
 SPECIATION_FILE = """\
 file-authors:
   - name: Test Author
@@ -74,7 +79,11 @@ experiment-type: speciation measurement
 apparatus:
   kind: jet stirred reactor
 common-properties:
-  pressure: [1 atm]
+  pressure: &pressure [1 atm]
+  reactor-volume: &volume [85 cm3]
+  residence-time: &time
+    - 100 ms
+    - {uncertainty-type: relative, uncertainty: '0.05', uncertainty-sourcetype: reported}
   composition: &comp
     kind: mole fraction
     species:
@@ -99,13 +108,14 @@ datapoints:
         values: [[800.0, 120.0, 12.0], [800.0, 118.0, 11.8], [900.0, 64.0, 6.4]]
         uncertainty:
           - {uncertainty-type: relative, uncertainty: 0.1, uncertainty-sourcetype: reported}
-    pressure: [1 atm]
+    pressure: *pressure
+    reactor-volume: *volume
+    residence-time: *time
     composition: *comp
 """
 
-# Speciation is not measured in a rapid compression machine
-UNSUPPORTED_SPECIATION_FILE = SPECIATION_FILE.replace(
-    "kind: jet stirred reactor", "kind: rapid compression machine"
+UNKNOWN_TYPE_FILE = SPECIATION_FILE.replace(
+    "experiment-type: speciation measurement", "experiment-type: flame speciation"
 )
 
 LBV_FILE = """\
@@ -151,21 +161,6 @@ class SyncChemkedExperimentTypeTests(TestCase):
             stdout=StringIO(), stderr=self.err,
         )
 
-    def test_speciation_on_an_unsupported_apparatus_is_not_stored(self):
-        rel = "x/rcm.yaml"
-        self._write(rel, UNSUPPORTED_SPECIATION_FILE)
-
-        with self.assertRaises(CommandError):
-            self._sync(rel)
-
-        self.assertFalse(ExperimentDataset.objects.exists())
-        self.assertIn(
-            "experiment-type 'speciation measurement' on apparatus kind"
-            " 'rapid compression machine' is not supported",
-            self.err.getvalue(),
-        )
-        self.assertNotIn("defaulting to", self.err.getvalue())
-
     def test_unknown_and_missing_types_are_not_stored(self):
         unknown = yaml.safe_load(LBV_FILE) | {"experiment-type": "flame speed"}
         missing = yaml.safe_load(LBV_FILE)
@@ -181,11 +176,11 @@ class SyncChemkedExperimentTypeTests(TestCase):
         self.assertIn("experiment-type is missing", self.err.getvalue())
 
     def test_other_files_of_the_run_are_imported(self):
-        self._write("x/rcm.yaml", UNSUPPORTED_SPECIATION_FILE)
+        self._write("x/unknown.yaml", UNKNOWN_TYPE_FILE)
         self._write("x/lbv.yaml", LBV_FILE)
 
         with self.assertRaisesMessage(CommandError, "1 file(s) were not imported"):
-            self._sync("x/rcm.yaml", "x/lbv.yaml")
+            self._sync("x/unknown.yaml", "x/lbv.yaml")
 
         dataset = ExperimentDataset.objects.get()
         self.assertEqual(dataset.chemked_file_path, "x/lbv.yaml")
@@ -194,8 +189,8 @@ class SyncChemkedExperimentTypeTests(TestCase):
         self.assertAlmostEqual(lbv.laminar_burning_velocity, 0.4)
 
     def test_dataset_stored_earlier_is_named_and_left_unchanged(self):
-        rel = "x/rcm.yaml"
-        self._write(rel, UNSUPPORTED_SPECIATION_FILE)
+        rel = "x/unknown.yaml"
+        self._write(rel, UNKNOWN_TYPE_FILE)
         stale = ExperimentDataset.objects.create(
             chemked_file_path=rel, experiment_type=ExperimentType.IGNITION_DELAY
         )
@@ -227,23 +222,43 @@ class SyncChemkedSpeciationTests(TestCase):
         )
         return ExperimentDataset.objects.get(chemked_file_path=rel)
 
-    def test_stored_as_jet_stirred_reactor_measurement(self):
+    def test_stored_as_speciation_measurement(self):
         dataset = self._sync(SPECIATION_FILE)
 
-        self.assertEqual(dataset.experiment_type, ExperimentType.JSR_MEASUREMENT)
+        self.assertEqual(dataset.experiment_type, ExperimentType.SPECIATION_MEASUREMENT)
         datapoint = dataset.datapoints.get()
-        self.assertTrue(hasattr(datapoint, "jet_stirred_reactor_measurement"))
-        self.assertEqual(
-            datapoint.independent_variables,
-            [{"name": "temperature", "units": "K", "primary": True}],
-        )
+        # A temperature sweep gives no datapoint temperature
+        self.assertIsNone(datapoint.temperature)
         self.assertAlmostEqual(datapoint.pressure, 101325.0)
         self.assertEqual(datapoint.composition.species.count(), 3)
+        measurement = datapoint.speciation_measurement
+        self.assertEqual(
+            [(v.column, v.name, v.units, v.primary) for v in measurement.independent_variables.all()],
+            [(0, "temperature", "K", True)],
+        )
+
+    def test_datapoint_conditions_are_its_own(self):
+        measurement = self._sync(SPECIATION_FILE).datapoints.get().speciation_measurement
+
+        self.assertAlmostEqual(measurement.residence_time, 0.1)
+        self.assertEqual(measurement.residence_time_quantity.units, "ms")
+        self.assertEqual(measurement.residence_time_quantity.uncertainty, 0.05)
+        self.assertEqual(measurement.residence_time_quantity.uncertainty_sourcetype, "reported")
+        self.assertAlmostEqual(measurement.reactor_volume, 85e-6)
+        self.assertEqual(measurement.reactor_volume_quantity.units, "cm3")
+
+    def test_common_properties_are_kept_apart(self):
+        common = self._sync(SPECIATION_FILE).common_properties
+
+        self.assertEqual(common.reactor_volume_quantity.units, "cm3")
+        self.assertEqual(common.residence_time_quantity.uncertainty_sourcetype, "reported")
+        self.assertEqual(common.composition.species.count(), 3)
 
     def test_profiles_are_kept_as_in_the_file(self):
         source = yaml.safe_load(SPECIATION_FILE)["datapoints"][0]["concentration-profiles"]
 
-        profiles = list(self._sync(SPECIATION_FILE).datapoints.get().concentration_profiles.all())
+        measurement = self._sync(SPECIATION_FILE).datapoints.get().speciation_measurement
+        profiles = list(measurement.concentration_profiles.all())
 
         self.assertEqual(len(profiles), 2)
         for profile, expected in zip(profiles, source):
@@ -252,12 +267,11 @@ class SyncChemkedSpeciationTests(TestCase):
                 self.assertEqual(profile.species.inchi, expected.get("InChI", ""))
                 self.assertEqual(profile.quantity_units, expected["quantity"]["units"])
                 self.assertEqual(profile.values, expected["values"])
-                self.assertEqual(profile.uncertainty, expected["uncertainty"][0])
+                self.assertEqual(profile_uncertainty_block(profile), expected["uncertainty"][0])
 
     def test_profile_species_have_no_composition_or_amount(self):
-        profile = self._sync(SPECIATION_FILE).datapoints.get().concentration_profiles.get(
-            species__species_name="NC5H12"
-        )
+        self._sync(SPECIATION_FILE)
+        profile = ConcentrationProfile.objects.get(species__species_name="NC5H12")
 
         self.assertIsNone(profile.species.composition)
         self.assertIsNone(profile.species.amount)
@@ -287,6 +301,15 @@ class SyncChemkedSpeciationTests(TestCase):
         self.assertIn("concentration-profiles required by schema", self.err.getvalue())
         self.assertIn("no datapoint could be stored", self.err.getvalue())
 
+    def test_unknown_independent_variable_is_not_stored(self):
+        document = yaml.safe_load(SPECIATION_FILE)
+        document["datapoints"][0]["independent-variables"][0]["name"] = "height"
+
+        with self.assertRaises(CommandError):
+            self._sync(yaml.safe_dump(document))
+
+        self.assertIn("unknown independent-variable 'height'", self.err.getvalue())
+
     def test_rows_must_fit_the_independent_variables(self):
         document = yaml.safe_load(SPECIATION_FILE)
         document["datapoints"][0]["concentration-profiles"][0]["values"][0] = [800.0]
@@ -300,32 +323,43 @@ class SyncChemkedSpeciationTests(TestCase):
         )
 
 
-class SpeciationExperimentTypeTests(SimpleTestCase):
-    def _file(self, kind, *variables):
-        return {
-            "experiment-type": "speciation measurement",
-            "apparatus": {"kind": kind},
-            "datapoints": [{"independent-variables": [{"name": name} for name in variables]}],
-        }
+class SpeciationUploadTests(TestCase):
+    """The web upload, the REST import and ReSpecTh XML store speciation as sync_chemked does."""
 
-    def test_type_follows_the_apparatus(self):
-        for kind, variables, expected in (
-            ("jet stirred reactor", ["temperature"], ExperimentType.JSR_MEASUREMENT),
-            ("burner stabilized flame", ["distance"], ExperimentType.BSFS_MEASUREMENT),
-            ("shock tube", ["time"], ExperimentType.CONCENTRATION_TIME_PROFILE),
-            ("flow reactor", ["time"], ExperimentType.CONCENTRATION_TIME_PROFILE),
-            ("flow reactor", ["temperature", "residence-time"], ExperimentType.OUTLET_CONCENTRATION),
-            ("flow reactor", ["residence-time"], ExperimentType.OUTLET_CONCENTRATION),
-        ):
-            with self.subTest(kind=kind, variables=variables):
-                data = self._file(kind, *variables)
-                self.assertEqual(speciation_experiment_type(data), expected)
-                self.assertEqual(experiment_type_of(data), expected)
+    def test_rest_import_keeps_profiles(self):
+        dataset = import_chemked_to_db(
+            SPECIATION_FILE.encode(), "Cong_2009_jsr.yaml", file_author="Test Author"
+        )
 
-    def test_other_apparatus_raises(self):
-        for data in (self._file("rapid compression machine", "time"), {"experiment-type": "x"}):
-            with self.subTest(data=data), self.assertRaises(ValueError):
-                speciation_experiment_type(data)
+        self.assertEqual(dataset.experiment_type, ExperimentType.SPECIATION_MEASUREMENT)
+        measurement = dataset.datapoints.get().speciation_measurement
+        self.assertEqual(measurement.concentration_profiles.count(), 2)
+        self.assertEqual(measurement.residence_time_quantity.uncertainty_sourcetype, "reported")
+        self.assertTrue(dataset.file_authors.filter(name="Test Author").exists())
+
+    def test_respecth_speciation_xml_converts_with_pyked(self):
+        document = respecth_to_chemked_dict(str(TESTDATA / "x60200029_short.xml"))
+
+        self.assertEqual(document["experiment-type"], "speciation measurement")
+        self.assertEqual(document["apparatus"]["kind"], "burner stabilized flame")
+        point = document["datapoints"][0]
+        self.assertEqual(point["independent-variables"][0]["name"], "distance")
+        self.assertEqual(point["concentration-profiles"][0]["species-name"], "NO")
+        self.assertEqual(point["auxiliary-profiles"][0]["type"], "temperature")
+
+    def test_respecth_xml_upload_stores_speciation(self):
+        dataset = DatasetUploadView()._import_respecth_xml_batch(
+            str(TESTDATA / "x60200029_short.xml"), "x60200029_short.xml", "", ""
+        )
+
+        measurement = SpeciationMeasurementDatapoint.objects.get(datapoint__dataset=dataset)
+        profile = measurement.concentration_profiles.get()
+        self.assertEqual(profile.species.species_name, "NO")
+        self.assertEqual(len(profile.values), 4)
+        self.assertEqual(profile.evaluated_standard_deviation_method, "statistical scatter")
+        self.assertEqual(measurement.auxiliary_profiles.get().profile_type, "temperature")
+        # PyKED writes the unit for pint
+        self.assertEqual(measurement.flow_rate_quantity.units, "kg * m**-2 * s**-1")
 
 
 class ExperimentTypeOfTests(SimpleTestCase):
@@ -335,8 +369,7 @@ class ExperimentTypeOfTests(SimpleTestCase):
                 self.assertEqual(experiment_type_of({"experiment-type": value}), value)
 
     def test_other_types_raise(self):
-        # A speciation measurement without an apparatus cannot be given a site type
-        for data in ({}, {"experiment-type": ""}, {"experiment-type": "speciation measurement"},
+        for data in ({}, {"experiment-type": ""}, {"experiment-type": "jet stirred reactor measurement"},
                      {"experiment-type": "Ignition Delay"}):
             with self.subTest(data=data):
                 with self.assertRaises(ValueError):

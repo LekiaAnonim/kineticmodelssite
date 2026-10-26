@@ -138,6 +138,20 @@
         </div>
         {% endif %}
 
+        {% if profile_chart %}
+        <!-- Profiles of the first speciation datapoint -->
+        <div class="data-section mb-3">
+            <div class="section-header">
+                <h6 class="mb-0"><i class="bi bi-graph-up me-2"></i>Species Profiles
+                    <small class="text-muted">(<a href="{% url 'chemked_database:datapoint-detail' chart_datapoint.pk %}">datapoint {{ chart_datapoint.pk }}</a>)</small>
+                </h6>
+            </div>
+            <div class="section-body">
+                {% include "chemked_database/partials/speciation_chart.html" %}
+            </div>
+        </div>
+        {% endif %}
+
         <!-- Datapoints Table -->
         <div class="data-section">
             <div class="section-header" data-bs-toggle="collapse" data-bs-target="#datapointsSection">
@@ -153,8 +167,10 @@
                                 <tr>
                                     <th>T (K)</th>
                                     <th>P (Pa)</th>
-                                    {% if dataset.experiment_type == 'jet stirred reactor measurement' or dataset.experiment_type == 'concentration profile' %}
+                                    {% if speciation %}
                                     <th>τ (s)</th>
+                                    <th>Independent variables</th>
+                                    <th>Species profiles</th>
                                     {% endif %}
                                     <th>φ</th>
                                     {% if dataset.experiment_type == 'ignition delay' %}
@@ -170,10 +186,21 @@
                             <tbody>
                                 {% for dp in datapoints %}
                                 <tr>
-                                    <td class="font-monospace">{{ dp.temperature|floatformat:1 }}</td>
+                                    <td class="font-monospace">{{ dp.temperature|floatformat:1|default:"—" }}</td>
                                     <td class="font-monospace">{{ dp.pressure|floatformat:0 }}</td>
-                                    {% if dataset.experiment_type == 'jet stirred reactor measurement' or dataset.experiment_type == 'concentration profile' %}
-                                    <td class="font-monospace">{{ dp.residence_time|floatformat:1|default:"—" }}</td>
+                                    {% if speciation %}
+                                    {% with measurement=dp.speciation_measurement %}
+                                    <td class="font-monospace">{{ measurement.residence_time|floatformat:4|default:"—" }}</td>
+                                    <td>
+                                        {% for variable in measurement.independent_variables.all %}
+                                        <span class="badge {% if variable.primary %}bg-primary{% else %}bg-secondary{% endif %}">{{ variable.name }} ({{ variable.units }})</span>
+                                        {% endfor %}
+                                    </td>
+                                    <td>
+                                        <small>{% for profile in measurement.concentration_profiles.all %}{{ profile.species.species_name }}{% if not forloop.last %}, {% endif %}{% endfor %}</small>
+                                        {% if measurement.auxiliary_profiles.all %}<span class="badge bg-info-subtle text-info ms-1">+ {{ measurement.auxiliary_profiles.all|length }} auxiliary</span>{% endif %}
+                                    </td>
+                                    {% endwith %}
                                     {% endif %}
                                     <td>{{ dp.equivalence_ratio|floatformat:2|default:"—" }}</td>
                                     {% if dataset.experiment_type == 'ignition delay' %}
@@ -327,33 +354,26 @@
             </div>
         </div>
 
-        <!-- Reactor Properties (for JSR/Flow Reactor) -->
-        {% if common_properties.reactor_volume or common_properties.residence_time %}
+        <!-- Common properties, as the file gives them -->
+        {% if common_conditions %}
         <div class="data-section mb-3">
             <div class="section-header">
-                <h6 class="mb-0"><i class="bi bi-droplet me-2"></i>Reactor Properties</h6>
+                <h6 class="mb-0"><i class="bi bi-droplet me-2"></i>Common Properties</h6>
             </div>
             <div class="section-body p-0">
                 <table class="table table-sm mb-0">
                     <tbody>
-                        {% if common_properties.reactor_volume %}
+                        {% for condition in common_conditions %}
                         <tr>
-                            <td class="text-muted">Volume</td>
-                            <td class="text-end fw-medium">{{ common_properties.reactor_volume|floatformat:6 }} m³</td>
+                            <td class="text-muted">{{ condition.key }}</td>
+                            <td class="text-end fw-medium">
+                                {{ condition.quantity.value|default_if_none:condition.quantity.value_text }} {{ condition.quantity.units }}
+                                {% if condition.quantity.uncertainty is not None %}
+                                <small class="text-muted">± {{ condition.quantity.uncertainty }} ({{ condition.quantity.uncertainty_type }})</small>
+                                {% endif %}
+                            </td>
                         </tr>
-                        {% endif %}
-                        {% if common_properties.residence_time %}
-                        <tr>
-                            <td class="text-muted">Residence Time</td>
-                            <td class="text-end fw-medium">{{ common_properties.residence_time|floatformat:2 }} s</td>
-                        </tr>
-                        {% endif %}
-                        {% if common_properties.equivalence_ratio %}
-                        <tr>
-                            <td class="text-muted">Equivalence Ratio (φ)</td>
-                            <td class="text-end fw-medium">{{ common_properties.equivalence_ratio|floatformat:3 }}</td>
-                        </tr>
-                        {% endif %}
+                        {% endfor %}
                     </tbody>
                 </table>
             </div>

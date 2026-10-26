@@ -80,6 +80,15 @@ class CommonPropertiesSerializer(FlexFieldsModelSerializer):
     temperature_quantity = ValueWithUnitSerializer(read_only=True)
     flow_rate_quantity = ValueWithUnitSerializer(read_only=True)
     laminar_burning_velocity_quantity = ValueWithUnitSerializer(read_only=True)
+    ignition_delay_quantity = ValueWithUnitSerializer(read_only=True)
+    environment_temperature_quantity = ValueWithUnitSerializer(read_only=True)
+    global_heat_exchange_coefficient_quantity = ValueWithUnitSerializer(read_only=True)
+    exchange_area_quantity = ValueWithUnitSerializer(read_only=True)
+    reactor_length_quantity = ValueWithUnitSerializer(read_only=True)
+    reactor_diameter_quantity = ValueWithUnitSerializer(read_only=True)
+    pressure_in_reference_state_quantity = ValueWithUnitSerializer(read_only=True)
+    temperature_in_reference_state_quantity = ValueWithUnitSerializer(read_only=True)
+    volumetric_flow_in_reference_state_quantity = ValueWithUnitSerializer(read_only=True)
     composition = CompositionSerializer(read_only=True)
 
     class Meta:
@@ -159,47 +168,58 @@ class RateCoefficientDatapointSerializer(FlexFieldsModelSerializer):
     expandable_fields = _DATAPOINT_EXPAND
 
 
-class ConcentrationTimeProfileDatapointSerializer(FlexFieldsModelSerializer):
-    timeshift_amount_quantity = ValueWithUnitSerializer(read_only=True)
-
+class IndependentVariableSerializer(FlexFieldsModelSerializer):
     class Meta:
-        model = models.ConcentrationTimeProfileMeasurementDatapoint
+        model = models.IndependentVariable
         fields = "__all__"
 
-    expandable_fields = _DATAPOINT_EXPAND
+
+class ConcentrationProfileSerializer(FlexFieldsModelSerializer):
+    """A species profile: rows of independent values, amount [and uncertainty]."""
+
+    species = CompositionSpeciesSerializer(read_only=True)
+
+    class Meta:
+        model = models.ConcentrationProfile
+        fields = "__all__"
+
+    expandable_fields = {
+        "measurement": ("api.chemked_views.SpeciationMeasurementSerializer", {"read_only": True}),
+    }
 
 
-class JetStirredReactorDatapointSerializer(FlexFieldsModelSerializer):
+class AuxiliaryProfileSerializer(FlexFieldsModelSerializer):
+    class Meta:
+        model = models.AuxiliaryProfile
+        fields = "__all__"
+
+    expandable_fields = {
+        "measurement": ("api.chemked_views.SpeciationMeasurementSerializer", {"read_only": True}),
+    }
+
+
+class SpeciationMeasurementSerializer(FlexFieldsModelSerializer):
+    """A ChemKED speciation measurement datapoint with its profiles."""
+
     environment_temperature_quantity = ValueWithUnitSerializer(read_only=True)
-    measured_composition = CompositionSerializer(read_only=True)
-
-    class Meta:
-        model = models.JetStirredReactorMeasurementDatapoint
-        fields = "__all__"
-
-    expandable_fields = _DATAPOINT_EXPAND
-
-
-class OutletConcentrationDatapointSerializer(FlexFieldsModelSerializer):
     residence_time_quantity = ValueWithUnitSerializer(read_only=True)
-    volumetric_flow_quantity = ValueWithUnitSerializer(read_only=True)
-    measured_composition = CompositionSerializer(read_only=True)
-    initial_composition = CompositionSerializer(read_only=True)
-
-    class Meta:
-        model = models.OutletConcentrationMeasurementDatapoint
-        fields = "__all__"
-
-    expandable_fields = _DATAPOINT_EXPAND
-
-
-class BurnerStabilizedFlameDatapointSerializer(FlexFieldsModelSerializer):
-    distance_quantity = ValueWithUnitSerializer(read_only=True)
+    reactor_volume_quantity = ValueWithUnitSerializer(read_only=True)
+    reactor_length_quantity = ValueWithUnitSerializer(read_only=True)
+    reactor_diameter_quantity = ValueWithUnitSerializer(read_only=True)
     flow_rate_quantity = ValueWithUnitSerializer(read_only=True)
-    measured_composition = CompositionSerializer(read_only=True)
+    volumetric_flow_in_reference_state_quantity = ValueWithUnitSerializer(read_only=True)
+    pressure_in_reference_state_quantity = ValueWithUnitSerializer(read_only=True)
+    temperature_in_reference_state_quantity = ValueWithUnitSerializer(read_only=True)
+    global_heat_exchange_coefficient_quantity = ValueWithUnitSerializer(read_only=True)
+    exchange_area_quantity = ValueWithUnitSerializer(read_only=True)
+    laminar_burning_velocity_quantity = ValueWithUnitSerializer(read_only=True)
+    timeshift_amount_quantity = ValueWithUnitSerializer(read_only=True)
+    independent_variables = IndependentVariableSerializer(many=True, read_only=True)
+    concentration_profiles = ConcentrationProfileSerializer(many=True, read_only=True)
+    auxiliary_profiles = AuxiliaryProfileSerializer(many=True, read_only=True)
 
     class Meta:
-        model = models.BurnerStabilizedFlameSpeciationMeasurementDatapoint
+        model = models.SpeciationMeasurementDatapoint
         fields = "__all__"
 
     expandable_fields = _DATAPOINT_EXPAND
@@ -285,32 +305,34 @@ class RateCoefficientViewSet(ReadOnlyViewSet):
 
 
 @extend_schema(tags=["experimental-data"])
-class ConcentrationTimeProfileViewSet(ReadOnlyViewSet):
-    queryset = models.ConcentrationTimeProfileMeasurementDatapoint.objects.all()
-    serializer_class = ConcentrationTimeProfileDatapointSerializer
-    filterset_class = filters.ConcentrationTimeProfileFilter
+class SpeciationMeasurementViewSet(ReadOnlyViewSet):
+    # Filters across profiles and variables would repeat a datapoint once per match
+    queryset = (
+        models.SpeciationMeasurementDatapoint.objects
+        .prefetch_related(
+            "independent_variables", "concentration_profiles__species", "auxiliary_profiles"
+        )
+        .order_by("id")
+        .distinct()
+    )
+    serializer_class = SpeciationMeasurementSerializer
+    filterset_class = filters.SpeciationMeasurementFilter
+    ordering_fields = ["residence_time", "reactor_volume", "flow_rate", "id"]
+
+
+@extend_schema(tags=["experimental-data"])
+class ConcentrationProfileViewSet(ReadOnlyViewSet):
+    queryset = models.ConcentrationProfile.objects.select_related("species").order_by("id")
+    serializer_class = ConcentrationProfileSerializer
+    filterset_class = filters.ConcentrationProfileFilter
+    search_fields = ["species__species_name", "species__inchi"]
     ordering_fields = ["id"]
 
 
 @extend_schema(tags=["experimental-data"])
-class JetStirredReactorViewSet(ReadOnlyViewSet):
-    queryset = models.JetStirredReactorMeasurementDatapoint.objects.all()
-    serializer_class = JetStirredReactorDatapointSerializer
-    filterset_class = filters.JetStirredReactorFilter
-    ordering_fields = ["environment_temperature", "id"]
+class AuxiliaryProfileViewSet(ReadOnlyViewSet):
+    queryset = models.AuxiliaryProfile.objects.order_by("id")
+    serializer_class = AuxiliaryProfileSerializer
+    filterset_class = filters.AuxiliaryProfileFilter
+    ordering_fields = ["id"]
 
-
-@extend_schema(tags=["experimental-data"])
-class OutletConcentrationViewSet(ReadOnlyViewSet):
-    queryset = models.OutletConcentrationMeasurementDatapoint.objects.all()
-    serializer_class = OutletConcentrationDatapointSerializer
-    filterset_class = filters.OutletConcentrationFilter
-    ordering_fields = ["residence_time", "id"]
-
-
-@extend_schema(tags=["experimental-data"])
-class BurnerStabilizedFlameViewSet(ReadOnlyViewSet):
-    queryset = models.BurnerStabilizedFlameSpeciationMeasurementDatapoint.objects.all()
-    serializer_class = BurnerStabilizedFlameDatapointSerializer
-    filterset_class = filters.BurnerStabilizedFlameFilter
-    ordering_fields = ["distance", "id"]

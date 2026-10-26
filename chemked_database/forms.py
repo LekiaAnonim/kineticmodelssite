@@ -15,10 +15,6 @@ from .models import (
     IgnitionDelayDatapoint,
     LaminarBurningVelocityMeasurementDatapoint,
     RateCoefficientDatapoint,
-    ConcentrationTimeProfileMeasurementDatapoint,
-    JetStirredReactorMeasurementDatapoint,
-    OutletConcentrationMeasurementDatapoint,
-    BurnerStabilizedFlameSpeciationMeasurementDatapoint,
     CommonProperties,
     Composition,
     CompositionSpecies,
@@ -33,7 +29,6 @@ from .models import (
     IgnitionType,
     UncertaintyType,
     MeasurementType,
-    TimeShiftType,
 )
 
 
@@ -165,8 +160,13 @@ class ReferenceForm(forms.Form):
 
 class ExperimentForm(forms.Form):
     """Form for experiment type and apparatus."""
+    # Speciation measurements carry species profiles, which are added by uploading a ChemKED
+    # or ReSpecTh file rather than typed in here
     experiment_type = forms.ChoiceField(
-        choices=ExperimentType.choices,
+        choices=[
+            choice for choice in ExperimentType.choices
+            if choice[0] != ExperimentType.SPECIATION_MEASUREMENT
+        ],
         initial=ExperimentType.IGNITION_DELAY,
         widget=forms.Select(attrs={'class': 'form-select', 'id': 'id_experiment_type'})
     )
@@ -503,131 +503,6 @@ class RateCoefficientForm(forms.Form):
 
 
 RateCoefficientFormSet = formset_factory(RateCoefficientForm, extra=1, min_num=1, validate_min=True)
-
-
-class JetStirredReactorForm(forms.Form):
-    """Form for jet stirred reactor specific data per datapoint."""
-    environment_temperature = forms.CharField(
-        required=False,
-        widget=forms.TextInput(attrs={
-            'class': 'form-control',
-            'placeholder': 'Environment temperature with units (e.g., 900 K)'
-        })
-    )
-
-
-JetStirredReactorFormSet = formset_factory(JetStirredReactorForm, extra=1, min_num=1, validate_min=True)
-
-
-class OutletConcentrationForm(forms.Form):
-    """Form for outlet concentration measurement specific data per datapoint."""
-    residence_time = forms.CharField(
-        required=False,
-        widget=forms.TextInput(attrs={
-            'class': 'form-control',
-            'placeholder': 'Per-datapoint residence time with units (e.g., 2.0 s)'
-        })
-    )
-    volumetric_flow = forms.CharField(
-        required=False,
-        widget=forms.TextInput(attrs={
-            'class': 'form-control',
-            'placeholder': 'Volumetric flow at reference state with units (e.g., 1.5e-5 m3/s)'
-        })
-    )
-
-
-OutletConcentrationFormSet = formset_factory(OutletConcentrationForm, extra=1, min_num=1, validate_min=True)
-
-
-class ConcentrationTimeProfileForm(forms.Form):
-    """Form for concentration time profile measurement specific data per datapoint."""
-    tracked_species_name = forms.CharField(
-        max_length=255,
-        widget=forms.TextInput(attrs={
-            'class': 'form-control',
-            'placeholder': 'Tracked species name (e.g., OH)'
-        })
-    )
-    quantity_units = forms.CharField(
-        max_length=50,
-        widget=forms.TextInput(attrs={
-            'class': 'form-control',
-            'placeholder': 'Concentration units (e.g., ppm, mole fraction)'
-        })
-    )
-    time_units = forms.CharField(
-        max_length=20,
-        initial='s',
-        widget=forms.TextInput(attrs={
-            'class': 'form-control',
-            'placeholder': 'Time units (e.g., s, ms, us)'
-        })
-    )
-    values_text = forms.CharField(
-        widget=forms.Textarea(attrs={
-            'class': 'form-control',
-            'rows': 5,
-            'placeholder': 'Time-value pairs, one per line:\ntime1, value1\ntime2, value2\n...'
-        }),
-        help_text='Enter time-value pairs separated by commas, one pair per line'
-    )
-    uncertainty_type = forms.ChoiceField(
-        choices=[('', '-- None --')] + list(UncertaintyType.choices),
-        required=False,
-        widget=forms.Select(attrs={'class': 'form-select'})
-    )
-    uncertainty_value = forms.FloatField(
-        required=False,
-        widget=forms.NumberInput(attrs={
-            'class': 'form-control',
-            'placeholder': 'Uncertainty value',
-            'step': 'any'
-        })
-    )
-    timeshift_target = forms.CharField(
-        max_length=255,
-        required=False,
-        widget=forms.TextInput(attrs={
-            'class': 'form-control',
-            'placeholder': 'Time shift reference species (optional)'
-        })
-    )
-    timeshift_type = forms.ChoiceField(
-        choices=[('', '-- None --')] + list(TimeShiftType.choices),
-        required=False,
-        widget=forms.Select(attrs={'class': 'form-select'})
-    )
-    timeshift_amount = forms.CharField(
-        required=False,
-        widget=forms.TextInput(attrs={
-            'class': 'form-control',
-            'placeholder': 'Time shift amount with units (e.g., 10 us)'
-        })
-    )
-
-
-ConcentrationTimeProfileFormSet = formset_factory(ConcentrationTimeProfileForm, extra=1, min_num=1, validate_min=True)
-
-
-class BurnerStabilizedFlameSpeciationForm(forms.Form):
-    """Form for burner stabilized flame speciation measurement specific data per datapoint."""
-    distance = forms.CharField(
-        widget=forms.TextInput(attrs={
-            'class': 'form-control',
-            'placeholder': 'Distance from burner with units (e.g., 5.0 mm)'
-        })
-    )
-    flow_rate = forms.CharField(
-        required=False,
-        widget=forms.TextInput(attrs={
-            'class': 'form-control',
-            'placeholder': 'Mass flow rate with units (e.g., 0.04 kg m-2 s-1)'
-        })
-    )
-
-
-BurnerStabilizedFlameSpeciationFormSet = formset_factory(BurnerStabilizedFlameSpeciationForm, extra=1, min_num=1, validate_min=True)
 
 
 # =============================================================================

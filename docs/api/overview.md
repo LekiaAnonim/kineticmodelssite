@@ -37,10 +37,9 @@ reference is the live [Swagger UI and ReDoc](../reference.md).
 | `/api/ignition-delay/` | Ignition-delay measurements |
 | `/api/laminar-burning-velocity/` | Laminar burning velocity |
 | `/api/rate-coefficient/` | Direct rate-coefficient measurements |
-| `/api/concentration-time-profile/` | Concentration–time profiles |
-| `/api/jet-stirred-reactor/` | Jet-stirred reactor speciation |
-| `/api/outlet-concentration/` | Outlet concentration |
-| `/api/burner-stabilized-flame/` | Burner-stabilized flame speciation |
+| `/api/speciation-measurement/` | Speciation measurements (jet stirred reactor, flow reactor, flame, shock tube) with their profiles |
+| `/api/concentration-profile/` | Species profiles of speciation measurements |
+| `/api/auxiliary-profile/` | Temperature, pressure, volume or velocity profiles measured with the species |
 | `/api/apparatus/` | Apparatus (kind, mode, facility) |
 | `/api/common-properties/` | Dataset-level common properties |
 | `/api/composition/`, `/api/composition-species/` | Mixture compositions and species amounts |

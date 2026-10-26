@@ -110,39 +110,48 @@ class RateCoefficientFilter(df.FilterSet):
         }
 
 
-class ConcentrationTimeProfileFilter(df.FilterSet):
+class SpeciationMeasurementFilter(df.FilterSet):
     class Meta:
-        model = cm.ConcentrationTimeProfileMeasurementDatapoint
+        model = cm.SpeciationMeasurementDatapoint
         fields = {
-            "timeshift_type": ["exact"],
-            **_DATAPOINT_FIELDS,
-        }
-
-
-class JetStirredReactorFilter(df.FilterSet):
-    class Meta:
-        model = cm.JetStirredReactorMeasurementDatapoint
-        fields = {
+            "datapoint__dataset__apparatus__kind": ["exact"],
+            # Datapoints swept against a variable, or measuring a species
+            "independent_variables__name": ["exact"],
+            "concentration_profiles__species__species_name": ["exact", "icontains"],
+            "concentration_profiles__species__inchi": ["exact"],
+            "concentration_profiles__quantity_units": ["exact"],
+            "residence_time": ["gte", "lte"],
+            "reactor_volume": ["gte", "lte"],
+            "flow_rate": ["gte", "lte"],
             "environment_temperature": ["gte", "lte"],
             **_DATAPOINT_FIELDS,
         }
 
 
-class OutletConcentrationFilter(df.FilterSet):
+class ConcentrationProfileFilter(df.FilterSet):
     class Meta:
-        model = cm.OutletConcentrationMeasurementDatapoint
+        model = cm.ConcentrationProfile
         fields = {
-            "residence_time": ["gte", "lte"],
-            **_DATAPOINT_FIELDS,
+            "measurement": ["exact"],
+            "measurement__datapoint": ["exact"],
+            "measurement__datapoint__dataset": ["exact"],
+            "measurement__datapoint__dataset__apparatus__kind": ["exact"],
+            "species__species_name": ["exact", "icontains"],
+            "species__inchi": ["exact"],
+            "quantity_units": ["exact"],
+            "uncertainty_type": ["exact"],
+            "evaluated_standard_deviation_type": ["exact"],
         }
 
 
-class BurnerStabilizedFlameFilter(df.FilterSet):
+class AuxiliaryProfileFilter(df.FilterSet):
     class Meta:
-        model = cm.BurnerStabilizedFlameSpeciationMeasurementDatapoint
+        model = cm.AuxiliaryProfile
         fields = {
-            "distance": ["gte", "lte"],
-            **_DATAPOINT_FIELDS,
+            "measurement": ["exact"],
+            "measurement__datapoint__dataset": ["exact"],
+            "profile_type": ["exact"],
+            "independent_name": ["exact"],
         }
 
 

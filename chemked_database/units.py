@@ -24,6 +24,8 @@ SI_UNITS = {
     "volume": "meter ** 3",
     "mass_flux": "kilogram / meter ** 2 / second",
     "volumetric_flow": "meter ** 3 / second",
+    "area": "meter ** 2",
+    "heat_transfer_coefficient": "watt / meter ** 2 / kelvin",
 }
 
 _registry: Optional[pint.UnitRegistry] = None

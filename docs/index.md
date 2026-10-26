@@ -6,8 +6,8 @@ documented REST API.
 
 ## What you can do with the API
 
-- Query **experimental data** — ignition delay, laminar burning velocity, jet-stirred
-  reactor, flow-reactor, and flame-speciation measurements — by physical conditions
+- Query **experimental data** — ignition delay, laminar burning velocity, and speciation
+  measurements (jet stirred reactor, flow reactor, flame and shock tube profiles) — by physical conditions
   (temperature, pressure, equivalence ratio) and identifiers (DOI, species, apparatus).
 - Browse **kinetic models**, species, reactions, thermochemistry, and transport data.
 - Retrieve **model-vs-experiment agreement** metrics produced by the simulation pipeline.
