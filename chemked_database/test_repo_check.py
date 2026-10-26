@@ -335,7 +335,8 @@ class UploadPreviewTests(TestCase):
             response = self.client.post(url, {
                 "data_file": SimpleUploadedFile("upload_7.yaml", text.encode()),
                 "file_format": "auto",
-                "contribute_to_github": "on",
+                "file_author": "Test Author",
+                "file_author_orcid": "0000-0002-1825-0097",
             }, follow=True)
         self.assertEqual(response.status_code, 200)
         return response.content.decode()

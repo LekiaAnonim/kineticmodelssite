@@ -79,7 +79,7 @@
             <h1 class="h4 mb-0">
                 <i class="bi bi-upload me-2 text-primary"></i>Upload Data File
             </h1>
-            <p class="text-muted mb-0 mt-1">Import ChemKED YAML or ReSpecTh XML files into the database</p>
+            <p class="text-muted mb-0 mt-1">Submit ChemKED YAML or ReSpecTh XML files for review; they are added to the database when the pull request is merged</p>
         </div>
         <div>
             <a href="{% url 'chemked_database:dataset-create' %}" class="btn btn-outline-success">
@@ -219,12 +219,20 @@
                         <div class="alert {% if preview_data.duplicate_match.match_type == 'exact' or not preview_data.duplicate_match.has_diff %}alert-warning{% else %}alert-info{% endif %} d-flex align-items-start py-2" role="alert">
                             <i class="bi {% if preview_data.duplicate_match.match_type == 'exact' or not preview_data.duplicate_match.has_diff %}bi-exclamation-triangle{% else %}bi-files{% endif %} me-2 mt-1"></i>
                             <div>
-                                {% if preview_data.duplicate_match.match_type == 'exact' or not preview_data.duplicate_match.has_diff %}
+                                {% if preview_data.duplicate_match.match_type == 'exact' %}
                                 <strong>Identical file already in repository</strong>
                                 <div class="small">
                                     Your file is byte-identical to
                                     <code>{{ preview_data.duplicate_match.path }}</code>.
                                     Submitting will create a PR with no changes.
+                                </div>
+                                {% elif not preview_data.duplicate_match.has_diff %}
+                                <strong>Same data already in repository</strong>
+                                <div class="small">
+                                    Your file has the same content as
+                                    <code>{{ preview_data.duplicate_match.path }}</code>; only the
+                                    formatting or the key order is different. Submitting replaces that
+                                    file with your version.
                                 </div>
                                 {% elif preview_data.duplicate_match.match_type == 'filename' %}
                                 <strong>Existing file with same name</strong>
@@ -266,7 +274,7 @@
 
                     <div class="d-flex gap-2">
                         <button type="submit" name="confirm_import" class="btn btn-success" {% if preview_data.validation_error %}disabled{% endif %}>
-                            <i class="bi bi-check-circle me-1"></i>Confirm Import
+                            <i class="bi bi-check-circle me-1"></i>Submit for Review
                         </button>
                         <a href="{% url 'chemked_database:dataset-upload' %}?cancel=1" class="btn btn-outline-secondary">
                             <i class="bi bi-x-circle me-1"></i>Cancel
@@ -350,18 +358,6 @@
                         </div>
                     </div>
                     
-                    <div class="mb-4">
-                        <div class="form-check">
-                            {{ form.validate_on_upload }}
-                            <label class="form-check-label" for="id_validate_on_upload">
-                                Validate file before importing
-                            </label>
-                        </div>
-                        <div class="form-text">
-                            Recommended: Validates the file against the PyKED/ChemKED schema before importing.
-                        </div>
-                    </div>
-                    
                     <!-- Contributor Information (always visible) -->
                     <div class="contributor-info p-3 bg-light rounded mb-4" id="contributor-info">
                         <h6 class="text-muted mb-3"><i class="bi bi-person-badge me-1"></i> Contributor Information</h6>
@@ -397,20 +393,13 @@
                     <!-- GitHub Contribution Options -->
                     <div class="contribution-options p-3 border rounded mb-4" id="contribution-options">
                         <h6 class="text-muted mb-3"><i class="bi bi-github me-1"></i> Contribute to ChemKED Database</h6>
-                        <div class="mb-3">
-                            <div class="form-check">
-                                {{ form.contribute_to_github }}
-                                <label class="form-check-label" for="id_contribute_to_github">
-                                    Create a GitHub Pull Request
-                                </label>
-                            </div>
-                            <div class="form-text">
-                                Automatically open a PR on the
-                                <a href="https://github.com/pr-omethe-us/ChemKED-database" target="_blank">ChemKED-database</a>
-                                repository with your uploaded files. Your ORCID and GitHub username (if provided) will be used for attribution.
-                            </div>
+                        <div class="form-text mb-3">
+                            Every upload is validated with PyKED and submitted as a pull request on the
+                            ChemKED-database repository, where CI checks it and a maintainer reviews it.
+                            The dataset is added to this database when the pull request is merged.
+                            Your name, ORCID and GitHub username (if given) are used for attribution.
                         </div>
-                        <div id="contribution-extra" style="display: none;">
+                        <div id="contribution-extra">
                             <div class="mb-3">
                                 <div class="form-check">
                                     {{ form.run_pyteck }}
@@ -429,8 +418,8 @@
                             </div>
                             <div class="alert alert-info py-2 mb-0 small">
                                 <i class="bi bi-info-circle me-1"></i>
-                                <strong>Required for contribution:</strong> Provide your Name and ORCID above.
-                                CI will run PyKED schema validation and ORCID verification on the PR.
+                                <strong>Required:</strong> your name and ORCID iD above.
+                                CI runs PyKED schema validation, the ORCID check and the duplicate and folder check on the pull request.
                             </div>
                         </div>
                     </div>
@@ -566,9 +555,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const fileCountDiv = document.getElementById('file-count');
     const fileCountText = document.getElementById('file-count-text');
     
-    // Contribution elements
-    const contributeCheckbox = document.getElementById('id_contribute_to_github');
-    const contributionExtra = document.getElementById('contribution-extra');
 
     // ORCID verification elements
     const orcidInput = document.getElementById('id_file_author_orcid');
@@ -598,12 +584,6 @@ document.addEventListener('DOMContentLoaded', function() {
         return;
     }
     
-    function updateContributionVisibility() {
-        if (contributeCheckbox && contributionExtra) {
-            contributionExtra.style.display = contributeCheckbox.checked ? 'block' : 'none';
-        }
-    }
-
     // ---- ORCID live verification ----
     let orcidVerifyTimeout = null;
 
@@ -1263,15 +1243,11 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Initial state
     updateFileCount();
-    updateContributionVisibility();
     
     // Listen for changes
     dataFileInput.addEventListener('change', function() {
         updateFileCount();
     });
-    if (contributeCheckbox) {
-        contributeCheckbox.addEventListener('change', updateContributionVisibility);
-    }
     // ORCID verification: on button click and after typing stops
     if (verifyOrcidBtn) {
         verifyOrcidBtn.addEventListener('click', verifyOrcid);

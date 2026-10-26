@@ -673,38 +673,24 @@ class ChemKEDUploadForm(forms.Form):
         widget=forms.Select(attrs={'class': 'form-select'}),
         help_text='File format (auto-detects based on extension if not specified)'
     )
-    validate_on_upload = forms.BooleanField(
-        initial=True,
-        required=False,
-        widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
-        help_text='Validate the file against ChemKED schema before importing'
-    )
     file_author = forms.CharField(
         max_length=200,
-        required=False,
         widget=forms.TextInput(attrs={
             'class': 'form-control',
             'placeholder': 'Your name'
         }),
-        help_text='File author name for attribution'
+        help_text='Your name; the pull request is attributed to you'
     )
     file_author_orcid = forms.CharField(
         max_length=50,
-        required=False,
         widget=forms.TextInput(attrs={
             'class': 'form-control',
-            'placeholder': '0000-0000-0000-0000 (optional)'
+            'placeholder': '0000-0000-0000-0000'
         }),
-        help_text='ORCID for the file author (optional)'
+        help_text='Your ORCID iD; the pull request is attributed by ORCID'
     )
 
-    # ---- Contribution / GitHub PR options ----
-    contribute_to_github = forms.BooleanField(
-        initial=False,
-        required=False,
-        widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
-        help_text='Also create a GitHub pull request for community review and CI validation'
-    )
+    # ---- Pull request options (every upload is submitted as a pull request) ----
     run_pyteck = forms.BooleanField(
         initial=False,
         required=False,

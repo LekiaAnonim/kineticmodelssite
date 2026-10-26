@@ -1,8 +1,10 @@
 # Contributing data
 
-New experimental data enters the platform through an **authenticated upload that opens a
-pull request** against the ChemKED dataset repository, where it is validated by CI before
-merge. This keeps every contribution reviewed and provenance-tracked.
+New experimental data enters the platform only through a **pull request** against the
+ChemKED dataset repository, where it is validated by CI and reviewed before merge. The REST
+API below, the web upload and the entry form all open such a pull request; nothing is written
+to the database until the pull request is merged, when the ingest loads the files. This keeps
+every contribution reviewed and provenance-tracked.
 
 ## Upload a file
 
@@ -25,7 +27,6 @@ Fields:
 | `file_type` | yes | `chemked` or `chemkin` |
 | `description` | no | PR description |
 | `run_pyteck` | no | Trigger PyTeCK CI simulation |
-| `import_to_db` | no | Also import to the local database after PR creation |
 | `files` | yes | One or more files (repeat `-F "files=@..."`) |
 
 ChemKED files are validated locally with PyKED before the PR is opened; invalid files are

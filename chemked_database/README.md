@@ -87,6 +87,14 @@ partial datapoint overlap are warnings. Without a clone, the web
 upload falls back to the GitHub API and only matches exact bytes or a file name that is
 used once in the repository.
 
+### Every contribution is a pull request
+
+The entry form, the web upload (one file, several files, ReSpecTh XML) and the REST API
+validate each file with PyKED and open a pull request through `submit_for_review` in
+`views.py`. None of them writes to the database. The submission page shows the files as
+"in review" with their repository paths; the datasets appear after the merge, through the
+ingest below. A contributor gives a name and an ORCID iD, which the pull request credits.
+
 ### Ingest after merge
 
 When a pull request that changes YAML files is merged into ChemKED-database `master`,
