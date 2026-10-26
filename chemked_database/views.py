@@ -3967,6 +3967,8 @@ class DatasetExportView(View):
                 'datapoints',
                 'datapoints__ignition_delay',
                 'datapoints__composition__species',
+                'datapoints__time_histories',
+                'datapoints__volume_history',
             ),
             pk=pk
         )
@@ -4156,6 +4158,23 @@ class DatasetExportView(View):
         # Build datapoints
         datapoints = []
 
+        def _uncertainty_entry(number, uncertainty_type, quantity):
+            """An uncertainty number as ChemKED writes it.
+
+            PyKED converts an absolute uncertainty to the unit of its value, so it needs a
+            unit. The file's text keeps the unit it was given in; without it, the unit of
+            the value is used.
+            """
+            if uncertainty_type != 'absolute' or not quantity.units:
+                return number
+            match = re.match(
+                r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*(\S.*)$",
+                quantity.uncertainty_text or '',
+            )
+            if match and float(match.group(1)) == number:
+                return quantity.uncertainty_text.strip()
+            return f"{number} {quantity.units}"
+
         def _serialize_quantity(quantity, fallback_value=None, fallback_units=None):
             if quantity and (quantity.value is not None or quantity.value_text):
                 raw_value = quantity.value if quantity.value is not None else quantity.value_text
@@ -4170,16 +4189,30 @@ class DatasetExportView(View):
             metadata = {}
 
             if quantity:
+                uncertainties = {
+                    'uncertainty': quantity.uncertainty,
+                    'upper-uncertainty': quantity.upper_uncertainty,
+                    'lower-uncertainty': quantity.lower_uncertainty,
+                }
+                uncertainties = {k: v for k, v in uncertainties.items() if v is not None}
+                # PyKED cannot read an uncertainty without its type
                 if quantity.uncertainty_type:
                     metadata['uncertainty-type'] = quantity.uncertainty_type
-                if quantity.uncertainty is not None:
-                    metadata['uncertainty'] = quantity.uncertainty
-                if quantity.upper_uncertainty is not None:
-                    metadata['upper-uncertainty'] = quantity.upper_uncertainty
-                if quantity.lower_uncertainty is not None:
-                    metadata['lower-uncertainty'] = quantity.lower_uncertainty
+                    for key, number in uncertainties.items():
+                        metadata[key] = _uncertainty_entry(
+                            number, quantity.uncertainty_type, quantity
+                        )
+                elif uncertainties:
+                    logger.warning(
+                        "ValueWithUnit %s has an uncertainty without uncertainty-type;"
+                        " left out of the export", quantity.pk,
+                    )
                 if quantity.evaluated_standard_deviation is not None:
-                    metadata['evaluated-standard-deviation'] = quantity.evaluated_standard_deviation
+                    metadata['evaluated-standard-deviation'] = _uncertainty_entry(
+                        quantity.evaluated_standard_deviation,
+                        quantity.evaluated_standard_deviation_type,
+                        quantity,
+                    )
                 if quantity.evaluated_standard_deviation_type:
                     metadata['evaluated-standard-deviation-type'] = quantity.evaluated_standard_deviation_type
                 if quantity.evaluated_standard_deviation_sourcetype:
@@ -4214,9 +4247,13 @@ class DatasetExportView(View):
             if pressure_entry:
                 dp_dict['pressure'] = pressure_entry
             
-            # Equivalence ratio
-            if dp.equivalence_ratio:
-                dp_dict['equivalence-ratio'] = dp.equivalence_ratio
+            # Equivalence ratio (a value-unit list in ChemKED 0.5)
+            equiv_entry = _serialize_quantity(
+                dp.equivalence_ratio_quantity,
+                fallback_value=dp.equivalence_ratio or None,
+            )
+            if equiv_entry:
+                dp_dict['equivalence-ratio'] = equiv_entry
             
             # Composition
             if composition:
@@ -4230,10 +4267,19 @@ class DatasetExportView(View):
                     ]
                 }
             
-            # Ignition type
-            if ignition_type:
+            # Ignition type: the datapoint's own where it differs from the common one (some
+            # RCM files give it per datapoint only)
+            point_ignition_type = None
+            if hasattr(dp, 'ignition_delay') and dp.ignition_delay:
+                point_ignition_type = {k: v for k, v in {
+                    'target': dp.ignition_delay.get_ignition_target(),
+                    'type': dp.ignition_delay.get_ignition_type(),
+                }.items() if v}
+            if point_ignition_type and point_ignition_type != ignition_type:
+                dp_dict['ignition-type'] = point_ignition_type
+            elif ignition_type:
                 dp_dict['ignition-type'] = ignition_type
-            
+
             # Ignition delay
             if hasattr(dp, 'ignition_delay') and dp.ignition_delay:
                 ign = dp.ignition_delay
@@ -4244,6 +4290,28 @@ class DatasetExportView(View):
                 )
                 if ign_entry:
                     dp_dict['ignition-delay'] = ign_entry
+
+            # Time histories (e.g. the volume profile of a constant U-V reactor). The
+            # importer stores the rows as [time, quantity].
+            time_histories = [
+                {
+                    'type': th.history_type,
+                    'time': {'units': th.time_units, 'column': 0},
+                    'quantity': {'units': th.quantity_units, 'column': 1},
+                    'values': (
+                        th.values if th.values is not None else {'filename': th.source_filename}
+                    ),
+                }
+                for th in dp.time_histories.all()
+            ]
+            if time_histories:
+                dp_dict['time-histories'] = time_histories
+            if hasattr(dp, 'volume_history'):
+                dp_dict['volume-history'] = {
+                    'time': {'units': dp.volume_history.time_units, 'column': 0},
+                    'volume': {'units': dp.volume_history.volume_units, 'column': 1},
+                    'values': dp.volume_history.values,
+                }
 
             # Laminar burning velocity
             if hasattr(dp, 'laminar_burning_velocity_measurement'):
@@ -4290,14 +4358,15 @@ class DatasetExportView(View):
             'file-version': dataset.file_version or 0,
             'chemked-version': dataset.chemked_version or '0.4.1',
             'file-authors': file_authors,
-            'reference': {
+            # Empty fields are left out: PyKED looks up even an empty DOI and then fails.
+            'reference': {k: v for k, v in {
                 'doi': dataset.reference_doi or '',
                 'authors': ref_authors,
                 'journal': dataset.reference_journal or '',
                 'year': dataset.reference_year or 2020,
                 'pages': dataset.reference_pages or '',
                 'detail': dataset.reference_detail or '',
-            },
+            }.items() if v},
             'experiment-type': exp_type_str,
             'apparatus': {k: v for k, v in {
                 'kind': f"{dataset.apparatus.kind}" if dataset.apparatus else 'shock tube',
@@ -4309,6 +4378,10 @@ class DatasetExportView(View):
         
         if dataset.reference_volume:
             chemked_dict['reference']['volume'] = dataset.reference_volume
+
+        if dataset.comments:
+            comments = dataset.comments
+            chemked_dict['comments'] = [comments] if isinstance(comments, str) else list(comments)
 
         # For rate coefficient experiments, add reaction and method info
         if exp_type_str == 'rate coefficient':

@@ -34,6 +34,44 @@ from chemked_database.utils.chemistry import infer_smiles_and_atomic_composition
 VALUE_UNIT_RE = re.compile(r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*(.*)$")
 COMPOSITION_KINDS = {"mass fraction", "mole fraction", "mole percent"}
 
+# ChemKED experiment types that are not ExperimentType values, and why they are not imported.
+UNSUPPORTED_EXPERIMENT_TYPES = {
+    # Jet-stirred reactor, flow reactor, flame and shock tube species profiles
+    "speciation measurement": (
+        "its datapoints are concentration-profiles against independent-variables,"
+        " which sync_chemked cannot store yet"
+    ),
+}
+
+
+def experiment_type_of(data: Dict[str, Any]) -> str:
+    """ExperimentType value of a ChemKED file.
+
+    Raises ValueError for a missing, unknown or unsupported experiment-type: such a file is
+    not imported, instead of being stored as an ignition delay dataset without datapoints.
+    """
+    experiment_type = data.get("experiment-type")
+    if not experiment_type:
+        raise ValueError("experiment-type is missing")
+    if experiment_type in ExperimentType.values:
+        return experiment_type
+    if experiment_type in UNSUPPORTED_EXPERIMENT_TYPES:
+        raise ValueError(
+            f"experiment-type '{experiment_type}' is not supported:"
+            f" {UNSUPPORTED_EXPERIMENT_TYPES[experiment_type]}"
+        )
+    raise ValueError(
+        f"unknown experiment-type '{experiment_type}';"
+        f" known types are {', '.join(ExperimentType.values)}"
+    )
+
+
+def time_first(values: Any, time: Optional[Dict[str, Any]], quantity: Optional[Dict[str, Any]]):
+    """Rows of a time history as [time, quantity, ...], the order the export writes back."""
+    if (time or {}).get("column") == 1 and (quantity or {}).get("column") == 0:
+        return [[row[1], row[0], *row[2:]] for row in values]
+    return values
+
 
 def parse_value_unit(raw: Any):
     """
@@ -352,13 +390,23 @@ class Command(BaseCommand):
 
         rel_path = str(yaml_path.relative_to(base_path))
 
+        try:
+            experiment_type = experiment_type_of(data)
+        except ValueError as exc:
+            stored = ExperimentDataset.objects.filter(chemked_file_path=rel_path).first()
+            if stored:
+                raise ValueError(
+                    f"{exc}; dataset {stored.pk} stored earlier for this file was left unchanged"
+                ) from exc
+            raise
+
         with transaction.atomic():
             dataset, created = ExperimentDataset.objects.get_or_create(
                 chemked_file_path=rel_path,
                 defaults={
                     "file_version": data.get("file-version", 0),
                     "chemked_version": data.get("chemked-version", "0.4.1"),
-                    "experiment_type": data.get("experiment-type", ExperimentType.IGNITION_DELAY),
+                    "experiment_type": experiment_type,
                 },
             )
             # Re-ingesting an updated file replaces its datapoints instead of
@@ -389,13 +437,6 @@ class Command(BaseCommand):
 
             dataset.file_version = data.get("file-version", dataset.file_version)
             dataset.chemked_version = data.get("chemked-version", dataset.chemked_version)
-            experiment_type = data.get("experiment-type", dataset.experiment_type)
-            if experiment_type not in ExperimentType.values:
-                self.stderr.write(
-                    f"Unknown experiment-type '{experiment_type}' in {rel_path};"
-                    f" defaulting to {ExperimentType.IGNITION_DELAY}"
-                )
-                experiment_type = ExperimentType.IGNITION_DELAY
             dataset.experiment_type = experiment_type
             dataset.reference_doi = (data.get("reference") or {}).get("doi", "")
             dataset.reference_journal = (data.get("reference") or {}).get("journal", "")
@@ -675,7 +716,7 @@ class Command(BaseCommand):
                             history_type=history.get("type"),
                             time_units=(history.get("time") or {}).get("units", ""),
                             quantity_units=(history.get("quantity") or {}).get("units", ""),
-                            values=values,
+                            values=time_first(values, history.get("time"), history.get("quantity")),
                         )
 
                 volume_history = datapoint_data.get("volume-history") or {}
@@ -684,5 +725,9 @@ class Command(BaseCommand):
                         datapoint=datapoint,
                         time_units=(volume_history.get("time") or {}).get("units", ""),
                         volume_units=(volume_history.get("volume") or {}).get("units", ""),
-                        values=volume_history.get("values", []),
+                        values=time_first(
+                            volume_history.get("values", []),
+                            volume_history.get("time"),
+                            volume_history.get("volume"),
+                        ),
                     )
