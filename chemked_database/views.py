@@ -5,6 +5,7 @@ Views for browsing and exploring experimental combustion data.
 Designed for combustion research community and scientists.
 """
 
+import copy
 import html as html_mod
 import os
 import re
@@ -741,15 +742,16 @@ class DatasetCreateWizardView(TemplateView):
                 all_valid = all_valid and rate_coefficient_formset.is_valid()
             
             if all_valid:
+                from .github_pr_service import GitHubContributionError
                 try:
-                    dataset = self._create_dataset(wizard_data)
-                    # Clear session data
+                    submission = self._submit_for_review(wizard_data)
                     del request.session['chemked_wizard']
-                    messages.success(request, f'Dataset created successfully with {dataset.datapoints.count()} datapoints.')
-                    return redirect('chemked_database:dataset-detail', pk=dataset.pk)
+                    return redirect('chemked_database:submission-status', pk=submission.pk)
+                except (ValueError, GitHubContributionError) as e:
+                    messages.error(request, f'Not submitted: {e}')
                 except Exception as e:
-                    logger.exception("Error creating dataset")
-                    messages.error(request, f'Error creating dataset: {str(e)}')
+                    logger.exception("Error submitting dataset")
+                    messages.error(request, f'Error submitting dataset: {e}')
             else:
                 messages.error(request, 'Please correct the errors below.')
         
@@ -771,6 +773,41 @@ class DatasetCreateWizardView(TemplateView):
         })
         return self.render_to_response(context)
     
+    def _submit_for_review(self, data):
+        """Open a pull request with the entered dataset; nothing is written to the database.
+
+        The first file author named on the form is credited on the pull request.
+        """
+        from datetime import datetime
+        from .chemked_adapter import ChemKEDDictAdapter
+
+        chemked_dict = self._build_chemked_dict(data)
+        check_chemked_dict(chemked_dict)
+        authors = [a for a in data.get('file_authors', []) if a.get('name')]
+        contributor = authors[0] if authors else {}
+        adapter = ChemKEDDictAdapter(chemked_dict)
+        stamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        name = DatasetUploadView()._generate_readable_name(
+            adapter, f'entry_{stamp}', adapter.file_type
+        ) + '.yaml'
+        pr_result, submitted = submit_for_review(
+            [(name, chemked_dict, None)], contributor.get('name', ''), contributor.get('orcid', ''),
+        )
+        messages.success(
+            self.request,
+            f'Submitted the dataset for review as pull request #{pr_result["pr_number"]}. '
+            'It is added to the database when the pull request is merged.'
+        )
+        return Submission.objects.create(
+            status=Submission.Status.PENDING,
+            successful_imports=submitted,
+            contributor_name=contributor.get('name', ''),
+            contributor_orcid=contributor.get('orcid', ''),
+            pr_url=pr_result.get('pr_url', ''),
+            pr_number=pr_result.get('pr_number'),
+            branch=pr_result.get('branch', ''),
+        )
+
     def _parse_value_with_unit(self, value_string):
         """
         Parse a string like '1249 K' or '529 us' into value and unit.
@@ -1390,6 +1427,87 @@ def format_chemked_yaml(chemked_dict):
     ) + '...\n'
 
 
+def check_chemked_dict(chemked_dict):
+    """Validate a ChemKED dict with PyKED, as the pull request checks will.
+
+    Raises ValueError with PyKED's message when the dict is not valid ChemKED.
+    """
+    from pyked.chemked import ChemKED
+
+    try:
+        ChemKED(dict_input=copy.deepcopy(chemked_dict))
+    except Exception as exc:
+        raise ValueError(f'Not valid ChemKED: {exc}') from exc
+
+
+def submit_for_review(files, contributor_name, contributor_orcid, run_pyteck=False,
+                      description='', github_username=''):
+    """Open one pull request on the ChemKED database for the given files.
+
+    Every route that enters experimental data (entry form, web upload, REST API)
+    ends here. Nothing is written to the database: a dataset is loaded by the
+    ingest after the pull request is merged (chemked-ingest workflow,
+    sync_chemked), so every dataset has been reviewed.
+
+    Args:
+        files: list of (filename, chemked_dict, content). ``content`` is the
+            file as uploaded (bytes), or None to write the dict as YAML with the
+            contributor added to the file authors.
+        contributor_name, contributor_orcid: attribution on the pull request.
+
+    Returns:
+        (pr_result, submitted): the pull request ('pr_url', 'pr_number',
+        'branch') and one {'filename', 'repo_path', 'datapoints'} per file.
+
+    Raises:
+        ValueError: no contributor name or no valid ORCID iD.
+        GitHubContributionError: GitHub is not configured, or the pull request
+            could not be made.
+    """
+    from .github_pr_service import ORCID_PATTERN, GitHubPRService
+
+    if not contributor_name:
+        raise ValueError('Give your name: the pull request is attributed to you.')
+    if not ORCID_PATTERN.match(contributor_orcid or ''):
+        raise ValueError('Give your ORCID iD (0000-0000-0000-000X): the pull request is '
+                         'attributed by ORCID.')
+
+    gh = GitHubPRService(
+        token=getattr(settings, 'GITHUB_TOKEN', ''),
+        owner=getattr(settings, 'GITHUB_REPO_OWNER', ''),
+        repo=getattr(settings, 'GITHUB_REPO_NAME', 'ChemKED-database'),
+    )
+    pr_files, submitted = [], []
+    for filename, chemked_dict, content in files:
+        if content is None:
+            chemked_dict = copy.deepcopy(chemked_dict)
+            authors = chemked_dict.get('file-authors') or []
+            if not any(isinstance(a, dict) and a.get('name') == contributor_name for a in authors):
+                authors.append({'name': contributor_name, 'ORCID': contributor_orcid})
+            chemked_dict['file-authors'] = authors
+            content = format_chemked_yaml(chemked_dict).encode('utf-8')
+        yaml_name = Path(filename).stem + '.yaml'
+        repo_path = gh.determine_repo_path(yaml_name, content)
+        pr_files.append({'path': repo_path, 'content': content})
+        submitted.append({
+            'filename': filename,
+            'repo_path': repo_path,
+            'datapoints': len(chemked_dict.get('datapoints') or []),
+        })
+
+    pr_result = gh.contribute_files(
+        files=pr_files,
+        contributor_name=contributor_name,
+        contributor_orcid=contributor_orcid,
+        file_type='chemked',
+        description=description,
+        run_pyteck=run_pyteck,
+        github_username=github_username,
+        validation_passed=True,
+    )
+    return pr_result, submitted
+
+
 def _sort_keys(obj):
     """Recursively sort dict keys so both sides of a diff share the same order."""
     if isinstance(obj, dict):
@@ -1549,7 +1667,7 @@ class DatasetUploadView(FormView):
         return self.render_to_response(context)
     
     def _confirm_import(self, request):
-        """Confirm the import after preview."""
+        """Submit the previewed file for review as a pull request."""
         from .forms import ReSpecThPreviewForm
         
         form = ReSpecThPreviewForm(request.POST)
@@ -1565,7 +1683,6 @@ class DatasetUploadView(FormView):
         
         # Retrieve GitHub contribution fields stored during preview
         preview_data = request.session.get('respecth_preview', {})
-        contribute_to_github = preview_data.get('contribute_to_github', False)
         run_pyteck = preview_data.get('run_pyteck', False)
         github_username = preview_data.get('github_username', '')
         contribution_description = preview_data.get('contribution_description', '')
@@ -1580,9 +1697,9 @@ class DatasetUploadView(FormView):
             messages.error(request, 'Temporary file expired. Please upload the file again.')
             return redirect('chemked_database:dataset-upload')
         
-        pr_result = None
         try:
             from .chemked_adapter import ChemKEDDictAdapter
+            from .github_pr_service import GitHubContributionError
 
             if file_type == 'yaml':
                 # YAML files: load directly as ChemKED dict
@@ -1594,7 +1711,7 @@ class DatasetUploadView(FormView):
                 )
 
             data = ChemKEDDictAdapter(chemked_dict)
-            
+
             # Warn about potential duplicates but proceed — the GitHub PR
             # will show a diff for maintainers to review.
             if data.file_doi:
@@ -1606,46 +1723,34 @@ class DatasetUploadView(FormView):
                         f'as "{existing.chemked_file_path}". The contribution PR will '
                         'show any differences for review.'
                     )
-            
-            # Import with the unified ChemKED dict importer
-            dataset = self._import_from_chemked_dict(chemked_dict, original_filename, file_author, custom_name=dataset_name)
-            
-            messages.success(
-                request,
-                f'Successfully imported "{original_filename}" as "{dataset.chemked_file_path}" '
-                f'with {dataset.datapoints.count()} datapoints.'
-            )
-            
-            # Create GitHub PR using the converter dict directly.
-            # Avoids re-exporting from the DB which introduces Django
-            # enum serialization bugs (!!python/object/apply tags).
-            if contribute_to_github:
-                pr_result = self._create_contribution_pr_from_chemked_dict(
-                    chemked_dict,
-                    dataset.chemked_file_path,
-                    file_author, file_author_orcid,
-                    run_pyteck, contribution_description,
+
+            # Every contribution goes through a pull request; the dataset is
+            # loaded into the database after the pull request is merged.
+            check_chemked_dict(chemked_dict)
+            try:
+                pr_result, submitted = submit_for_review(
+                    [(f'{dataset_name}.yaml', chemked_dict, None)],
+                    file_author, file_author_orcid, run_pyteck, contribution_description,
                     github_username=github_username,
                 )
-                if pr_result:
-                    messages.success(
-                        request,
-                        f'GitHub PR #{pr_result["pr_number"]} created: {pr_result["pr_url"]}'
-                    )
-            
+            except (ValueError, GitHubContributionError) as exc:
+                messages.error(request, f'Not submitted: {exc}')
+                return redirect('chemked_database:dataset-upload')
+
+            messages.success(
+                request,
+                f'Submitted "{original_filename}" for review as pull request '
+                f'#{pr_result["pr_number"]}. The dataset is added to the database when the '
+                'pull request is merged.'
+            )
             submission = Submission.objects.create(
-                status=Submission.Status.SUCCESS,
-                successful_imports=[{
-                    'filename': original_filename,
-                    'dataset_id': dataset.pk,
-                    'dataset_name': dataset.chemked_file_path,
-                    'datapoints': dataset.datapoints.count(),
-                }],
+                status=Submission.Status.PENDING,
+                successful_imports=submitted,
                 contributor_name=file_author,
                 contributor_orcid=file_author_orcid,
-                pr_url=pr_result.get('pr_url', '') if pr_result else '',
-                pr_number=pr_result.get('pr_number') if pr_result else None,
-                branch=pr_result.get('branch', '') if pr_result else '',
+                pr_url=pr_result.get('pr_url', ''),
+                pr_number=pr_result.get('pr_number'),
+                branch=pr_result.get('branch', ''),
             )
             return redirect('chemked_database:submission-status', pk=submission.pk)
             
@@ -1668,10 +1773,8 @@ class DatasetUploadView(FormView):
         # Get all uploaded files (supports multiple file upload)
         data_files = self.request.FILES.getlist('data_file')
         file_format = form.cleaned_data.get('file_format', 'auto')
-        validate = form.cleaned_data.get('validate_on_upload', True)
         file_author = form.cleaned_data.get('file_author', '')
         file_author_orcid = form.cleaned_data.get('file_author_orcid', '')
-        contribute_to_github = form.cleaned_data.get('contribute_to_github', False)
         run_pyteck = form.cleaned_data.get('run_pyteck', False)
         github_username = form.cleaned_data.get('github_username', '')
         contribution_description = form.cleaned_data.get('contribution_description', '')
@@ -1697,8 +1800,7 @@ class DatasetUploadView(FormView):
         # The JS upload handler already follows redirects via xhr.responseURL.
         if len(data_files) == 1:
             return self._process_single_file(
-                data_files[0], file_format, validate, file_author, file_author_orcid, form,
-                contribute_to_github=contribute_to_github,
+                data_files[0], file_format, file_author, file_author_orcid, form,
                 run_pyteck=run_pyteck,
                 github_username=github_username,
                 contribution_description=contribution_description,
@@ -1707,87 +1809,60 @@ class DatasetUploadView(FormView):
         # For AJAX requests: Save files to temp storage and return batch_id for SSE processing
         if is_ajax:
             return self._prepare_batch_for_sse(
-                data_files, file_format, validate, file_author, file_author_orcid,
-                contribute_to_github=contribute_to_github,
+                data_files, file_format, file_author, file_author_orcid,
                 run_pyteck=run_pyteck,
                 github_username=github_username,
                 contribution_description=contribution_description,
             )
         
-        # Non-AJAX multi-file: process synchronously
-        successful_imports = []
-        skipped_imports = []
-        failed_imports = []
-        
+        # Non-AJAX multi-file: validate every file, then open one pull request
+        ready, failed_imports = [], []
         for data_file in data_files:
-            result = self._process_file_batch(
-                data_file, file_format, validate, file_author, file_author_orcid
-            )
-            if result['success']:
-                successful_imports.append(result)
+            item, error = self._prepare_upload_for_review(data_file, file_format)
+            if error:
+                failed_imports.append({'filename': data_file.name, 'error': error})
             else:
-                if result.get('error_kind') == 'skipped':
-                    skipped_imports.append(result)
-                else:
-                    failed_imports.append(result)
-        
-        # Non-AJAX: use messages framework
-        if successful_imports:
-            total_datapoints = sum(r.get('datapoints', 0) for r in successful_imports)
-            messages.success(
-                self.request,
-                f'Successfully imported {len(successful_imports)} dataset(s) with {total_datapoints} total datapoints.'
-            )
+                ready.append(item)
 
-            # Create GitHub PR if requested
-            if contribute_to_github:
-                pr_result = self._create_contribution_pr(
-                    data_files, successful_imports,
-                    file_author, file_author_orcid,
-                    run_pyteck, contribution_description,
-                    github_username=github_username,
-                )
-                if pr_result:
-                    messages.success(
-                        self.request,
-                        f'GitHub PR #{pr_result["pr_number"]} created: {pr_result["pr_url"]}'
-                    )
-        
         if failed_imports:
-            details = "\n".join(
-                f'- {fail["filename"]}: {fail["error"]}' for fail in failed_imports
-            )
+            details = "\n".join(f'- {fail["filename"]}: {fail["error"]}' for fail in failed_imports)
             messages.error(
                 self.request,
-                f'Failed to import {len(failed_imports)} file(s):\n{details}'
+                f'{len(failed_imports)} file(s) are not valid ChemKED and were not submitted:\n{details}'
             )
+        if not ready:
+            return self.form_invalid(form)
 
-        if skipped_imports:
-            details = "\n".join(
-                f'- {skip["filename"]}: {skip["error"]}' for skip in skipped_imports
+        from .github_pr_service import GitHubContributionError
+        try:
+            pr_result, submitted = submit_for_review(
+                ready, file_author, file_author_orcid, run_pyteck, contribution_description,
+                github_username=github_username,
             )
-            messages.warning(
-                self.request,
-                f'Skipped {len(skipped_imports)} file(s):\n{details}'
-            )
-        
-        if successful_imports:
-            submission = Submission.objects.create(
-                status=Submission.Status.SUCCESS if not failed_imports else Submission.Status.PARTIAL,
-                successful_imports=successful_imports,
-                failed_imports=failed_imports,
-                skipped_imports=skipped_imports,
-                contributor_name=file_author,
-                contributor_orcid=file_author_orcid,
-                pr_url=pr_result.get('pr_url', '') if pr_result else '',
-                pr_number=pr_result.get('pr_number') if pr_result else None,
-                branch=pr_result.get('branch', '') if pr_result else '',
-            )
-            return redirect('chemked_database:submission-status', pk=submission.pk)
-        return self.form_invalid(form)
+        except (ValueError, GitHubContributionError) as exc:
+            messages.error(self.request, f'Not submitted: {exc}')
+            return self.form_invalid(form)
+
+        messages.success(
+            self.request,
+            f'Submitted {len(submitted)} file(s) for review as pull request '
+            f'#{pr_result["pr_number"]}. The datasets are added to the database when the pull '
+            'request is merged.'
+        )
+        submission = Submission.objects.create(
+            status=Submission.Status.PENDING if not failed_imports else Submission.Status.PARTIAL,
+            successful_imports=submitted,
+            failed_imports=failed_imports,
+            contributor_name=file_author,
+            contributor_orcid=file_author_orcid,
+            pr_url=pr_result.get('pr_url', ''),
+            pr_number=pr_result.get('pr_number'),
+            branch=pr_result.get('branch', ''),
+        )
+        return redirect('chemked_database:submission-status', pk=submission.pk)
     
-    def _prepare_batch_for_sse(self, data_files, file_format, validate, file_author, file_author_orcid,
-                              contribute_to_github=False, run_pyteck=False,
+    def _prepare_batch_for_sse(self, data_files, file_format, file_author, file_author_orcid,
+                              run_pyteck=False,
                               github_username='', contribution_description=''):
         """
         Save uploaded files to temp storage and return batch_id for SSE processing.
@@ -1894,10 +1969,8 @@ class DatasetUploadView(FormView):
         self.request.session[batch_key] = {
             'temp_files': temp_files,
             'file_format': file_format,
-            'validate': validate,
             'file_author': file_author,
             'file_author_orcid': file_author_orcid,
-            'contribute_to_github': contribute_to_github,
             'run_pyteck': run_pyteck,
             'github_username': github_username,
             'contribution_description': contribution_description,
@@ -1914,66 +1987,49 @@ class DatasetUploadView(FormView):
             'detection_skipped': detection_skipped,
         })
     
-    def _process_file_batch(self, data_file, file_format, validate, file_author, file_author_orcid):
-        """Process a single file in batch mode (no preview)."""
-        filename = data_file.name.lower()
-        original_name = data_file.name
-        
-        # Determine file format
-        actual_format = file_format
-        if actual_format == 'auto':
-            if filename.endswith('.xml'):
-                actual_format = 'xml'
-            else:
-                actual_format = 'yaml'
-        
-        suffix = '.xml' if actual_format == 'xml' else '.yaml'
-        
-        # Save uploaded file temporarily
+    def _prepare_for_review(self, temp_path, original_name, file_format='auto'):
+        """Read an uploaded file into a ChemKED dict and validate it for submit_for_review.
+
+        YAML is contributed as uploaded. ReSpecTh XML is converted, and the file
+        is named like the datasets of the web upload.
+
+        Returns ((filename, chemked_dict, content), None), or (None, error message).
+        """
+        is_xml = file_format == 'xml' or (
+            file_format == 'auto' and original_name.lower().endswith('.xml')
+        )
         try:
-            with tempfile.NamedTemporaryFile(mode='wb', suffix=suffix, delete=False) as f:
-                for chunk in data_file.chunks():
-                    f.write(chunk)
-                temp_path = f.name
-        except Exception as e:
-            return {'success': False, 'filename': original_name, 'error': str(e)}
-        
-        try:
-            if actual_format == 'xml':
-                # Import ReSpecTh XML directly (no preview in batch mode)
-                dataset = self._import_respecth_xml_batch(temp_path, original_name, file_author, file_author_orcid)
-                return {
-                    'success': True,
-                    'filename': original_name,
-                    'dataset_id': dataset.pk,
-                    'dataset_name': dataset.chemked_file_path,
-                    'datapoints': dataset.datapoints.count()
-                }
+            if is_xml:
+                from .chemked_adapter import ChemKEDDictAdapter
+
+                chemked_dict = respecth_to_chemked_dict(temp_path, original_name)
+                data = ChemKEDDictAdapter(chemked_dict)
+                name = self._generate_readable_name(data, original_name, data.file_type) + '.yaml'
+                content = None
             else:
-                # Parse ChemKED YAML
-                from pyked import chemked
-                ck = chemked.ChemKED(yaml_file=temp_path, skip_validation=not validate)
-                dataset = self._import_chemked(ck, original_name)
-                return {
-                    'success': True,
-                    'filename': original_name,
-                    'dataset_id': dataset.pk,
-                    'dataset_name': dataset.chemked_file_path,
-                    'datapoints': dataset.datapoints.count()
-                }
-        except Exception as e:
-            logger.exception(f"Error importing file {original_name}")
-            formatted = self._format_import_error(str(e))
-            return {
-                'success': False,
-                'filename': original_name,
-                'error': formatted['message'],
-                'error_kind': formatted['kind']
-            }
+                with open(temp_path, 'rb') as fh:
+                    content = fh.read()
+                chemked_dict = yaml.safe_load(content)
+                if not isinstance(chemked_dict, dict):
+                    raise ValueError('File does not contain a YAML mapping')
+                name = original_name
+            check_chemked_dict(chemked_dict)
+        except Exception as exc:
+            return None, self._format_import_error(str(exc))['message']
+        return (name, chemked_dict, content), None
+
+    def _prepare_upload_for_review(self, data_file, file_format):
+        """_prepare_for_review for an uploaded file object."""
+        suffix = '.xml' if data_file.name.lower().endswith('.xml') else '.yaml'
+        with tempfile.NamedTemporaryFile(mode='wb', suffix=suffix, delete=False) as f:
+            for chunk in data_file.chunks():
+                f.write(chunk)
+            temp_path = f.name
+        try:
+            return self._prepare_for_review(temp_path, data_file.name, file_format)
         finally:
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-    
+            os.unlink(temp_path)
+
     def _import_respecth_xml_batch(self, temp_path, original_filename, file_author, file_author_orcid):
         """Import ReSpecTh XML in batch mode (no preview)."""
         from .chemked_adapter import ChemKEDDictAdapter
@@ -2050,8 +2106,8 @@ class DatasetUploadView(FormView):
 
         return {'kind': 'error', 'message': message}
     
-    def _process_single_file(self, data_file, file_format, validate, file_author, file_author_orcid, form,
-                             contribute_to_github=False, run_pyteck=False,
+    def _process_single_file(self, data_file, file_format, file_author, file_author_orcid, form,
+                             run_pyteck=False,
                              github_username='', contribution_description=''):
         """Process a single file upload — always shows preview first."""
         # Determine file format
@@ -2076,7 +2132,6 @@ class DatasetUploadView(FormView):
                 # Try to detect ReSpecTh version
                 result = self._import_respecth_xml(
                     temp_path, data_file.name, file_author, file_author_orcid,
-                    contribute_to_github=contribute_to_github,
                     run_pyteck=run_pyteck,
                     github_username=github_username,
                     contribution_description=contribution_description,
@@ -2085,9 +2140,8 @@ class DatasetUploadView(FormView):
             else:
                 # ChemKED YAML — show preview before importing
                 return self._preview_yaml(
-                    temp_path, data_file.name, validate,
+                    temp_path, data_file.name,
                     file_author, file_author_orcid,
-                    contribute_to_github=contribute_to_github,
                     run_pyteck=run_pyteck,
                     github_username=github_username,
                     contribution_description=contribution_description,
@@ -2659,9 +2713,9 @@ class DatasetUploadView(FormView):
             )
         return ExperimentType.IGNITION_DELAY
 
-    def _preview_yaml(self, temp_path, original_filename, validate,
+    def _preview_yaml(self, temp_path, original_filename,
                       file_author, file_author_orcid,
-                      contribute_to_github=False, run_pyteck=False,
+                      run_pyteck=False,
                       github_username='', contribution_description=''):
         """Show a preview for ChemKED YAML files before importing.
 
@@ -2711,7 +2765,6 @@ class DatasetUploadView(FormView):
                 'experiment_type': exp_type,
                 'validation_error': None,
                 'can_confirm': True,
-                'contribute_to_github': contribute_to_github,
                 'run_pyteck': run_pyteck,
                 'github_username': github_username,
                 'contribution_description': contribution_description,
@@ -2755,7 +2808,7 @@ class DatasetUploadView(FormView):
             return self.form_invalid(self.get_form())
 
     def _import_respecth_xml(self, temp_path, original_filename, file_author, file_author_orcid,
-                              contribute_to_github=False, run_pyteck=False,
+                              run_pyteck=False,
                               github_username='', contribution_description=''):
         """
         Import ReSpecTh XML file. Tries v2.x format first, falls back to v1.x via PyKED.
@@ -2779,17 +2832,20 @@ class DatasetUploadView(FormView):
             return self._import_respecth_v2(
                 temp_path, original_filename, root_tag, file_author,
                 file_author_orcid=file_author_orcid,
-                contribute_to_github=contribute_to_github,
                 run_pyteck=run_pyteck,
                 github_username=github_username,
                 contribution_description=contribution_description,
             )
         else:
             # Try PyKED's converter for v1.x format
-            return self._import_respecth_v1(temp_path, original_filename, file_author, file_author_orcid)
+            return self._import_respecth_v1(
+                temp_path, original_filename, file_author, file_author_orcid,
+                run_pyteck=run_pyteck, github_username=github_username,
+                contribution_description=contribution_description,
+            )
     
     def _import_respecth_v2(self, temp_path, original_filename, file_type, file_author,
-                             file_author_orcid='', contribute_to_github=False,
+                             file_author_orcid='',
                              run_pyteck=False, github_username='',
                              contribution_description=''):
         """
@@ -2834,7 +2890,6 @@ class DatasetUploadView(FormView):
                 'validation_error': validation_error,
                 'can_confirm': validation_error is None,
                 'supported_experiment_types': [choice.label for choice in ExperimentType],
-                'contribute_to_github': contribute_to_github,
                 'run_pyteck': run_pyteck,
                 'github_username': github_username,
                 'contribution_description': contribution_description,
@@ -2894,41 +2949,53 @@ class DatasetUploadView(FormView):
             )
             return self.form_invalid(self.get_form())
     
-    def _import_respecth_v1(self, temp_path, original_filename, file_author, file_author_orcid):
-        """Import ReSpecTh v1.x format file using PyKED."""
+    def _import_respecth_v1(self, temp_path, original_filename, file_author, file_author_orcid,
+                            run_pyteck=False, github_username='', contribution_description=''):
+        """Submit a ReSpecTh v1.x file for review as a pull request (converted by PyKED)."""
+        from .github_pr_service import GitHubContributionError
+
         try:
-            from pyked import chemked
-            
-            ck = chemked.ChemKED.from_respecth(
-                temp_path,
-                file_author=file_author,
-                file_author_orcid=file_author_orcid
+            from pyked.converters import ReSpecTh_to_ChemKED
+
+            chemked_dict = ReSpecTh_to_ChemKED(
+                temp_path, file_author=file_author, file_author_orcid=file_author_orcid,
             )
-            
-            dataset = self._import_chemked(ck, original_filename)
-            
-            messages.success(
-                self.request,
-                f'Successfully imported ReSpecTh v1 XML "{original_filename}" with {dataset.datapoints.count()} datapoints.'
+            check_chemked_dict(chemked_dict)
+            name = Path(original_filename).stem + '.yaml'
+            pr_result, submitted = submit_for_review(
+                [(name, chemked_dict, None)], file_author, file_author_orcid, run_pyteck,
+                contribution_description, github_username=github_username,
             )
-            return redirect('chemked_database:dataset-detail', pk=dataset.pk)
-            
         except ImportError:
-            messages.error(self.request, 'PyKED is not installed. Cannot import ReSpecTh v1.x files.')
+            messages.error(self.request, 'PyKED is not installed. Cannot convert ReSpecTh v1.x files.')
+            return self.form_invalid(self.get_form())
+        except (ValueError, GitHubContributionError) as exc:
+            messages.error(self.request, f'Not submitted: {exc}')
+            return self.form_invalid(self.get_form())
         except Exception as e:
-            error_msg = str(e)
-            logger.exception("Error importing ReSpecTh v1 file")
-            if 'preferredKey' in error_msg or 'bibliographyLink' in error_msg:
-                messages.error(
-                    self.request,
-                    f'This appears to be a ReSpecTh v2.x file but was not recognized. '
-                    f'Please check the file format. Details: {error_msg}'
-                )
-            else:
-                messages.error(self.request, f'Error importing ReSpecTh file: {error_msg}')
-        
-        return self.form_invalid(self.get_form())
-    
+            logger.exception("Error converting ReSpecTh v1 file")
+            messages.error(self.request, f'Error converting ReSpecTh file: {e}')
+            return self.form_invalid(self.get_form())
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+        messages.success(
+            self.request,
+            f'Submitted "{original_filename}" for review as pull request #{pr_result["pr_number"]}. '
+            'The dataset is added to the database when the pull request is merged.'
+        )
+        submission = Submission.objects.create(
+            status=Submission.Status.PENDING,
+            successful_imports=submitted,
+            contributor_name=file_author,
+            contributor_orcid=file_author_orcid,
+            pr_url=pr_result.get('pr_url', ''),
+            pr_number=pr_result.get('pr_number'),
+            branch=pr_result.get('branch', ''),
+        )
+        return redirect('chemked_database:submission-status', pk=submission.pk)
+
     # ------------------------------------------------------------------
     # Unified import from ChemKED dict (output of batch_convert)
     # ------------------------------------------------------------------
@@ -4461,287 +4528,120 @@ class DatasetProcessView(View):
         return response
     
     def _process_files_stream(self, batch_data, request):
-        """Generator that processes files and yields SSE events."""
+        """Generator that validates the files, opens one pull request and yields SSE events.
+
+        Nothing is written to the database: the datasets are loaded after the
+        pull request is merged.
+        """
+        from .github_pr_service import GitHubContributionError
+
         temp_files = batch_data.get('temp_files', [])
         file_format = batch_data.get('file_format', 'auto')
-        validate = batch_data.get('validate', True)
         file_author = batch_data.get('file_author', '')
         file_author_orcid = batch_data.get('file_author_orcid', '')
-        contribute_to_github = batch_data.get('contribute_to_github', False)
         run_pyteck = batch_data.get('run_pyteck', False)
         github_username = batch_data.get('github_username', '')
         contribution_description = batch_data.get('contribution_description', '')
-        
+
         total_files = len(temp_files)
-        successful_imports = []
-        skipped_imports = []
+        ready = []
         failed_imports = []
-        
-        # Send initial event
+
         yield self._sse_event('start', {
             'total': total_files,
-            'message': f'Starting to process {total_files} file(s)...'
+            'message': f'Checking {total_files} file(s)...'
         })
-        
-        # Get the upload view for processing methods
+
         upload_view = DatasetUploadView()
         upload_view.request = request
-        
+
         for i, file_info in enumerate(temp_files):
             temp_path = file_info['temp_path']
             original_name = file_info['original_name']
-            
-            # Send progress event
-            progress = ((i + 0.5) / total_files) * 100
             yield self._sse_event('progress', {
                 'current': i + 1,
                 'total': total_files,
-                'percent': round(progress, 1),
+                'percent': round(((i + 0.5) / total_files) * 90, 1),
                 'filename': original_name,
-                'message': f'Processing {original_name}...'
+                'message': f'Checking {original_name}...'
             })
-            
-            # Process the file
             try:
                 if not os.path.exists(temp_path):
                     raise FileNotFoundError(f'Temporary file not found: {temp_path}')
-                
-                # Read file content before processing if we need it for PR creation
-                file_content_for_pr = None
-                pr_filename = original_name
-                if contribute_to_github:
-                    if original_name.lower().endswith('.xml'):
-                        # For XML files, convert to YAML so the PR
-                        # contributes ChemKED YAML to the database repo.
-                        try:
-                            chemked_dict = respecth_to_chemked_dict(temp_path, original_name)
-                            file_content_for_pr = format_chemked_yaml(chemked_dict).encode('utf-8')
-                        except Exception:
-                            logger.debug("XML→YAML conversion for PR failed; will use raw content")
-                            with open(temp_path, 'rb') as fh:
-                                file_content_for_pr = fh.read()
-                    else:
-                        with open(temp_path, 'rb') as fh:
-                            file_content_for_pr = fh.read()
-
-                result = self._process_single_file(
-                    upload_view, temp_path, original_name, 
-                    file_format, validate, file_author, file_author_orcid
-                )
-                
-                if result['success']:
-                    successful_imports.append(result)
-                    if file_content_for_pr is not None:
-                        result['_content'] = file_content_for_pr
-                        # Use the readable dataset name for the PR filename
-                        ds_name = result.get('dataset_name', '')
-                        if ds_name and original_name.lower().endswith('.xml'):
-                            pr_filename = Path(ds_name).stem + '.yaml'
-                        result['filename'] = pr_filename
-                    yield self._sse_event('file_complete', {
-                        'filename': original_name,
-                        'status': 'success',
-                        'dataset_name': result.get('dataset_name', ''),
-                        'datapoints': result.get('datapoints', 0)
-                    })
-                else:
-                    if result.get('error_kind') == 'skipped':
-                        skipped_imports.append(result)
-                        yield self._sse_event('file_complete', {
-                            'filename': original_name,
-                            'status': 'skipped',
-                            'error': result.get('error', 'Skipped')
-                        })
-                    else:
-                        failed_imports.append(result)
-                        yield self._sse_event('file_complete', {
-                            'filename': original_name,
-                            'status': 'failed',
-                            'error': result.get('error', 'Unknown error')
-                        })
+                item, error = upload_view._prepare_for_review(temp_path, original_name, file_format)
             except Exception as e:
-                logger.exception(f"Error processing {original_name}")
-                failed_imports.append({
-                    'success': False,
-                    'filename': original_name,
-                    'error': str(e)
-                })
-                yield self._sse_event('file_complete', {
-                    'filename': original_name,
-                    'status': 'failed',
-                    'error': str(e)
-                })
+                logger.exception(f"Error checking {original_name}")
+                item, error = None, str(e)
             finally:
-                # Clean up temp file
                 if os.path.exists(temp_path):
                     try:
                         os.unlink(temp_path)
                     except Exception:
                         pass
-            
-            # Update progress after file is complete
-            progress = ((i + 1) / total_files) * 100
-            yield self._sse_event('progress', {
-                'current': i + 1,
-                'total': total_files,
-                'percent': round(progress, 1),
-                'filename': original_name,
-                'message': f'Completed {i + 1} of {total_files}'
-            })
-        
-        # Create GitHub PR if requested and there are successful imports
-        pr_result = None
-        if contribute_to_github and successful_imports:
+
+            if error:
+                failed_imports.append({'filename': original_name, 'error': error})
+                yield self._sse_event('file_complete', {
+                    'filename': original_name, 'status': 'failed', 'error': error,
+                })
+            else:
+                ready.append(item)
+                yield self._sse_event('file_complete', {
+                    'filename': original_name,
+                    'status': 'success',
+                    'dataset_name': item[0],
+                    'datapoints': len(item[1].get('datapoints') or []),
+                })
+
+        pr_result, submitted, submission = None, [], None
+        if ready:
             yield self._sse_event('progress', {
                 'current': total_files,
                 'total': total_files,
                 'percent': 95,
                 'filename': '',
-                'message': 'Creating GitHub pull request...'
+                'message': 'Opening the pull request for review...'
             })
             try:
-                pr_result = self._create_contribution_pr_from_batch(
-                    temp_files, successful_imports,
-                    file_author, file_author_orcid,
-                    run_pyteck, contribution_description,
-                    github_username=github_username,
+                pr_result, submitted = submit_for_review(
+                    ready, file_author, file_author_orcid, run_pyteck,
+                    contribution_description, github_username=github_username,
                 )
-                if pr_result:
-                    yield self._sse_event('pr_created', {
-                        'pr_url': pr_result['pr_url'],
-                        'pr_number': pr_result['pr_number'],
-                        'branch': pr_result['branch'],
-                    })
-            except Exception as exc:
-                logger.exception("Failed to create contribution PR during SSE processing")
-                yield self._sse_event('pr_error', {
-                    'error': str(exc),
+                yield self._sse_event('pr_created', {
+                    'pr_url': pr_result['pr_url'],
+                    'pr_number': pr_result['pr_number'],
+                    'branch': pr_result['branch'],
                 })
+                submission = Submission.objects.create(
+                    status=Submission.Status.PENDING if not failed_imports else Submission.Status.PARTIAL,
+                    successful_imports=submitted,
+                    failed_imports=failed_imports,
+                    contributor_name=file_author,
+                    contributor_orcid=file_author_orcid,
+                    pr_url=pr_result.get('pr_url', ''),
+                    pr_number=pr_result.get('pr_number'),
+                    branch=pr_result.get('branch', ''),
+                )
+            except (ValueError, GitHubContributionError) as exc:
+                yield self._sse_event('pr_error', {'error': f'Not submitted: {exc}'})
+            except Exception as exc:
+                logger.exception("Failed to open the contribution pull request")
+                yield self._sse_event('pr_error', {'error': str(exc)})
 
-        # Create Submission record
-        submission = None
-        if successful_imports:
-            submission = Submission.objects.create(
-                status=Submission.Status.SUCCESS if not failed_imports else Submission.Status.PARTIAL,
-                successful_imports=[
-                    {k: v for k, v in r.items() if k != '_content'}
-                    for r in successful_imports
-                ],
-                failed_imports=failed_imports,
-                skipped_imports=skipped_imports,
-                contributor_name=file_author,
-                contributor_orcid=file_author_orcid,
-                pr_url=pr_result.get('pr_url', '') if pr_result else '',
-                pr_number=pr_result.get('pr_number') if pr_result else None,
-                branch=pr_result.get('branch', '') if pr_result else '',
-            )
-
-        # Send completion event
-        total_datapoints = sum(r.get('datapoints', 0) for r in successful_imports)
-        redirect_url = None
-        if submission:
-            redirect_url = reverse('chemked_database:submission-status', kwargs={'pk': submission.pk})
         completion_data = {
-            'successful': len(successful_imports),
-            'skipped': len(skipped_imports),
+            'successful': len(submitted),
+            'skipped': 0,
             'failed': len(failed_imports),
-            'total_datapoints': total_datapoints,
-            'redirect_url': redirect_url,
+            'total_datapoints': sum(r['datapoints'] for r in submitted),
+            'redirect_url': (
+                reverse('chemked_database:submission-status', kwargs={'pk': submission.pk})
+                if submission else None
+            ),
         }
         if pr_result:
             completion_data['pr_url'] = pr_result['pr_url']
             completion_data['pr_number'] = pr_result['pr_number']
         yield self._sse_event('complete', completion_data)
-    
-    def _process_single_file(self, upload_view, temp_path, original_name, file_format, validate, file_author, file_author_orcid):
-        """Process a single file and return result dict."""
-        filename = original_name.lower()
-        
-        # Determine file format
-        actual_format = file_format
-        if actual_format == 'auto':
-            if filename.endswith('.xml'):
-                actual_format = 'xml'
-            else:
-                actual_format = 'yaml'
-        
-        try:
-            if actual_format == 'xml':
-                dataset = upload_view._import_respecth_xml_batch(temp_path, original_name, file_author, file_author_orcid)
-                return {
-                    'success': True,
-                    'filename': original_name,
-                    'dataset_id': dataset.pk,
-                    'dataset_name': dataset.chemked_file_path,
-                    'datapoints': dataset.datapoints.count()
-                }
-            else:
-                from pyked import chemked
-                ck = chemked.ChemKED(yaml_file=temp_path, skip_validation=not validate)
-                dataset = upload_view._import_chemked(ck, original_name)
-                return {
-                    'success': True,
-                    'filename': original_name,
-                    'dataset_id': dataset.pk,
-                    'dataset_name': dataset.chemked_file_path,
-                    'datapoints': dataset.datapoints.count()
-                }
-        except Exception as e:
-            formatted = upload_view._format_import_error(str(e))
-            return {
-                'success': False,
-                'filename': original_name,
-                'error': formatted['message'],
-                'error_kind': formatted['kind']
-            }
-    
-    def _create_contribution_pr_from_batch(self, temp_files, successful_imports,
-                                            file_author, file_author_orcid,
-                                            run_pyteck=False, contribution_description='',
-                                            github_username=''):
-        """Create a GitHub PR using file content cached from SSE batch processing."""
-        from .github_pr_service import GitHubPRService, GitHubContributionError
-
-        try:
-            gh = GitHubPRService(
-                token=getattr(settings, 'GITHUB_TOKEN', ''),
-                owner=getattr(settings, 'GITHUB_REPO_OWNER', ''),
-                repo=getattr(settings, 'GITHUB_REPO_NAME', 'ChemKED-database'),
-            )
-        except GitHubContributionError as exc:
-            logger.warning("GitHub PR service not configured: %s", exc)
-            return None
-
-        pr_files = []
-        for result in successful_imports:
-            content = result.get('_content')
-            if content is None:
-                continue
-            repo_path = gh.determine_repo_path(result['filename'], content)
-            pr_files.append({'path': repo_path, 'content': content})
-
-        if not pr_files:
-            logger.warning("No file content available for PR creation; skipping.")
-            return None
-
-        file_type = 'chemked'
-        if any(f['path'].lower().endswith('.xml') for f in pr_files):
-            file_type = 'respecth'
-
-        try:
-            return gh.contribute_files(
-                files=pr_files,
-                contributor_name=file_author or 'Anonymous',
-                contributor_orcid=file_author_orcid,
-                file_type=file_type,
-                description=contribution_description,
-                run_pyteck=run_pyteck,
-                github_username=github_username,
-                validation_passed=True,
-            )
-        except GitHubContributionError as exc:
-            logger.exception("Failed to create contribution PR from batch")
-            return None
 
     def _sse_event(self, event_type, data):
         """Format a Server-Sent Event."""

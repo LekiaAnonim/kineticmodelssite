@@ -13,30 +13,47 @@
         {% if submission.status == 'success' %}
           <span class="badge bg-success ms-2">Success</span>
         {% elif submission.status == 'partial' %}
-          <span class="badge bg-warning text-dark ms-2">Partial</span>
+          <span class="badge bg-warning text-dark ms-2">Partial{% if submission.pr_url %}, in review{% endif %}</span>
         {% elif submission.status == 'failed' %}
           <span class="badge bg-danger ms-2">Failed</span>
+        {% elif submission.pr_url %}
+          <span class="badge bg-info text-dark ms-2">In review</span>
         {% else %}
           <span class="badge bg-secondary ms-2">Pending</span>
         {% endif %}
       </h2>
       <p class="text-muted mb-4">{{ submission.created_at|date:"N j, Y g:i A" }}</p>
 
-      {# ── Import Results ── #}
+      {# ── Submitted files (in review) or, for older submissions, imported datasets ── #}
       {% if submission.successful_imports %}
       <div class="card mb-3 border-success">
         <div class="card-header bg-success text-white">
           <i class="bi bi-check-circle me-1"></i>
-          Successfully Imported ({{ submission.successful_imports|length }})
+          {% if submission.successful_imports.0.repo_path %}
+            Submitted for review ({{ submission.successful_imports|length }})
+          {% else %}
+            Successfully Imported ({{ submission.successful_imports|length }})
+          {% endif %}
         </div>
+        {% if submission.successful_imports.0.repo_path %}
+        <div class="card-body py-2 small text-muted">
+          These files are in the pull request below. They are added to the database when the
+          pull request is merged.
+        </div>
+        {% endif %}
         <ul class="list-group list-group-flush">
           {% for item in submission.successful_imports %}
           <li class="list-group-item d-flex justify-content-between align-items-center">
             <div>
+              {% if item.dataset_id %}
               <a href="{% url 'chemked_database:dataset-detail' pk=item.dataset_id %}">
                 {{ item.dataset_name|default:item.filename }}
               </a>
               <span class="text-muted small ms-2">{{ item.filename }}</span>
+              {% else %}
+              <code>{{ item.repo_path }}</code>
+              <span class="text-muted small ms-2">{{ item.filename }}</span>
+              {% endif %}
             </div>
             <span class="badge bg-primary rounded-pill">{{ item.datapoints }} datapoint{{ item.datapoints|pluralize }}</span>
           </li>

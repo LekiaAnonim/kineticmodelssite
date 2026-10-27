@@ -22,7 +22,7 @@ PR_RESULT = {
 
 
 class ContributeFilesViewTests(TestCase):
-    """POST /api/contribute/ validates, opens a PR and optionally imports."""
+    """POST /api/contribute/ validates and opens a PR; it writes nothing to the database."""
 
     def setUp(self):
         self.client = APIClient()
@@ -56,24 +56,19 @@ class ContributeFilesViewTests(TestCase):
         self.assertEqual(kwargs["files"], [{"path": REPO_PATH, "content": self.content}])
         self.assertEqual(response.data["paths"], [REPO_PATH])
         self.assertEqual(kwargs["contributor_orcid"], "0000-0002-1825-0097")
-        self.assertEqual(response.data["import_results"], [])
+        self.assertEqual(response.data["status"], "in review")
         self.assertFalse(ExperimentDataset.objects.exists())
 
     @mock.patch("chemked_database.github_pr_service.GitHubPRService")
-    def test_import_to_db_uses_web_importer(self, service_cls):
+    def test_import_to_db_is_ignored(self, service_cls):
         service_cls.return_value.contribute_files.return_value = PR_RESULT
         service_cls.return_value.determine_repo_path.return_value = REPO_PATH
 
         response = self._post(import_to_db="true")
 
         self.assertEqual(response.status_code, 201, response.data)
-        result = response.data["import_results"][0]
-        self.assertTrue(result["imported"], result["message"])
-        dataset = ExperimentDataset.objects.get()
-        self.assertEqual(result["message"], f"Imported as dataset #{dataset.pk}")
-        self.assertEqual(dataset.datapoints.count(), 2)
-        self.assertEqual(dataset.reference_journal, "Test Journal")
-        self.assertIn("Test Author", dataset.file_authors.values_list("name", flat=True))
+        self.assertNotIn("import_results", response.data)
+        self.assertFalse(ExperimentDataset.objects.exists())
 
     @mock.patch("chemked_database.github_pr_service.GitHubPRService")
     def test_invalid_file_is_rejected_before_pr(self, service_cls):

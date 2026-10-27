@@ -4,7 +4,10 @@ Contribution API views for ChemKED and Chemkin file submissions.
 Provides REST endpoints for uploading files that:
 1. Validate against PyKED schema locally
 2. Create a GitHub PR with ORCID metadata
-3. Optionally import into the local database
+
+Nothing is written to the database here. As for every route that enters
+experimental data, a dataset is loaded after its pull request is merged
+(chemked-ingest workflow, sync_chemked).
 """
 
 import logging
@@ -39,11 +42,6 @@ class ContributionSerializer(serializers.Serializer):
     )
     description = serializers.CharField(required=False, default="", allow_blank=True)
     run_pyteck = serializers.BooleanField(required=False, default=False)
-    import_to_db = serializers.BooleanField(
-        required=False,
-        default=False,
-        help_text="Also import into the local database after PR creation",
-    )
 
 
 class ContributeFilesView(APIView):
@@ -58,8 +56,9 @@ class ContributeFilesView(APIView):
       - file_type (str): 'chemked' or 'chemkin'
       - description (str, optional): PR description
       - run_pyteck (bool, optional): Trigger PyTeCK CI
-      - import_to_db (bool, optional): Also import to local DB
       - files (file[]): One or more files to contribute
+
+    The files are added to the database when the pull request is merged.
     """
 
     parser_classes = [MultiPartParser]
@@ -136,21 +135,13 @@ class ContributeFilesView(APIView):
                 "validation": validation_results,
             }, status=status.HTTP_502_BAD_GATEWAY)
 
-        # ---- Step 3: Optionally import to local database ----
-        import_results = []
-        if data["import_to_db"] and data["file_type"] == "chemked":
-            for f in files_for_pr:
-                ok, msg = self._import_to_database(
-                    f["content"], f["path"], data["contributor_name"]
-                )
-                import_results.append({"file": f["path"], "imported": ok, "message": msg})
-
         return Response({
+            "status": "in review",
+            "detail": "The files are added to the database when the pull request is merged.",
             "pr_url": pr_result["pr_url"],
             "pr_number": pr_result["pr_number"],
             "branch": pr_result["branch"],
             "validation": validation_results,
-            "import_results": import_results,
             "files_contributed": len(files_for_pr),
             "paths": [f["path"] for f in files_for_pr],
         }, status=status.HTTP_201_CREATED)
@@ -193,25 +184,6 @@ class ContributeFilesView(APIView):
             return (True, "Skipped – PyKED not available (will be validated in CI)")
         except Exception as e:
             return (False, f"Validation failed: {e}")
-
-    def _import_to_database(self, content_bytes, filepath, contributor_name=""):
-        """Import a validated ChemKED file into the local database.
-
-        Uses the same importer as the web upload form.
-        """
-        try:
-            from chemked_database.import_dispatcher import import_chemked_to_db
-
-            dataset = import_chemked_to_db(
-                content_bytes,
-                os.path.basename(filepath),
-                file_author=contributor_name,
-            )
-            return (True, f"Imported as dataset #{dataset.pk}")
-
-        except Exception as e:
-            logger.exception("Database import failed for %s", filepath)
-            return (False, f"Import failed: {e}")
 
 
 class ContributionStatusView(APIView):
