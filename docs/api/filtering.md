@@ -66,6 +66,12 @@ composition, or the common-properties composition of its dataset when it has non
 | `inchi` | InChI of a component, with or without the `InChI=` prefix |
 | `cas` | CAS number of a component |
 
+`species` and `inchi` compare standard InChIs: RMG's `/u` (unpaired electrons) and `/lp`
+(lone pairs) layers are dropped, so the triplet O2 record (`InChI=1S/O2/c1-2/u1,2`) finds
+the O2 of the experiments (`1S/O2/c1-2`). A standard InChI has no spin layer, so records
+that differ only in their spin, such as triplet O2 and singlet O2 ("O2X"), select the same
+components. An excited-state record (OH*) selects only the components linked to it.
+
 Repeat a parameter to require every value in the same mixture. NH3/H2 blends:
 
 ```bash

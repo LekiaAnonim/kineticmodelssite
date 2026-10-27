@@ -16,6 +16,8 @@ Conventions shared by the endpoints:
 * ``has_<relation>=true|false`` selects the records with or without related rows.
 """
 
+import re
+
 from django import forms
 from django.core.exceptions import FieldDoesNotExist
 from django.db.models import Exists, OuterRef, Q
@@ -90,21 +92,39 @@ def _bare_inchi(value):
     return value[len("InChI="):] if value.startswith("InChI=") else value
 
 
+# RMG writes the unpaired electrons (/u) and lone pairs (/lp) of a structure as extra InChI
+# layers; a standard InChI, as in ChemKED, has neither.
+_RMG_LAYERS = re.compile(r"/(?:u|lp)[^/]*")
+
+
+def _inchi_forms(inchi):
+    """The forms under which a component can store ``inchi``: bare, with the ``InChI=`` prefix,
+    and both again without RMG's layers."""
+    bare = _bare_inchi(inchi)
+    forms = {bare, _RMG_LAYERS.sub("", bare)}
+    return sorted(forms | {f"InChI={f}" for f in forms})
+
+
 def _species_component(species):
-    """Mixture components that are the species record: linked to it, or not linked to another
-    record and with one of its InChIs. An InChI does not tell an electronic state from the
-    ground state, so an excited-state record matches only the components linked to it."""
+    """Mixture components that are the species record: linked to it, or with its standard InChI.
+
+    A standard InChI has no spin layer, so records that differ only in their spin (triplet O2
+    and singlet O2) match the same components, whichever of them a component is linked to. An
+    InChI does not tell an electronic state from the ground state either, so an excited-state
+    record matches only the components linked to it, and a ground-state record does not match
+    a component linked to an excited-state record.
+    """
     q = Q(database_species=species)
     if not species.electronic_state:
-        inchis = [_bare_inchi(i) for i in species.isomers.values_list("inchi", flat=True) if i]
-        if inchis:
-            q |= Q(inchi__in=inchis) & (Q(database_species__isnull=True) | Q(database_species=species))
+        inchis = [i for i in species.isomers.values_list("inchi", flat=True) if i]
+        forms = sorted({f for i in inchis for f in _inchi_forms(i)})
+        if forms:
+            q |= Q(inchi__in=forms) & ~Q(database_species__electronic_state__gt="")
     return q
 
 
 def _inchi_component(inchi):
-    bare = _bare_inchi(inchi)
-    return Q(inchi__in=[bare, f"InChI={bare}"])
+    return Q(inchi__in=_inchi_forms(inchi))
 
 
 def _cas_component(cas):
@@ -130,13 +150,16 @@ class MixtureFilterSet(FilterSet):
     species = df.ModelMultipleChoiceFilter(
         queryset=dm.Species.objects.all(),
         method="filter_species",
-        help_text="ID of a species record (from /api/species/) in the mixture; repeat the "
-                  "parameter to require every species given in the same mixture.",
+        help_text="ID of a species record (from /api/species/) in the mixture, matched by its "
+                  "standard InChI; records that differ only in spin (triplet and singlet O2) "
+                  "match the same components. Repeat the parameter to require every species "
+                  "given in the same mixture.",
     )
     inchi = TextValuesFilter(
         method="filter_inchi",
-        help_text="InChI of a mixture component, with or without the 'InChI=' prefix; repeat "
-                  "the parameter to require every component given in the same mixture.",
+        help_text="InChI of a mixture component, with or without the 'InChI=' prefix and RMG's "
+                  "/u and /lp layers; repeat the parameter to require every component given in "
+                  "the same mixture.",
     )
     cas = TextValuesFilter(
         method="filter_cas",

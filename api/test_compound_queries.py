@@ -243,6 +243,40 @@ class CompoundQueryTests(TestCase):
         nh3_excited = make_species(NH3, electronic_state="excited")
         self.assertEqual(self._datasets(f"species={nh3_excited.pk}"), [])
 
+    def test_species_records_match_by_standard_inchi(self):
+        # RMG writes the unpaired electrons of triplet O2 and of OH as a /u layer
+        o2 = make_species("1S/O2/c1-2/u1,2")
+        oh = make_species("1S/HO/h1H/u1")
+        flame = make_dataset("oh.yaml")
+        make_point(flame, 1e5, 1500, make_composition(("OH", "1S/HO/h1H"), ("Ar", "1S/Ar")))
+        self.assertEqual(self._datasets(f"species={o2.pk}"), ["common.yaml", "h2.yaml"])
+        self.assertEqual(self._datasets(f"species={oh.pk}"), ["oh.yaml"])
+        self.assertEqual(
+            self._ids("/api/experiment-dataset/", inchi="InChI=1S/O2/c1-2/u1,2"),
+            sorted([self.common.pk, self.h2_only.pk]),
+        )
+
+    def test_spin_states_match_the_same_components(self):
+        # A standard InChI has no spin layer, so triplet O2 and singlet O2 ("O2X") select the
+        # same rows, also a row that is linked to the singlet record.
+        o2 = make_species("1S/O2/c1-2/u1,2")
+        o2_singlet = make_species(O2)
+        linked = make_dataset("linked.yaml")
+        make_point(linked, 1e5, 1000, make_composition(("O2", O2, o2_singlet)))
+        expected = ["common.yaml", "h2.yaml", "linked.yaml"]
+        self.assertEqual(self._datasets(f"species={o2.pk}"), expected)
+        self.assertEqual(self._datasets(f"species={o2_singlet.pk}"), expected)
+
+    def test_link_to_an_excited_state_is_kept(self):
+        oh = make_species("1S/HO/h1H/u1")
+        oh_excited = make_species("1S/HO/h1H/u1", electronic_state="excited")
+        ground = make_dataset("oh.yaml")
+        make_point(ground, 1e5, 1500, make_composition(("OH", "1S/HO/h1H")))
+        excited = make_dataset("oh_star.yaml")
+        make_point(excited, 1e5, 1500, make_composition(("OH*", "1S/HO/h1H", oh_excited)))
+        self.assertEqual(self._datasets(f"species={oh.pk}"), ["oh.yaml"])
+        self.assertEqual(self._datasets(f"species={oh_excited.pk}"), ["oh_star.yaml"])
+
     def test_unknown_species_record_is_an_error(self):
         self.assertEqual(self._get("/api/experiment-dataset/", species=999999).status_code, 400)
 
