@@ -27,6 +27,10 @@ class ReadOnlyViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [AllowAny]
 
 
+# The measurement-type endpoints can also be ordered by the conditions of their datapoint.
+_DATAPOINT_ORDERING = ["datapoint__temperature", "datapoint__pressure", "datapoint__equivalence_ratio"]
+
+
 # ---------------------------------------------------------------------------
 # Leaf / nested serializers (defined first so composites can reference them)
 # ---------------------------------------------------------------------------
@@ -306,7 +310,7 @@ class IgnitionDelayViewSet(ReadOnlyViewSet):
     queryset = models.IgnitionDelayDatapoint.objects.all()
     serializer_class = IgnitionDelayDatapointSerializer
     filterset_class = filters.IgnitionDelayFilter
-    ordering_fields = ["ignition_delay", "id"]
+    ordering_fields = ["ignition_delay", *_DATAPOINT_ORDERING, "id"]
 
 
 @extend_schema(tags=["experimental-data"])
@@ -314,7 +318,7 @@ class LaminarBurningVelocityViewSet(ReadOnlyViewSet):
     queryset = models.LaminarBurningVelocityMeasurementDatapoint.objects.all()
     serializer_class = LaminarBurningVelocityDatapointSerializer
     filterset_class = filters.LaminarBurningVelocityFilter
-    ordering_fields = ["laminar_burning_velocity", "id"]
+    ordering_fields = ["laminar_burning_velocity", *_DATAPOINT_ORDERING, "id"]
 
 
 @extend_schema(tags=["experimental-data"])
@@ -323,7 +327,7 @@ class RateCoefficientViewSet(ReadOnlyViewSet):
     serializer_class = RateCoefficientDatapointSerializer
     filterset_class = filters.RateCoefficientFilter
     search_fields = ["reaction", "method"]
-    ordering_fields = ["id"]
+    ordering_fields = [*_DATAPOINT_ORDERING, "id"]
 
 
 @extend_schema(tags=["experimental-data"])
@@ -339,7 +343,7 @@ class SpeciationMeasurementViewSet(ReadOnlyViewSet):
     )
     serializer_class = SpeciationMeasurementSerializer
     filterset_class = filters.SpeciationMeasurementFilter
-    ordering_fields = ["residence_time", "reactor_volume", "flow_rate", "id"]
+    ordering_fields = ["residence_time", "reactor_volume", "flow_rate", *_DATAPOINT_ORDERING, "id"]
 
 
 @extend_schema(tags=["experimental-data"])

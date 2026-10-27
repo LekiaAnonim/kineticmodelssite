@@ -177,12 +177,14 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_FILTER_BACKENDS": [
-        "django_filters.rest_framework.DjangoFilterBackend",
+        # A list request with an unknown parameter or ordering field gets HTTP 400.
+        "api.filter_backends.StrictDjangoFilterBackend",
         "rest_framework.filters.SearchFilter",
-        "rest_framework.filters.OrderingFilter",
+        "api.filter_backends.StrictOrderingFilter",
     ],
-    # Paginate list responses so endpoints never return an entire table at once.
-    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    # Paginate list responses so endpoints never return an entire table at once;
+    # ?page_size= asks for up to 1000 records on a page.
+    "DEFAULT_PAGINATION_CLASS": "api.pagination.PageNumberPagination",
     "PAGE_SIZE": 50,
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
