@@ -3,7 +3,7 @@ from rest_framework import viewsets
 from rest_framework.permissions import IsAdminUser, BasePermission, SAFE_METHODS
 
 from database import models
-from api import serializers
+from api import filters, serializers
 
 
 class ReadOnly(BasePermission):
@@ -108,7 +108,7 @@ class KineticsViewSet(PermissionsViewSet):
 class KineticModelViewSet(PermissionsViewSet):
     queryset = models.KineticModel.objects.all()
     serializer_class = serializers.KineticModelSerializer
-    filterset_fields = ["prime_id", "source"]
+    filterset_class = filters.KineticModelFilter
     search_fields = ["model_name", "prime_id", "info", "source__doi", "source__source_title"]
     ordering_fields = ["id", "model_name"]
 

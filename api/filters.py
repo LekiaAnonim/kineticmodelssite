@@ -11,6 +11,7 @@ import django_filters as df
 
 from analysis import models as am
 from chemked_database import models as cm
+from database import models as dm
 
 # Common relational lookups reused across the measurement-type endpoints. Each
 # one hangs off the shared ``datapoint`` relation.
@@ -172,6 +173,22 @@ class VolumeHistoryFilter(df.FilterSet):
             "datapoint": ["exact"],
             "datapoint__dataset": ["exact"],
         }
+
+
+class KineticModelFilter(df.FilterSet):
+    # The species list of a model links each of its species names to a species record, so a
+    # species ID from /api/species/ selects the models that contain that species.
+    species = df.ModelMultipleChoiceFilter(
+        field_name="speciesname__species",
+        queryset=dm.Species.objects.all(),
+        conjoined=True,
+        help_text="ID of a species record (from /api/species/); repeat the parameter to select "
+                  "the models that contain every species given.",
+    )
+
+    class Meta:
+        model = dm.KineticModel
+        fields = ["prime_id", "source"]
 
 
 class CompositionSpeciesFilter(df.FilterSet):
