@@ -590,9 +590,10 @@ def import_kinetics(kinetics_path, kinetic_model, models, only_types=None, state
     # Older RMG accepted reactions that RMG 4 refuses; skip just those, not the whole library.
     library = TolerantKineticsLibrary(label=kinetic_model.model_name)
     library.SKIP_DUPLICATES = True
+    # The states keep reactions of an excited state apart from the ground state's on loading.
+    library.declared_states = model_states(kinetics_path) if states is None else states
     library.load(kinetics_path, local_context=local_context)
-    states = {**(model_states(kinetics_path) if states is None else states),
-              **getattr(library, "term_symbols", {})}
+    states = {**library.declared_states, **getattr(library, "term_symbols", {})}
     labels = labels_by_structure_key(getattr(library, "species_dict", None), states)
     # Species looked up during this import. Each entry's new lookups are kept apart until the
     # entry commits, because a failed entry rolls back the species it created.
