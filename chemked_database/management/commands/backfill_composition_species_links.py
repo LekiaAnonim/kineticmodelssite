@@ -1,48 +1,34 @@
 """Backfill ``CompositionSpecies.database_species`` from the stored InChI.
 
-Every ChemKED composition species row already carries the species identity as a
-string (``CompositionSpecies.inchi``), but the importer never resolves it to the
-canonical ``database.Species`` foreign key -- so ``database_species`` is null on
-all 22k rows. That left dataset->species provenance unjoinable via the FK even
-though the matchable value (InChI) is present in the row.
+Every ChemKED composition species row carries the species identity as a string
+(``CompositionSpecies.inchi``). ``sync_chemked`` links new rows at ingest; this command links
+the rows stored before that, and corrects links made by the earlier rule.
 
-This command closes that gap with the SAME matcher ``link_semantic_mappings``
-uses for ``prom:`` species rows: exact InChI against ``Isomer.inchi``, then an
-RDKit InChIKey fallback against ``Structure.structure_key``. Note
-``CompositionSpecies.inchi`` is stored WITHOUT the ``InChI=`` prefix (e.g.
-``1S/N2/c1-2``) while ``Isomer.inchi`` includes it, so we normalize first.
+The rule is the one ``sync_chemked`` uses (``chemked_database.species_links``): the component's
+standard InChI against the records' InChIs without RMG's /u and /lp layers, then an RDKit
+InChIKey fallback against ``Structure.structure_key``. When records of several spins share the
+standard InChI, the component is the ground state (triplet O2, not singlet O2). The earlier rule
+matched the exact ``Isomer.inchi`` first, and the standard InChI of O2 is exactly the singlet
+record's InChI, so O2 was linked to singlet O2.
 
-Idempotent: only rows whose resolved species differs from what is stored are
-written. Read-only preview with ``--dry-run``.
+A row's link is made to agree with its InChI: a row whose InChI matches no record, or records of
+several spins without a ground state in the table, loses a link it had. Rows without an InChI
+are left as they are. Idempotent: only rows whose link changes are written. Read-only preview
+with ``--dry-run``.
 """
+
+from collections import Counter
 
 from django.core.management.base import BaseCommand
 
 from chemked_database.models import CompositionSpecies
-from database.models import Species
-from database.services.chemical_identity import inchikey_species_map
-
-try:
-    from rdkit import Chem
-    from rdkit import RDLogger
-
-    RDLogger.DisableLog("rdApp.*")
-except ImportError:  # pragma: no cover
-    Chem = None
-
-
-def _norm_inchi(value):
-    """Ensure the standard ``InChI=`` prefix (CompositionSpecies stores it bare)."""
-    value = (value or "").strip()
-    if not value:
-        return ""
-    return value if value.startswith("InChI=") else f"InChI={value}"
+from chemked_database.species_links import SpeciesLinker
 
 
 class Command(BaseCommand):
     help = (
         "Resolve CompositionSpecies.database_species from the stored inchi "
-        "(exact Isomer.inchi, RDKit InChIKey fallback). Idempotent."
+        "(standard InChI, ground state of records with several spins). Idempotent."
     )
 
     def add_arguments(self, parser):
@@ -53,44 +39,35 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        inchi_map = {}
-        for sp in Species.objects.prefetch_related("isomers").all():
-            for iso in sp.isomers.all():
-                if iso.inchi:
-                    inchi_map.setdefault(iso.inchi, sp.pk)
-
-        inchikey_map = inchikey_species_map()
-
-        valid_species = set(Species.objects.values_list("id", flat=True))
-
-        linked = unresolved = unchanged = 0
+        linker = SpeciesLinker()
+        counts = Counter()
+        unresolved = Counter()
         updates = []
         for cs in CompositionSpecies.objects.exclude(inchi="").only(
             "id", "inchi", "database_species_id"
         ):
-            inchi = _norm_inchi(cs.inchi)
-            species_id = inchi_map.get(inchi)
-            if species_id is None and Chem is not None:
-                key = Chem.InchiToInchiKey(inchi)
-                if key:
-                    species_id = inchikey_map.get(key)
-            if species_id is None or species_id not in valid_species:
-                unresolved += 1
-                continue
+            species_id, how = linker.resolve(cs.inchi)
+            if species_id is None:
+                unresolved[how] += 1
             if cs.database_species_id == species_id:
-                unchanged += 1
+                counts["unchanged"] += 1
                 continue
+            if species_id is None:
+                counts["unlinked"] += 1
+            elif cs.database_species_id is None:
+                counts["linked"] += 1
+            else:
+                counts["relinked"] += 1
             cs.database_species_id = species_id
             updates.append(cs)
-            linked += 1
 
+        summary = (
+            f"{counts['linked']} linked, {counts['relinked']} moved to another record, "
+            f"{counts['unlinked']} unlinked, {counts['unchanged']} unchanged; without a record: "
+            + (", ".join(f"{n} ({why})" for why, n in sorted(unresolved.items())) or "none")
+        )
         if options["dry_run"]:
-            self.stdout.write(
-                self.style.WARNING(
-                    f"[dry-run] would link {linked} CompositionSpecies "
-                    f"({unchanged} already correct, {unresolved} unresolved)."
-                )
-            )
+            self.stdout.write(self.style.WARNING(f"[dry-run] would write: {summary}."))
             return
 
         # Bulk update in chunks to avoid a giant single statement.
@@ -100,9 +77,4 @@ class Command(BaseCommand):
                 updates[i : i + CHUNK], ["database_species"]
             )
 
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"Linked {linked} CompositionSpecies -> database.Species "
-                f"({unchanged} already correct, {unresolved} unresolved)."
-            )
-        )
+        self.stdout.write(self.style.SUCCESS(f"CompositionSpecies -> database.Species: {summary}."))

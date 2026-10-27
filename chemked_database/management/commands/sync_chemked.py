@@ -32,6 +32,7 @@ from chemked_database.models import (
     ValueWithUnit,
     VolumeHistory,
 )
+from chemked_database.species_links import SpeciesLinker
 from chemked_database.units import UnitConversionError, quantity_to_si
 from chemked_database.utils.chemistry import infer_smiles_and_atomic_composition
 
@@ -242,9 +243,12 @@ def create_composition(
     composition_data: Optional[Dict[str, Any]],
     reporter: Optional[Callable[[str], None]] = None,
     context: str = "composition",
+    linker: Optional[SpeciesLinker] = None,
 ):
+    """Store a ChemKED composition; each species is linked to its species record by InChI."""
     if not composition_data:
         return None
+    linker = linker or SpeciesLinker()
 
     def report(message: str):
         if reporter:
@@ -330,6 +334,7 @@ def create_composition(
             inchi=inchi_value,
             smiles=smiles_value,
             atomic_composition=atomic_comp,
+            database_species_id=linker.species_id(inchi_value),
             amount=amount_value or 0.0,
             amount_uncertainty=amount_uncertainty,
             amount_uncertainty_type=amount_uncertainty_type,
@@ -376,6 +381,7 @@ def store_speciation_datapoint(
     datapoint_data: Dict[str, Any],
     report: Callable[[str], None],
     context: str,
+    linker: Optional[SpeciesLinker] = None,
 ) -> SpeciationMeasurementDatapoint:
     """Store the speciation part of a ChemKED datapoint as the file gives it.
 
@@ -413,12 +419,14 @@ def store_speciation_datapoint(
             smiles=variable.get("SMILES", ""),
         )
 
+    linker = linker or SpeciesLinker()
     for profile in datapoint_data["concentration-profiles"]:
         species = CompositionSpecies.objects.create(
             composition=None,
             species_name=profile["species-name"],
             inchi=profile.get("InChI", ""),
             smiles=profile.get("SMILES", ""),
+            database_species_id=linker.species_id(profile.get("InChI", "")),
             amount=None,
         )
         ConcentrationProfile.objects.create(
@@ -458,6 +466,8 @@ def store_chemked_data(data: Dict[str, Any], rel_path: str, report: Callable[[st
             ) from exc
         raise
     speciation = experiment_type == ExperimentType.SPECIATION_MEASUREMENT
+    # Links each mixture component and profile species to its species record.
+    linker = SpeciesLinker()
 
     with transaction.atomic():
         dataset, created = ExperimentDataset.objects.get_or_create(
@@ -533,6 +543,7 @@ def store_chemked_data(data: Dict[str, Any], rel_path: str, report: Callable[[st
                 common_props.get("composition"),
                 reporter=report,
                 context=f"{rel_path} common-properties",
+                linker=linker,
             )
             ignition_type = common_props.get("ignition-type") or {}
             if experiment_type == ExperimentType.IGNITION_DELAY:
@@ -669,12 +680,13 @@ def store_chemked_data(data: Dict[str, Any], rel_path: str, report: Callable[[st
                     datapoint_data.get("composition"),
                     reporter=report,
                     context=f"{rel_path} datapoint",
+                    linker=linker,
                 ),
             )
 
             # --- Experiment-type-specific extensions ---
             if speciation:
-                store_speciation_datapoint(datapoint, datapoint_data, report, context)
+                store_speciation_datapoint(datapoint, datapoint_data, report, context, linker)
 
             elif dataset.experiment_type == ExperimentType.IGNITION_DELAY:
                 ignition_payload = {
