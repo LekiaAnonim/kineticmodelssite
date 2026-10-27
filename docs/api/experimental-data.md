@@ -36,6 +36,8 @@ file's value and unit in `<field>_quantity` and its SI value in `<field>`.
 | `/api/speciation-measurement/` | `datapoint__dataset__apparatus__kind`, `independent_variables__name`, `concentration_profiles__species__species_name`, `concentration_profiles__species__inchi`, `residence_time__gte/lte`, `reactor_volume__gte/lte`, `flow_rate__gte/lte` |
 | `/api/concentration-profile/` | `species__species_name`, `species__inchi`, `quantity_units`, `measurement__datapoint__dataset`, `measurement__datapoint__dataset__apparatus__kind` |
 | `/api/auxiliary-profile/` | `profile_type`, `independent_name`, `measurement__datapoint__dataset` |
+| `/api/time-history/` | `datapoint`, `datapoint__dataset`, `history_type` |
+| `/api/volume-history/` | `datapoint`, `datapoint__dataset` |
 | `/api/composition-species/` | `species_name`, `cas`, `inchi`, `smiles`, `amount__gte/lte` (search across all) |
 | `/api/apparatus/` | `kind`, `mode`, `institution`, `facility` |
 

@@ -155,6 +155,25 @@ class AuxiliaryProfileFilter(df.FilterSet):
         }
 
 
+class TimeHistoryFilter(df.FilterSet):
+    class Meta:
+        model = cm.TimeHistory
+        fields = {
+            "datapoint": ["exact"],
+            "datapoint__dataset": ["exact"],
+            "history_type": ["exact"],
+        }
+
+
+class VolumeHistoryFilter(df.FilterSet):
+    class Meta:
+        model = cm.VolumeHistory
+        fields = {
+            "datapoint": ["exact"],
+            "datapoint__dataset": ["exact"],
+        }
+
+
 class CompositionSpeciesFilter(df.FilterSet):
     class Meta:
         model = cm.CompositionSpecies

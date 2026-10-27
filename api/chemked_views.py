@@ -115,6 +115,26 @@ class ExperimentDatasetSerializer(FlexFieldsModelSerializer):
     }
 
 
+class TimeHistorySerializer(FlexFieldsModelSerializer):
+    """A signal measured against time for a datapoint, as the ChemKED ``time-histories``.
+
+    ``values`` are [time, quantity] rows (with an uncertainty column if the file gave one) in
+    ``time_units`` and ``quantity_units``, as the YAML export writes them.
+    """
+
+    class Meta:
+        model = models.TimeHistory
+        fields = "__all__"
+
+
+class VolumeHistorySerializer(FlexFieldsModelSerializer):
+    """The ChemKED ``volume-history`` of a datapoint: [time, volume] rows, time first."""
+
+    class Meta:
+        model = models.VolumeHistory
+        fields = "__all__"
+
+
 class ExperimentDatapointSerializer(FlexFieldsModelSerializer):
     temperature_quantity = ValueWithUnitSerializer(read_only=True)
     pressure_quantity = ValueWithUnitSerializer(read_only=True)
@@ -127,6 +147,8 @@ class ExperimentDatapointSerializer(FlexFieldsModelSerializer):
 
     expandable_fields = {
         "dataset": (ExperimentDatasetSerializer, {"read_only": True}),
+        "time_histories": (TimeHistorySerializer, {"read_only": True, "many": True}),
+        "volume_history": (VolumeHistorySerializer, {"read_only": True}),
     }
 
 
@@ -334,5 +356,21 @@ class AuxiliaryProfileViewSet(ReadOnlyViewSet):
     queryset = models.AuxiliaryProfile.objects.order_by("id")
     serializer_class = AuxiliaryProfileSerializer
     filterset_class = filters.AuxiliaryProfileFilter
+    ordering_fields = ["id"]
+
+
+@extend_schema(tags=["experimental-data"])
+class TimeHistoryViewSet(ReadOnlyViewSet):
+    queryset = models.TimeHistory.objects.order_by("id")
+    serializer_class = TimeHistorySerializer
+    filterset_class = filters.TimeHistoryFilter
+    ordering_fields = ["id"]
+
+
+@extend_schema(tags=["experimental-data"])
+class VolumeHistoryViewSet(ReadOnlyViewSet):
+    queryset = models.VolumeHistory.objects.order_by("id")
+    serializer_class = VolumeHistorySerializer
+    filterset_class = filters.VolumeHistoryFilter
     ordering_fields = ["id"]
 

@@ -329,6 +329,68 @@ datapoints:
     composition: *comp
 """
 
+class HistoryApiTests(TestCase):
+    """The REST API serves the time and volume histories that the YAML export writes."""
+
+    def setUp(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        rel = "ammonia/Shu_2019/Shu_2019_st.yaml"
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_text(CHEMKED_FILE)
+        call_command(
+            "sync_chemked", path=str(root), files=[rel], stdout=io.StringIO(), stderr=io.StringIO()
+        )
+        self.dataset = ExperimentDataset.objects.get(chemked_file_path=rel)
+        response = self.client.get(
+            reverse("chemked_database:dataset-export", args=[self.dataset.pk]), {"format": "yaml"}
+        )
+        self.export = yaml.safe_load(response.content)
+
+    def _exported(self, key):
+        return [dp[key] for dp in self.export["datapoints"] if key in dp]
+
+    def _api(self, path, **params):
+        response = self.client.get(path, params)
+        self.assertEqual(response.status_code, 200, response.content[:300])
+        return response.json()
+
+    def test_time_histories_match_the_export(self):
+        served = self._api("/api/time-history/", datapoint__dataset=self.dataset.pk)["results"]
+        exported = [h for histories in self._exported("time-histories") for h in histories]
+
+        self.assertEqual(len(served), len(exported))
+        for row, history in zip(served, exported):
+            self.assertEqual(row["history_type"], history["type"])
+            self.assertEqual(row["time_units"], history["time"]["units"])
+            self.assertEqual(row["quantity_units"], history["quantity"]["units"])
+            self.assertEqual(row["values"], history["values"])
+
+    def test_volume_history_matches_the_export(self):
+        served = self._api("/api/volume-history/", datapoint__dataset=self.dataset.pk)["results"]
+        (exported,) = self._exported("volume-history")
+
+        self.assertEqual(len(served), 1)
+        self.assertEqual(served[0]["time_units"], exported["time"]["units"])
+        self.assertEqual(served[0]["volume_units"], exported["volume"]["units"])
+        self.assertEqual(served[0]["values"], exported["values"])
+
+    def test_datapoints_expand_their_histories(self):
+        points = self._api(
+            "/api/experiment-datapoint/", dataset=self.dataset.pk,
+            expand="time_histories,volume_history", ordering="-temperature",
+        )["results"]
+
+        self.assertEqual(
+            points[0]["time_histories"][0]["values"], [[0.0, 1.0], [1.9, 0.9826], [3.9, 0.9729]]
+        )
+        self.assertEqual(points[1]["volume_history"]["values"], [[0.0, 10.0], [0.001, 9.5]])
+
+    def test_history_type_filter(self):
+        self.assertEqual(self._api("/api/time-history/", history_type="volume")["count"], 1)
+        self.assertEqual(self._api("/api/time-history/", history_type="pressure")["count"], 0)
+
+
 SPECIATION_KEYS = ("independent-variables", "concentration-profiles", "auxiliary-profiles")
 
 

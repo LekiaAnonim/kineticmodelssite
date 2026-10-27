@@ -40,6 +40,8 @@ reference is the live [Swagger UI and ReDoc](../reference.md).
 | `/api/speciation-measurement/` | Speciation measurements (jet stirred reactor, flow reactor, flame, shock tube) with their profiles |
 | `/api/concentration-profile/` | Species profiles of speciation measurements |
 | `/api/auxiliary-profile/` | Temperature, pressure, volume or velocity profiles measured with the species |
+| `/api/time-history/` | Signals measured against time for a datapoint (ChemKED `time-histories`, e.g. volume profiles); `/api/experiment-datapoint/?expand=time_histories` puts them inline |
+| `/api/volume-history/` | Volume against time for a datapoint (ChemKED `volume-history`); `?expand=volume_history` on datapoints |
 | `/api/apparatus/` | Apparatus (kind, mode, facility) |
 | `/api/common-properties/` | Dataset-level common properties |
 | `/api/composition/`, `/api/composition-species/` | Mixture compositions and species amounts |

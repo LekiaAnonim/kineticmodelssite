@@ -35,6 +35,8 @@ router.register(r"rate-coefficient", chemked_views.RateCoefficientViewSet, basen
 router.register(r"speciation-measurement", chemked_views.SpeciationMeasurementViewSet, basename="api-speciation-measurement")
 router.register(r"concentration-profile", chemked_views.ConcentrationProfileViewSet, basename="api-concentration-profile")
 router.register(r"auxiliary-profile", chemked_views.AuxiliaryProfileViewSet, basename="api-auxiliary-profile")
+router.register(r"time-history", chemked_views.TimeHistoryViewSet, basename="api-time-history")
+router.register(r"volume-history", chemked_views.VolumeHistoryViewSet, basename="api-volume-history")
 
 # analysis: simulation results and agreement metrics (read-only)
 router.register(r"simulation-run", analysis_views.SimulationRunViewSet, basename="api-simulation-run")
