@@ -10,14 +10,18 @@ RMG-Py 4 also refuses a whole thermo library when two entries share a label or a
 CHEMKIN mechanisms do that when they list an excited state (OH*, CH*) next to the ground
 state. The thermo loader keeps both when their electronic states differ (from a
 `molecularTermSymbol` line or SMILES.txt), and keeps the first of any other repeat and
-records the rest, so the import can report them.
+records the rest, so the import can report them. For the same reason the kinetics loader does
+not take two reactions that differ only in an electronic state (C2H + O <=> CH* + CO and
+C2H + O <=> CH + CO) for duplicates, which RMG would merge into one reaction.
 """
+import logging
 import os
 import re
 import tempfile
 
 from rmgpy.data.base import Entry
 from rmgpy.data.kinetics.library import KineticsLibrary
+from rmgpy.kinetics import Arrhenius, MultiArrhenius, MultiPDepArrhenius, PDepArrhenius, ThirdBody
 from rmgpy.data.thermo import ThermoLibrary
 from rmgpy.molecule import Molecule
 
@@ -58,6 +62,8 @@ def rejection(label, species_labels):
 
 
 class TolerantKineticsLibrary(KineticsLibrary):
+    declared_states = None
+
     def load(self, path, local_context=None, global_context=None):
         self.rejected = []
         self._species_labels = dictionary_labels(os.path.join(os.path.dirname(path), "dictionary.txt"))
@@ -89,9 +95,75 @@ class TolerantKineticsLibrary(KineticsLibrary):
         finally:
             os.unlink(temp.name)
 
+    def state_of(self, species):
+        """The electronic state of a reaction species: its dictionary term symbol, else the
+        state declared for its label (set `declared_states` before load())."""
+        label = getattr(species, "label", "")
+        return getattr(self, "term_symbols", {}).get(label) or (self.declared_states or {}).get(label, "")
+
+    def same_reaction(self, reaction0, reaction, either_direction=True):
+        """RMG's reaction isomorphism, with the electronic states of each side compared too.
+
+        RMG molecules have no electronic state, so to RMG C2H + O <=> CH* + CO is a duplicate
+        of C2H + O <=> CH + CO, and the two Arrhenius rates were merged into one reaction."""
+        if not reaction0.is_isomorphic(reaction, either_direction=either_direction):
+            return False
+
+        def sides(r):
+            return sorted(map(self.state_of, r.reactants)), sorted(map(self.state_of, r.products))
+
+        first, second = sides(reaction0), sides(reaction)
+        return first == second or (either_direction and first == second[::-1])
+
     def check_for_duplicates(self, mark_duplicates=False):
         # Some mechanisms list a reaction twice without DUPLICATE; mark them rather than refuse.
-        return super().check_for_duplicates(mark_duplicates=True)
+        entries = list(self.entries.values())
+        for entry0 in entries:
+            reaction0 = entry0.item
+            if reaction0.duplicate:
+                continue
+            for entry in entries:
+                if entry is not entry0 and self.same_reaction(reaction0, entry.item):
+                    reaction0.duplicate = entry.item.duplicate = True
+
+    def convert_duplicates_to_multi(self):
+        """RMG-Py 4.0's KineticsLibrary.convert_duplicates_to_multi, with same_reaction in place
+        of Reaction.is_isomorphic, so a reaction of an excited state keeps its own rate."""
+        entries_to_remove = []
+        for entry0 in self.entries.values():
+            if entry0 in entries_to_remove:
+                continue
+            reaction0 = entry0.item
+            if not reaction0.duplicate:
+                continue
+            duplicates = [entry0]
+            for entry in self.entries.values():
+                reaction = entry.item
+                if reaction0 is reaction:
+                    continue
+                if self.same_reaction(reaction0, reaction, either_direction=False):
+                    if reaction0.reversible != reaction.reversible:
+                        continue
+                    duplicates.append(entry)
+            if len(duplicates) <= 1:
+                continue
+            kinetics_list = [entry.data for entry in duplicates]
+            if len(kinetics_list) == 2 and (isinstance(kinetics_list[0], ThirdBody)
+                                            != isinstance(kinetics_list[1], ThirdBody)):
+                continue
+            last = kinetics_list[-1]
+            if all(isinstance(k, Arrhenius) for k in kinetics_list):
+                entry0.data = MultiArrhenius(arrhenius=kinetics_list, Tmin=last.Tmin, Tmax=last.Tmax)
+            elif all(isinstance(k, PDepArrhenius) for k in kinetics_list):
+                entry0.data = MultiPDepArrhenius(arrhenius=kinetics_list, Tmin=last.Tmin, Tmax=last.Tmax,
+                                                 Pmin=last.Pmin, Pmax=last.Pmax)
+            else:
+                logging.warning("Only Arrhenius and PDepArrhenius kinetics supported for duplicate reactions.")
+                continue
+            entry0.long_desc = "".join(entry.long_desc + "\n" for entry in duplicates)
+            entries_to_remove.extend(duplicates[1:])
+        for entry in entries_to_remove:
+            del self.entries[entry.index]
 
 
 def strip_non_standard_tokens(adjacency_list):
