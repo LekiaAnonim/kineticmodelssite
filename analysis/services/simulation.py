@@ -9,7 +9,7 @@ import re
 import tempfile
 import logging
 import yaml
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from typing import Optional, Dict, List, Any, Tuple
 
 import cantera as ct
@@ -637,170 +637,112 @@ def get_dataset_species_map(dataset: ExperimentDataset):
     return species_map
 
 
-def build_spec_keys_for_dataset(
-    model: KineticModel,
-    dataset: ExperimentDataset,
-    model_species_names: Optional[List[str]] = None
-):
-    """
-    Build mapping of dataset species -> model species label.
-    
-    Uses a multi-step strategy:
-    1. InChI-based matching (robust: handles different SMILES for same molecule)
-    2. Exact normalized label matching
-    3. Substring-based normalized matching
-    4. Direct label matching
-    """
-    model_label_smiles = get_species_label_smiles_map(model)
+# Mechanism species names are "label(index)", e.g. "O2(10)"; the index is the export's, not the model's.
+_EXPORT_INDEX = re.compile(r"\(\d+\)$")
 
-    # Build SMILES -> database label map
-    smiles_to_label = {smiles: label for label, smiles in model_label_smiles.items() if smiles}
 
-    normalized_model_names = {}
-    # Also build a map from base name (without index suffix) to mechanism name.
-    # Mechanism names follow the pattern "label(index)" e.g. "O2(25)", "sc4h9oh(55)".
-    # Stripping the "(index)" gives the base name used during export.
-    base_to_mech: Dict[str, str] = {}
-    if model_species_names:
-        for name in model_species_names:
-            normalized_model_names[_normalize_label(name)] = name
-            # Strip trailing (digits) to get the base name
-            base = re.sub(r'\(\d+\)$', '', name)
-            base_norm = _normalize_label(base)
-            if base_norm:
-                base_to_mech[base_norm] = name
+def _mechanism_base(name: str):
+    """A mechanism species name without the export's "(index)" suffix."""
+    return _EXPORT_INDEX.sub("", name)
 
-    # --- Build InChI -> mechanism label map ---
-    # This goes through each DB species in this model, finds its SMILES,
-    # converts to InChI, then resolves the DB label to the actual mechanism
-    # species name.  This handles cases where the DB label (e.g. sc4h9oh)
-    # differs from the exported mechanism name (e.g. N2C4H9OH(55)) because
-    # the export may have picked a different alias for the same Species.
-    inchi_to_mech_label: Dict[str, str] = {}
+
+def _inchi(smiles: str):
+    """Standard InChI of a SMILES, or None (no RDKit, or a SMILES RDKit cannot read)."""
     try:
         from rdkit import Chem
         from rdkit.Chem.inchi import MolToInchi
-
-        for db_label, smiles in model_label_smiles.items():
-            if not smiles or smiles == db_label:
-                continue
-            mol = Chem.MolFromSmiles(smiles)
-            if not mol:
-                continue
-            inchi = MolToInchi(mol)
-            if not inchi:
-                continue
-
-            # Resolve db_label to the mechanism species name.
-            # The mechanism species name may differ from the DB label because
-            # the export function picks the alphabetically-first alias.
-            mech_label = None
-            db_norm = _normalize_label(db_label)
-
-            # Exact normalized match (includes the index digits)
-            mech_label = normalized_model_names.get(db_norm)
-
-            # Try base-name match (strip trailing index from mechanism names)
-            if not mech_label:
-                mech_label = base_to_mech.get(db_norm)
-
-            if not mech_label:
-                # The DB label might not match any mechanism name at all
-                # (e.g. "sc4h9oh" vs "N2C4H9OH(55)").  Look up ALL names
-                # for this Species in the DB and check each one.
-                sn_obj = SpeciesName.objects.filter(
-                    kinetic_model=model, name=db_label
-                ).select_related("species").first()
-                if sn_obj:
-                    all_names = set(
-                        SpeciesName.objects.filter(species=sn_obj.species)
-                        .values_list("name", flat=True)
-                    )
-                    for alias in all_names:
-                        if not alias:
-                            continue
-                        alias_norm = _normalize_label(alias)
-                        candidate = (
-                            normalized_model_names.get(alias_norm)
-                            or base_to_mech.get(alias_norm)
-                        )
-                        if candidate:
-                            mech_label = candidate
-                            break
-
-            if mech_label:
-                inchi_to_mech_label[inchi] = mech_label
-            # If we still can't find a mechanism name, skip this InChI
-            # (it won't be useful for mapping anyway)
     except ImportError:
-        pass  # RDKit not available
+        return None
+    mol = Chem.MolFromSmiles(smiles)
+    return (MolToInchi(mol) or None) if mol else None
 
-    dataset_species = get_dataset_species_map(dataset)
+
+class _MechanismNames:
+    """Finds the mechanism species that a label names.
+
+    The label is compared with the base of each name (its "(index)" removed): first apart from
+    case, then with only letters and digits kept. The index never joins the comparison, so
+    "O(2)" is O and not O2. A label that matches several names matches none.
+    """
+
+    def __init__(self, names):
+        self.names = set(names or [])
+        self.exact, self.loose = defaultdict(set), defaultdict(set)
+        for name in self.names:
+            base = _mechanism_base(name)
+            self.exact[base.strip().casefold()].add(name)
+            if _normalize_label(base):
+                self.loose[_normalize_label(base)].add(name)
+
+    def find(self, label: str):
+        if not label:
+            return None
+        if label in self.names:
+            return label
+        for found in (self.exact.get(label.strip().casefold()), self.loose.get(_normalize_label(label))):
+            if found:
+                return next(iter(found)) if len(found) == 1 else None
+        return None
+
+
+def _match_dataset_species(dataset_species, model_label_smiles, mechanism_names, aliases):
+    """Dataset species label -> mechanism species name; see build_spec_keys_for_dataset.
+
+    ``aliases(db_label)`` gives the other names of that label's species record.
+    """
+    names = _MechanismNames(mechanism_names)
+
+    def mechanism_name(db_label):
+        """The mechanism name of a DB label: by the label, else by another name of its record."""
+        found = names.find(db_label)
+        if found:
+            return found
+        for alias in sorted(a for a in aliases(db_label) if a):
+            found = names.find(alias)
+            if found:
+                return found
+        return None
+
+    # InChI -> mechanism names of the model's species with that InChI. A standard InChI has no
+    # spin, so two species of one model (O2 and singlet O2X) can share one.
+    by_inchi: Dict[str, set] = defaultdict(set)
+    for db_label, smiles in model_label_smiles.items():
+        if not smiles or smiles == db_label:
+            continue
+        inchi = _inchi(smiles)
+        found = mechanism_name(db_label) if inchi else None
+        if found:
+            by_inchi[inchi].add(found)
+
     spec_keys = OrderedDict()
-
     for ds_label, ds_smiles in dataset_species.items():
-        ds_norm = _normalize_label(ds_label)
         model_label = None
+        several = False
 
-        # 1. InChI-based match (most robust — same molecule, any SMILES form)
-        if not model_label and inchi_to_mech_label:
-            try:
-                from rdkit import Chem
-                from rdkit.Chem.inchi import MolToInchi
-                mol = Chem.MolFromSmiles(ds_smiles)
-                if mol:
-                    inchi = MolToInchi(mol)
-                    if inchi:
-                        model_label = inchi_to_mech_label.get(inchi)
-            except ImportError:
-                pass
+        # 1. InChI. A value equal to the label is the name, not a SMILES: "CO" would read as
+        #    methanol and "O" as water.
+        if ds_smiles and ds_smiles != ds_label:
+            candidates = by_inchi.get(_inchi(ds_smiles), set())
+            if len(candidates) == 1:
+                model_label = next(iter(candidates))
+            elif candidates:
+                # Several species of the model have this InChI: the one with the dataset's name,
+                # or none (the names below could pick another molecule).
+                found = names.find(ds_label)
+                model_label = found if found in candidates else None
+                several = True
 
-        # 2. Exact normalized label match against mechanism names
-        #    e.g. dataset "N2" matches mechanism "N2" (both normalize to "N2")
-        if not model_label and model_species_names:
-            model_label = normalized_model_names.get(ds_norm)
+        # 2. The dataset's name against the mechanism names, e.g. "N2" -> "N2(3)", "Ar" -> "AR(1)"
+        if not model_label and not several:
+            model_label = names.find(ds_label)
 
-        # 3. Base-name match — mechanism names like "Ar(1)" have base "Ar"
-        #    which normalizes to "AR".  Dataset species "Ar" or "AR" also
-        #    normalize to "AR", so this catches case-insensitive + index
-        #    suffix mismatches.
-        if not model_label and base_to_mech:
-            model_label = base_to_mech.get(ds_norm)
-
-        # 4. Direct label match against DB labels
-        if not model_label and ds_label in model_label_smiles:
-            model_label = ds_label
-
-        # 5. Case-insensitive search against DB labels, then resolve
-        #    through the DB alias chain to find the mechanism name.
-        if not model_label:
-            for db_label, smiles in model_label_smiles.items():
-                if _normalize_label(db_label) == ds_norm:
-                    # Found a matching DB label — resolve to mechanism name
-                    resolved = (
-                        normalized_model_names.get(ds_norm)
-                        or base_to_mech.get(ds_norm)
-                    )
-                    if not resolved:
-                        # Try all aliases for this Species in the DB
-                        sn_obj = SpeciesName.objects.filter(
-                            kinetic_model=model, name=db_label
-                        ).select_related("species").first()
-                        if sn_obj:
-                            for alias in SpeciesName.objects.filter(
-                                species=sn_obj.species
-                            ).values_list("name", flat=True):
-                                if not alias:
-                                    continue
-                                alias_norm = _normalize_label(alias)
-                                candidate = (
-                                    normalized_model_names.get(alias_norm)
-                                    or base_to_mech.get(alias_norm)
-                                )
-                                if candidate:
-                                    resolved = candidate
-                                    break
-                    model_label = resolved or db_label
+        # 3. The dataset's name against the model's DB labels, then that record's mechanism name
+        if not model_label and not several:
+            for key in (lambda s: s.strip().casefold(), _normalize_label):
+                db_labels = [l for l in model_label_smiles if key(l) == key(ds_label)]
+                if db_labels:
+                    if len(db_labels) == 1:
+                        model_label = mechanism_name(db_labels[0]) or db_labels[0]
                     break
 
         # If still unmapped, leave as the dataset label.  The pre-flight
@@ -809,6 +751,37 @@ def build_spec_keys_for_dataset(
         spec_keys[ds_label] = model_label or ds_label
 
     return spec_keys
+
+
+def build_spec_keys_for_dataset(
+    model: KineticModel,
+    dataset: ExperimentDataset,
+    model_species_names: Optional[List[str]] = None
+):
+    """
+    Build mapping of dataset species -> model species label.
+
+    Matching, in order; a step that finds several candidates decides nothing:
+    1. InChI of the dataset's SMILES. When several species of the model share it (a standard
+       InChI has no spin: O2 and singlet O2X), the one whose name is the dataset's name.
+    2. The dataset's name against the mechanism names without their "(index)" suffix: apart
+       from case, then with only letters and digits kept.
+    3. The dataset's name against the model's DB labels, then that record's mechanism name.
+    A species left unmatched keeps its dataset label, which run_pyteck_simulation reports.
+    """
+    model_label_smiles = get_species_label_smiles_map(model)
+
+    def aliases(db_label):
+        sn_obj = SpeciesName.objects.filter(
+            kinetic_model=model, name=db_label
+        ).select_related("species").first()
+        if not sn_obj:
+            return []
+        return SpeciesName.objects.filter(species=sn_obj.species).values_list("name", flat=True)
+
+    return _match_dataset_species(
+        get_dataset_species_map(dataset), model_label_smiles, model_species_names or [], aliases
+    )
 
 
 def write_spec_keys_yaml(
