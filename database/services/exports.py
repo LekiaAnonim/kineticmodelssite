@@ -730,8 +730,11 @@ def _build_rmg_species_map(kinetic_model, nasa_poly_cls, nasa_cls, transport_cls
     species_list = list(kinetic_model.species.all())
     reaction_species = {
         sp
-        for kinetics_comment in kinetic_model.kineticscomment_set.select_related("kinetics__reaction")
-        for sp in kinetics_comment.kinetics.reaction.species.all()
+        for kinetics_comment in kinetic_model.kineticscomment_set.select_related(
+            "kinetics__reaction", "kinetics__specific_collider")
+        for sp in [*kinetics_comment.kinetics.reaction.species.all(),
+                   kinetics_comment.kinetics.specific_collider]
+        if sp is not None
     }
     for sp in reaction_species:
         if sp not in species_list:
@@ -836,20 +839,22 @@ def _build_rmg_reactions(kinetic_model, species_map, rmg_reaction_cls, strict=Fa
     ):
         kinetics = kinetics_comment.kinetics
         reaction = kinetics.reaction
-        try:
-            reactants = [species_map[sp.id] for sp in reaction.reactants()]
-            products = [species_map[sp.id] for sp in reaction.products()]
-        except KeyError:
+        # A specific collider, as in H + O2 (+AR), must be in the SPECIES block too.
+        reactant_rows, product_rows = reaction.reactants(), reaction.products()
+        needed = [sp.id for sp in [*reactant_rows, *product_rows]]
+        if kinetics.specific_collider_id:
+            needed.append(kinetics.specific_collider_id)
+        if any(species_id not in species_map for species_id in needed):
             if strict:
-                for sp in list(reaction.reactants()) + list(reaction.products()):
-                    if sp.id not in species_map:
-                        missing_species.add(sp.id)
+                missing_species.update(i for i in needed if i not in species_map)
             continue
         rmg_reaction = rmg_reaction_cls(
-            reactants=reactants,
-            products=products,
+            reactants=[species_map[sp.id] for sp in reactant_rows],
+            products=[species_map[sp.id] for sp in product_rows],
             reversible=reaction.reversible,
         )
+        if kinetics.specific_collider_id:
+            rmg_reaction.specific_collider = species_map[kinetics.specific_collider_id]
         rmg_reaction.index = kinetics.id
         efficiencies = list(kinetics.efficiency_set.select_related("species"))
         rmg_reaction.kinetics = kinetics.data.to_rmg(
@@ -868,7 +873,7 @@ def _build_rmg_reactions(kinetic_model, species_map, rmg_reaction_cls, strict=Fa
                 )
             continue
         if not strict:
-            _normalize_kinetics_units(rmg_reaction.kinetics, len(reactants))
+            _normalize_kinetics_units(rmg_reaction.kinetics, len(rmg_reaction.reactants))
         reactions.append(rmg_reaction)
 
     # Mark duplicate reactions so save_chemkin_file writes the DUPLICATE keyword
@@ -895,7 +900,8 @@ def _mark_duplicate_reactions(reactions):
     """Detect duplicate reactions and set ``duplicate = True`` on each copy.
 
     Two reactions are considered duplicates when they have the same set of
-    reactant and product species labels (order-independent).  This ensures
+    reactant and product species labels (order-independent) and a collider
+    can act in both (see ``_colliders_overlap``).  This ensures
     that ``save_chemkin_file`` writes the ``DUPLICATE`` keyword and that
     the resulting YAML passes Cantera's duplicate-reaction validation.
 
@@ -905,7 +911,7 @@ def _mark_duplicate_reactions(reactions):
     *canonical* signature that is identical for a reaction and its reverse,
     regardless of the reversibility flag.
     """
-    from collections import Counter
+    from collections import defaultdict
 
     def _canonical_signature(rxn):
         """Return a direction-independent signature for duplicate detection.
@@ -919,12 +925,31 @@ def _mark_duplicate_reactions(reactions):
         p_labels = tuple(sorted(sp.label for sp in rxn.products))
         return frozenset([r_labels, p_labels])
 
-    sig_counts = Counter(_canonical_signature(rxn) for rxn in reactions)
-    duplicate_sigs = {sig for sig, cnt in sig_counts.items() if cnt > 1}
-
+    groups = defaultdict(list)
     for rxn in reactions:
-        if _canonical_signature(rxn) in duplicate_sigs:
-            rxn.duplicate = True
+        groups[_canonical_signature(rxn)].append(rxn)
+
+    for group in groups.values():
+        for rxn in group:
+            if any(other is not rxn and _colliders_overlap(rxn, other) for other in group):
+                rxn.duplicate = True
+
+
+def _colliders_overlap(rxn, other):
+    """False when Cantera does not take two reactions of the same species for duplicates
+    because no collider acts in both: H + O2 (+AR) and H + O2 (+O2), or H + O2 (+AR) and an
+    H + O2 (+M) that gives AR efficiency 0. True otherwise, as before colliders were kept."""
+    collider = getattr(rxn, "specific_collider", None)
+    other_collider = getattr(other, "specific_collider", None)
+    if collider is None and other_collider is None:
+        return True
+    if collider is not None and other_collider is not None:
+        return collider is other_collider
+    specific, general = (rxn, other) if collider is not None else (other, rxn)
+    efficiencies = getattr(general.kinetics, "get_effective_collider_efficiencies", None)
+    if efficiencies is None:
+        return True
+    return efficiencies([specific.specific_collider])[0] != 0
 
 
 def _normalize_kinetics_units(rmg_kinetics, reaction_order):

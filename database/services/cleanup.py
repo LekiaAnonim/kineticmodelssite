@@ -229,7 +229,9 @@ def merge_kinetics(keep_id, drop_id):
 def merge_reaction_pair(keep_id, drop_id, report):
     """Merge a reaction into the one with the same species and coefficients."""
     for kinetics in db.Kinetics.objects.filter(reaction_id=drop_id):
-        twin = db.Kinetics.objects.filter(reaction_id=keep_id, raw_data=kinetics.raw_data).first()
+        twin = db.Kinetics.objects.filter(
+            reaction_id=keep_id, raw_data=kinetics.raw_data,
+            specific_collider_id=kinetics.specific_collider_id).first()
         if twin:
             merge_kinetics(twin.pk, kinetics.pk)
             report["kinetics_merged"] += 1

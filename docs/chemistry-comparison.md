@@ -13,6 +13,7 @@ The rules are the ones RMG-Py's importer uses to detect copied chemistry (`evide
 | `Reaction.canonical_direction` | `+1` or `-1`: which way this row is written against the key. |
 | `Reaction.layer` | Sub-mechanism layer of the non-collider species: `H2/O2`, `C1`, `C2`, `C3` or `C≥4` by the largest carbon count, tagged `+N`, `+S`, `+Hal`. |
 | `Kinetics.rate_fingerprint` | log10 k (SI) at 500, 1000 and 1500 K and 1 bar, as written. `[]` when it cannot be evaluated. |
+| `Kinetics.specific_collider` | The one collider of a falloff rate written `H + O2 (+AR) <=> HO2 (+AR)`; null for `(+M)`. The same parameters for `(+M)` and for `(+AR)` are two records. |
 
 Two rates are identical when they belong to the same canonical reaction, are written the same way, and their fingerprints agree within 0.01 (about 2%). Two thermo polynomials are identical within 0.1% on Cp, H, S and G at 300–2000 K.
 
@@ -20,7 +21,7 @@ Two rates are identical when they belong to the same canonical reaction, are wri
 python manage.py index_chemistry            # fills what is missing; --refresh recomputes all
 ```
 
-The importer fills these fields for new rows. Plain `M` third bodies are not part of reaction identity; explicit colliders (`H2 + AR = H + H + AR`) are.
+The importer fills these fields for new rows. Plain `M` third bodies are not part of reaction identity; explicit colliders (`H2 + AR = H + H + AR`) are. A specific collider (`(+AR)`) belongs to the rate record, not to the reaction, and the CHEMKIN and Cantera exports write it back. Models imported before `specific_collider` existed have their `(+AR)` rates as `(+M)` rates; `rebuild_model_links` gives them the collider.
 
 ## Pressure-dependent kinetics
 

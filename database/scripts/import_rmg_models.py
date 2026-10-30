@@ -308,6 +308,22 @@ def index_new_rows(models, reaction=None, kinetics=None):
         kinetics.save(update_fields=["rate_fingerprint"])
 
 
+def labelled_species(kinetic_model, rmg_species, models, states=None, cache=None):
+    """The species record of a species of the library dictionary: a reactant, a product or a
+    specific collider. The label is the species name in the mechanism; `states` and `cache`
+    are those of get_or_create_reaction."""
+    name = rmg_species.label
+    state = (states or {}).get(name, "")
+    key = ("label", name, state) if name and cache is not None else None
+    species = cache.get(key) if key else None
+    if species is None:
+        species = get_or_create_species(
+            kinetic_model, name or "", rmg_species.molecule, models, electronic_state=state)
+        if key:
+            cache[key] = species
+    return species
+
+
 def get_or_create_reaction(kinetic_model, rmg_reaction, models, states=None, cache=None):
     """
     Create and save a reaction from an RMG reaction
@@ -334,20 +350,7 @@ def get_or_create_reaction(kinetic_model, rmg_reaction, models, states=None, cac
 
     with transaction.atomic():
         for name, rmg_species in species_map.items():
-            # The label is the species name in the mechanism (from the library dictionary).
-            state = (states or {}).get(name, "")
-            key = ("label", name, state) if name and cache is not None else None
-            species = cache.get(key) if key else None
-            if species is None:
-                species = get_or_create_species(
-                    kinetic_model,
-                    name or "",
-                    rmg_species.molecule,
-                    models,
-                    electronic_state=state,
-                )
-                if key:
-                    cache[key] = species
+            species = labelled_species(kinetic_model, rmg_species, models, states, cache)
             reactant_coeff = sum(-1 for reactant in reactants if reactant == rmg_species)
             product_coeff = sum(1 for product in products if product == rmg_species)
 
@@ -616,9 +619,17 @@ def import_kinetics(kinetics_path, kinetic_model, models, only_types=None, state
                     kinetic_model, rmg_reaction, models, states, cache=lookups)
                 kinetics_data = create_kinetics_data(kinetic_model, rmg_kinetics_data, models)
                 base_fields = get_base_kinetics_data_fields(rmg_kinetics_data)
+                identity = {"reaction": reaction, "raw_data": kinetics_data}
+                if has_field(models.Kinetics, "specific_collider"):
+                    # H + O2 (+AR) <=> HO2 (+AR): the library names the collider only in the
+                    # label, and RMG keeps it on the reaction, not in the efficiencies.
+                    collider = getattr(rmg_reaction, "specific_collider", None)
+                    identity["specific_collider"] = (
+                        labelled_species(kinetic_model, collider, models, states, lookups)
+                        if collider is not None else None)
 
                 kinetics_instance, created = models.Kinetics.objects.get_or_create(
-                    reaction=reaction, raw_data=kinetics_data, defaults=base_fields
+                    **identity, defaults=base_fields
                 )
                 # PLOG and Chebyshev kinetics have no collider efficiencies.
                 if created and getattr(rmg_kinetics_data, "efficiencies", None):

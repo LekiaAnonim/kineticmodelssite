@@ -447,6 +447,12 @@ class Kinetics(models.Model):
     )
     raw_data = models.JSONField(validators=[validate_kinetics_data])
     species = models.ManyToManyField("Species", through="Efficiency", blank=True)
+    # The one collider of a falloff rate written H + O2 (+AR) <=> HO2 (+AR); blank for (+M).
+    # Protected: without it the rate would read as (+M), with every collider at efficiency 1.
+    specific_collider = models.ForeignKey(
+        "Species", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="collider_kinetics",
+        help_text="The only collider of this rate, as in (+AR); blank for (+M).")
     min_temp = models.FloatField("Lower Temp Bound", help_text="units: K", null=True, blank=True)
     max_temp = models.FloatField("Upper Temp Bound", help_text="units: K", null=True, blank=True)
     min_pressure = models.FloatField(
@@ -460,7 +466,17 @@ class Kinetics(models.Model):
 
     class Meta:
         verbose_name_plural = "Kinetics"
-        unique_together = ("reaction", "raw_data")
+        # The same rate for (+M) and for (+AR) are two records. PostgreSQL 14 has no NULLS NOT
+        # DISTINCT, so the (+M) rates get their own constraint.
+        constraints = [
+            models.UniqueConstraint(
+                fields=("reaction", "raw_data"), condition=models.Q(specific_collider__isnull=True),
+                name="unique_kinetics_rate"),
+            models.UniqueConstraint(
+                fields=("reaction", "raw_data", "specific_collider"),
+                condition=models.Q(specific_collider__isnull=False),
+                name="unique_kinetics_rate_collider"),
+        ]
 
     def to_rmg(self):
         """
@@ -468,6 +484,8 @@ class Kinetics(models.Model):
         """
 
         rmg_reaction = self.reaction.to_rmg()
+        if self.specific_collider_id:
+            rmg_reaction.specific_collider = self.specific_collider.to_rmg()
         efficiencies = list(self.efficiency_set.select_related("species"))
         rmg_reaction.kinetics = self.data.to_rmg(
             self.min_temp,

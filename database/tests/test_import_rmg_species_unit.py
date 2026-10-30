@@ -49,6 +49,7 @@ ADJ = {
     "O2": "multiplicity 3\n1 O u1 p2 c0 {2,S}\n2 O u1 p2 c0 {1,S}",
     "H2O": "1 O u0 p2 c0 {2,S} {3,S}\n2 H u0 p0 c0 {1,S}\n3 H u0 p0 c0 {1,S}",
     "AR": "1 Ar u0 p4 c0",
+    "HO2": "multiplicity 2\n1 O u0 p2 c0 {2,S} {3,S}\n2 O u1 p2 c0 {1,S}\n3 H u0 p0 c0 {1,S}",
     # Radicals whose resonance forms have different InChI H layers, so different structure keys.
     "CH2COOH": "multiplicity 2\n1 C u1 p0 c0 {2,S} {5,S} {6,S}\n2 C u0 p0 c0 {1,S} {3,D} {4,S}\n3 O u0 p2 c0 {2,D}\n4 O u0 p2 c0 {2,S} {7,S}\n5 H u0 p0 c0 {1,S}\n6 H u0 p0 c0 {1,S}\n7 H u0 p0 c0 {4,S}",
     "H2NCO": "multiplicity 2\n1 N u0 p1 c0 {2,S} {4,S} {5,S}\n2 C u1 p0 c0 {1,S} {3,D}\n3 O u0 p2 c0 {2,D}\n4 H u0 p0 c0 {1,S}\n5 H u0 p0 c0 {1,S}",

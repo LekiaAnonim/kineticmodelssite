@@ -236,7 +236,7 @@ class KineticsAdmin(admin.ModelAdmin):
     list_display = ('id', 'reaction', 'source', 'type', 'temp_range', 'pressure_range')
     list_filter = ('reverse',)
     search_fields = ('prime_id', 'reaction__prime_id', 'source__source_title')
-    autocomplete_fields = ['reaction', 'source']
+    autocomplete_fields = ['reaction', 'source', 'specific_collider']
     inlines = [EfficiencyInline]
     readonly_fields = ('type',)
     
@@ -248,7 +248,7 @@ class KineticsAdmin(admin.ModelAdmin):
             'fields': (('min_temp', 'max_temp'), ('min_pressure', 'max_pressure'))
         }),
         ('Kinetic Data', {
-            'fields': ('raw_data', 'type', 'relative_uncertainty'),
+            'fields': ('raw_data', 'type', 'specific_collider', 'relative_uncertainty'),
             'classes': ('wide',)
         }),
     )
