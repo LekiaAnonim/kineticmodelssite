@@ -8,6 +8,7 @@ import yaml
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.db.models import Q
 
 from chemked_database.import_dispatcher import create_experiment_extension
 from chemked_database.models import (
@@ -204,11 +205,12 @@ def parse_value_unit(raw: Any):
     return None, units, extra
 
 
-def create_value_with_unit(raw: Any):
+def create_value_with_unit(raw: Any, save: bool = True):
+    """The ChemKED value-unit *raw* as a ValueWithUnit, stored unless *save* is False."""
     value, units, extra = parse_value_unit(raw)
     if value is None and not extra.get("value_text"):
         return None
-    return ValueWithUnit.objects.create(
+    quantity = ValueWithUnit(
         value=value,
         units=units or "",
         value_text=extra.get("value_text", ""),
@@ -224,6 +226,9 @@ def create_value_with_unit(raw: Any):
         evaluated_standard_deviation_sourcetype=extra.get("evaluated_standard_deviation_sourcetype", ""),
         evaluated_standard_deviation_method=extra.get("evaluated_standard_deviation_method", ""),
     )
+    if save:
+        quantity.save()
+    return quantity
 
 
 def si_value(quantity, kind: str, report: Callable[[str], None], context: str):
@@ -237,6 +242,67 @@ def si_value(quantity, kind: str, report: Callable[[str], None], context: str):
     except UnitConversionError as exc:
         report(f"{context}: {exc}; numeric value left empty")
         return None
+
+
+def delete_unused_compositions(composition_ids=None) -> Tuple[int, int]:
+    """Delete the compositions that no datapoint and no common properties use, with their species.
+
+    Only the given compositions are checked, or every composition when none are given.
+    Returns the number of compositions and of composition species deleted.
+    """
+    unused = Composition.objects.filter(datapoints__isnull=True, common_properties__isnull=True)
+    if composition_ids is not None:
+        unused = unused.filter(id__in=composition_ids)
+    unused_ids = list(unused.values_list("id", flat=True))
+    _, species = CompositionSpecies.objects.filter(composition_id__in=unused_ids).delete()
+    _, compositions = Composition.objects.filter(id__in=unused_ids).delete()
+    return (
+        compositions.get(Composition._meta.label, 0),
+        species.get(CompositionSpecies._meta.label, 0),
+    )
+
+
+def _dataset_rows(model, dataset):
+    """Rows of *model* that belong to *dataset*, directly or through a datapoint."""
+    if any(field.name == "dataset" for field in model._meta.get_fields()):
+        return model.objects.filter(dataset=dataset)
+    return model.objects.filter(datapoint__dataset=dataset)
+
+
+def value_relations():
+    """Every foreign key to ValueWithUnit.
+
+    The speciation quantities have no reverse accessor (related_name "+"), and
+    ``_meta.related_objects`` leaves such relations out: a value only they use would look unused.
+    """
+    return [
+        rel for rel in ValueWithUnit._meta.get_fields(include_hidden=True)
+        if rel.is_relation and rel.auto_created and not rel.concrete
+    ]
+
+
+def dataset_value_ids(dataset) -> set:
+    """Ids of the values with units that the rows of *dataset* use."""
+    ids = set()
+    for rel in value_relations():
+        ids.update(
+            _dataset_rows(rel.related_model, dataset)
+            .exclude(**{f"{rel.field.name}__isnull": True})
+            .values_list(rel.field.attname, flat=True)
+        )
+    return ids
+
+
+def delete_unused_values(value_ids=None) -> int:
+    """Delete the values with units that no row uses; only *value_ids* when given."""
+    unused = ValueWithUnit.objects.all()
+    if value_ids is not None:
+        unused = unused.filter(id__in=value_ids)
+    for rel in value_relations():
+        used = rel.related_model.objects.exclude(**{f"{rel.field.name}__isnull": True})
+        unused = unused.exclude(id__in=used.values(rel.field.attname))
+    _, deleted = unused.delete()
+    return deleted.get(ValueWithUnit._meta.label, 0)
 
 
 def create_composition(
@@ -485,7 +551,18 @@ def store_chemked_data(data: Dict[str, Any], rel_path: str, report: Callable[[st
             CompositionSpecies.objects.filter(
                 concentration_profiles__measurement__datapoint__dataset=dataset
             ).delete()
+            # The compositions and values of the old datapoints and common properties would
+            # stay behind as a second copy of the file's mixtures and conditions
+            old_compositions = list(
+                Composition.objects.filter(
+                    Q(datapoints__dataset=dataset) | Q(common_properties__dataset=dataset)
+                ).values_list("id", flat=True).distinct()
+            )
+            old_values = dataset_value_ids(dataset)
             dataset.datapoints.all().delete()
+            CommonProperties.objects.filter(dataset=dataset).delete()
+            delete_unused_compositions(old_compositions)
+            delete_unused_values(old_values)
 
         apparatus_data = data.get("apparatus") or {}
         if apparatus_data:
@@ -653,8 +730,9 @@ def store_chemked_data(data: Dict[str, Any], rel_path: str, report: Callable[[st
                 float(equiv_raw) if isinstance(equiv_raw, (int, float)) else None
             )
 
-            # Parse per-datapoint residence time
-            res_quantity = create_value_with_unit(datapoint_data.get("residence-time"))
+            # Parse per-datapoint residence time; a datapoint keeps it in s only, so the
+            # parsed value is not stored
+            res_quantity = create_value_with_unit(datapoint_data.get("residence-time"), save=False)
 
             # Temperature and pressure are required numbers, so a datapoint whose unit
             # cannot be converted is skipped rather than stored in the wrong unit.
