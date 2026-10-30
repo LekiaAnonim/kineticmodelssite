@@ -47,9 +47,29 @@ Options:
 - `--files PATH [PATH ...]` to import only these repo-relative files
 - `--limit N` to import only the first N files
 - `--dry-run` to scan without writing to the database
+- `--renamed-since COMMIT` to first move the datasets of the files renamed from COMMIT to
+  HEAD (see below); a file renamed with the same content is then not imported again
 
 The command exits with an error if any file is missing or fails to import. Importing a
 file again replaces its datapoints.
+
+### Renamed and deleted files
+
+A dataset is keyed by its file's repository path. The database holds the files of the
+ChemKED-database main branch only, and `prune_chemked_datasets` deletes the datasets
+whose path is not in a checkout of it. A renamed file must therefore keep its dataset
+row, or its simulation runs, model coverage and SSSOM links are lost with the prune.
+`rename_chemked_datasets` moves the datasets of the files that git sees renamed since a
+commit: an unchanged file (R100) only changes path; a file moved to another folder with
+changed content is re-ingested into its dataset; a file with changed content and another
+file name is not taken for a rename (git also pairs different experiments of similar text).
+
+```bash
+python manage.py rename_chemked_datasets --path <clone> --since <commit before the merge>  # dry run
+python manage.py rename_chemked_datasets --path <clone> --since <commit> --apply
+python manage.py prune_chemked_datasets --path <clone>                                    # dry run
+python manage.py prune_chemked_datasets --path <clone> --apply
+```
 
 ### Duplicate data and target folder
 
@@ -101,7 +121,10 @@ When a pull request that changes YAML files is merged into ChemKED-database `mas
 its `ingest-on-merge.yml` workflow sends a `chemked-ingest` repository dispatch to this
 repository. `.github/workflows/chemked-ingest.yml` then runs on the self-hosted runner:
 it pulls the clone at `CHEMKED_DATABASE_PATH` and runs `sync_chemked --files` for the
-merged files. Requirements:
+merged files, with `--renamed-since` set to the clone's commit before the pull (or the
+dispatch's `before` commit, if one is sent and is older), so that renamed files keep their
+datasets. Deleted files are not part of the dispatch: run `prune_chemked_datasets` for them.
+Requirements:
 
 - ChemKED-database secret `DISPATCH_TOKEN`: a token that can send repository dispatches
   to this repository (optional variables `PYTECK_REPO_OWNER`, `PYTECK_REPO_NAME` name it).

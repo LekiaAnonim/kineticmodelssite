@@ -9,9 +9,11 @@ of dataset have no file there:
   another branch.
 
 ``sync_chemked`` stores a file under its repository path, so such a dataset would stay as a
-second copy of the experiment. The command also deletes the compositions, composition species
-and values with units that no row uses: before sync_chemked replaced them on re-ingest, every
-re-ingest left the old ones behind.
+second copy of the experiment. After a pull request that renames files, run
+``rename_chemked_datasets`` first: it moves their datasets to the new paths, so that the prune
+deletes only the datasets of deleted files. The command also deletes the compositions,
+composition species and values with units that no row uses: before sync_chemked replaced them
+on re-ingest, every re-ingest left the old ones behind.
 
 Usage:
     python manage.py prune_chemked_datasets --path <ChemKED-database checkout>   # dry run
