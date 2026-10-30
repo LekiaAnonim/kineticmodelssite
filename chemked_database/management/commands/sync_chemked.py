@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import yaml
 from django.conf import settings
@@ -43,6 +45,13 @@ VALUE_UNIT_RE = re.compile(r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*(
 COMPOSITION_KINDS = {
     "mass fraction", "mole fraction", "mole percent", "mol/cm3", "mol/m3", "mol/L", "mol/dm3",
 }
+# What a renamed file does to its dataset (move_renamed_datasets)
+MOVED = "moved"
+MOVED_CHANGED = "moved, content changed"
+ALREADY_MOVED = "already at the new path"
+NO_DATASET = "no dataset at the old path"
+NOT_SAME_FILE = "content and file name changed: not taken for a rename"
+BOTH_PATHS = "a dataset with simulation runs or links at the new path too"
 
 def experiment_type_of(data: Dict[str, Any]) -> str:
     """ExperimentType value of a ChemKED file.
@@ -305,6 +314,105 @@ def delete_unused_values(value_ids=None) -> int:
     return deleted.get(ValueWithUnit._meta.label, 0)
 
 
+def clear_dataset(dataset):
+    """Delete the datapoints and common properties of *dataset*, and the rows only they used."""
+    # The species of profiles belong to no composition, so they go first
+    CompositionSpecies.objects.filter(
+        concentration_profiles__measurement__datapoint__dataset=dataset
+    ).delete()
+    # The compositions and values of the old datapoints and common properties would
+    # stay behind as a second copy of the file's mixtures and conditions
+    old_compositions = list(
+        Composition.objects.filter(
+            Q(datapoints__dataset=dataset) | Q(common_properties__dataset=dataset)
+        ).values_list("id", flat=True).distinct()
+    )
+    old_values = dataset_value_ids(dataset)
+    dataset.datapoints.all().delete()
+    CommonProperties.objects.filter(dataset=dataset).delete()
+    delete_unused_compositions(old_compositions)
+    delete_unused_values(old_values)
+
+
+def outside_references(dataset) -> int:
+    """Rows of other apps that refer to *dataset* or its datapoints.
+
+    Simulation runs and their datapoint results, model coverage, species mappings and SSSOM
+    links: a dataset keeps them only as the same row.
+    """
+    count = 0
+    for model, ids in ((ExperimentDataset, [dataset.pk]), (ExperimentDatapoint, dataset.datapoints.values("pk"))):
+        for rel in model._meta.related_objects:
+            if rel.related_model._meta.app_label != ExperimentDataset._meta.app_label:
+                count += rel.related_model.objects.filter(**{f"{rel.field.name}__in": ids}).count()
+    return count
+
+
+def renamed_files(base, since: str) -> List[Tuple[int, str, str]]:
+    """(similarity, old path, new path) of the YAML files that git finds renamed from *since* to HEAD.
+
+    A similarity of 100 is the same content. -z keeps non-ASCII paths unquoted (Togbé_2010), and
+    -l0 lets git compare every deleted file with every new one, however many there are.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(base), "diff", "--no-ext-diff", "-M", "-l0", "-z", "--name-status",
+         "--diff-filter=R", since, "HEAD", "--", "*.yaml"],
+        capture_output=True,
+    )
+    if result.returncode:
+        raise CommandError(f"git diff {since} HEAD in {base}: {result.stderr.decode().strip()}")
+    fields = result.stdout.decode("utf-8").split("\0")
+    return [(int(fields[i][1:]), fields[i + 1], fields[i + 2]) for i in range(0, len(fields) - 2, 3)]
+
+
+def moved_url(url: str, old: str, new: str) -> str:
+    """*url*, a blob URL of the file at *old* (backfill_dataset_repositories), for the file at *new*."""
+    encoded = "/".join(quote(part) for part in old.split("/"))
+    if url.endswith("/" + encoded):
+        return url[: -len(encoded)] + "/".join(quote(part) for part in new.split("/"))
+    return url
+
+
+def move_renamed_datasets(base, since: str, report: Callable[[str], None]):
+    """Give the datasets of the files renamed from *since* to HEAD their new paths.
+
+    A dataset is keyed by its file's path, so a renamed file would get a new dataset and the
+    prune would delete the old one with the links of its simulation runs, model coverage and
+    SSSOM mappings. The dataset is moved instead: the same row and id. A dataset at the new path
+    that an ingest stored before this step is replaced by the moved one if nothing outside the
+    ChemKED tables refers to it.
+
+    A renamed file with changed content is taken for a rename only under the same file name (a
+    move to another folder): git also pairs different files of similar text, such as deleted
+    Stranic_2012 conversions with new Zhang_2012 files. Those stay a deletion and a new file.
+
+    Returns (old path, new path, similarity, outcome, dataset id) for each renamed file. The caller
+    re-ingests the files moved with changed content.
+    """
+    moves = []
+    for similarity, old, new in renamed_files(base, since):
+        dataset = ExperimentDataset.objects.filter(chemked_file_path=old).first()
+        at_new = ExperimentDataset.objects.filter(chemked_file_path=new).first()
+        if similarity < 100 and Path(old).name != Path(new).name:
+            outcome = NOT_SAME_FILE
+        elif dataset is None:
+            outcome = ALREADY_MOVED if at_new else NO_DATASET
+        elif at_new and outside_references(at_new):
+            outcome = BOTH_PATHS
+        else:
+            if at_new:
+                report(f"Deleting dataset {at_new.pk} at {new}: dataset {dataset.pk} of {old} takes its place")
+                clear_dataset(at_new)
+                at_new.delete()
+            dataset.chemked_file_path = new
+            dataset.data_repository_url = moved_url(dataset.data_repository_url, old, new)
+            dataset.save(update_fields=["chemked_file_path", "data_repository_url", "updated_at"])
+            outcome = MOVED if similarity == 100 else MOVED_CHANGED
+        kept = dataset or at_new
+        moves.append((old, new, similarity, outcome, kept.pk if kept else None))
+    return moves
+
+
 def create_composition(
     composition_data: Optional[Dict[str, Any]],
     reporter: Optional[Callable[[str], None]] = None,
@@ -547,22 +655,7 @@ def store_chemked_data(data: Dict[str, Any], rel_path: str, report: Callable[[st
         # Re-ingesting an updated file replaces its datapoints instead of
         # appending a second copy.
         if not created:
-            # The species of profiles belong to no composition, so they go first
-            CompositionSpecies.objects.filter(
-                concentration_profiles__measurement__datapoint__dataset=dataset
-            ).delete()
-            # The compositions and values of the old datapoints and common properties would
-            # stay behind as a second copy of the file's mixtures and conditions
-            old_compositions = list(
-                Composition.objects.filter(
-                    Q(datapoints__dataset=dataset) | Q(common_properties__dataset=dataset)
-                ).values_list("id", flat=True).distinct()
-            )
-            old_values = dataset_value_ids(dataset)
-            dataset.datapoints.all().delete()
-            CommonProperties.objects.filter(dataset=dataset).delete()
-            delete_unused_compositions(old_compositions)
-            delete_unused_values(old_values)
+            clear_dataset(dataset)
 
         apparatus_data = data.get("apparatus") or {}
         if apparatus_data:
@@ -890,16 +983,38 @@ class Command(BaseCommand):
                 "When omitted all YAML files under --path are scanned."
             ),
         )
+        parser.add_argument(
+            "--renamed-since",
+            metavar="COMMIT",
+            help=(
+                "First give the datasets of the files renamed from COMMIT to HEAD their new paths "
+                "(see rename_chemked_datasets). A file renamed with the same content is not "
+                "re-ingested; one moved with changed content is."
+            ),
+        )
 
     def handle(self, *args, **options):
         base_path = options["path"]
         if not base_path:
             raise ValueError("Provide --path or set CHEMKED_DATABASE_PATH in settings.")
 
+        moves = []
+        if options["renamed_since"]:
+            with transaction.atomic():
+                moves = move_renamed_datasets(base_path, options["renamed_since"], self.stdout.write)
+                if options["dry_run"]:
+                    transaction.set_rollback(True)
+            for old, new, similarity, outcome, dataset_id in moves:
+                dataset = f", dataset {dataset_id}" if dataset_id else ""
+                self.stdout.write(f"Renamed {old} -> {new} (R{similarity:03d}): {outcome}{dataset}")
+        # The datasets of these files hold their content already
+        stored = {new for _, new, similarity, outcome, _ in moves if similarity == 100 and outcome in (MOVED, ALREADY_MOVED)}
+        changed = [new for _, new, _, outcome, _ in moves if outcome == MOVED_CHANGED]
+
         failed = 0
         if options["files"]:
             yaml_files = []
-            for rel in options["files"]:
+            for rel in options["files"] + [new for new in changed if new not in options["files"]]:
                 p = Path(base_path) / rel
                 if p.is_file():
                     yaml_files.append(p)
@@ -908,6 +1023,9 @@ class Command(BaseCommand):
                     failed += 1
         else:
             yaml_files = sorted(Path(base_path).rglob("*.yaml"))
+        if stored:
+            yaml_files = [p for p in yaml_files if str(p.relative_to(base_path)) not in stored]
+            self.stdout.write(f"Not re-ingested: {len(stored)} renamed files with the same content")
 
         limit = options["limit"]
         if limit:

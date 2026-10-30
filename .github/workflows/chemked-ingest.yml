@@ -30,6 +30,7 @@ jobs:
       - name: Pull latest ChemKED-database
         env:
           COMMIT_SHA: ${{ github.event.client_payload.commit_sha }}
+          PUSH_BEFORE: ${{ github.event.client_payload.before }}
         run: |
           eval "$(conda shell.bash hook)"
           conda activate kms
@@ -50,6 +51,14 @@ jobs:
             exit 1
           fi
           echo "CHEMKED_PATH=$CHEMKED_PATH" >> "$GITHUB_ENV"
+          # The database matches the clone before the pull: the files renamed since then keep
+          # their datasets (sync_chemked --renamed-since). The payload's commit before the push,
+          # if ChemKED-database sends one, covers a clone that was pulled by hand.
+          RENAMED_SINCE=$(git -C "$CHEMKED_PATH" rev-parse HEAD)
+          if [ -n "$PUSH_BEFORE" ] && git -C "$CHEMKED_PATH" merge-base --is-ancestor "$PUSH_BEFORE" "$RENAMED_SINCE" 2>/dev/null; then
+            RENAMED_SINCE="$PUSH_BEFORE"
+          fi
+          echo "RENAMED_SINCE=$RENAMED_SINCE" >> "$GITHUB_ENV"
           git -C "$CHEMKED_PATH" pull --ff-only
           # The clone must be on the branch that was merged into (master)
           if [ -n "$COMMIT_SHA" ] && ! git -C "$CHEMKED_PATH" merge-base --is-ancestor "$COMMIT_SHA" HEAD; then
@@ -84,4 +93,5 @@ jobs:
 
           python manage.py sync_chemked \
             --path "$CHEMKED_PATH" \
+            --renamed-since "$RENAMED_SINCE" \
             --files "${FILE_ARGS[@]}"
