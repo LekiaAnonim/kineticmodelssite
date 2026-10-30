@@ -205,11 +205,12 @@ def parse_value_unit(raw: Any):
     return None, units, extra
 
 
-def create_value_with_unit(raw: Any):
+def create_value_with_unit(raw: Any, save: bool = True):
+    """The ChemKED value-unit *raw* as a ValueWithUnit, stored unless *save* is False."""
     value, units, extra = parse_value_unit(raw)
     if value is None and not extra.get("value_text"):
         return None
-    return ValueWithUnit.objects.create(
+    quantity = ValueWithUnit(
         value=value,
         units=units or "",
         value_text=extra.get("value_text", ""),
@@ -225,6 +226,9 @@ def create_value_with_unit(raw: Any):
         evaluated_standard_deviation_sourcetype=extra.get("evaluated_standard_deviation_sourcetype", ""),
         evaluated_standard_deviation_method=extra.get("evaluated_standard_deviation_method", ""),
     )
+    if save:
+        quantity.save()
+    return quantity
 
 
 def si_value(quantity, kind: str, report: Callable[[str], None], context: str):
@@ -265,10 +269,22 @@ def _dataset_rows(model, dataset):
     return model.objects.filter(datapoint__dataset=dataset)
 
 
+def value_relations():
+    """Every foreign key to ValueWithUnit.
+
+    The speciation quantities have no reverse accessor (related_name "+"), and
+    ``_meta.related_objects`` leaves such relations out: a value only they use would look unused.
+    """
+    return [
+        rel for rel in ValueWithUnit._meta.get_fields(include_hidden=True)
+        if rel.is_relation and rel.auto_created and not rel.concrete
+    ]
+
+
 def dataset_value_ids(dataset) -> set:
     """Ids of the values with units that the rows of *dataset* use."""
     ids = set()
-    for rel in ValueWithUnit._meta.related_objects:
+    for rel in value_relations():
         ids.update(
             _dataset_rows(rel.related_model, dataset)
             .exclude(**{f"{rel.field.name}__isnull": True})
@@ -282,7 +298,7 @@ def delete_unused_values(value_ids=None) -> int:
     unused = ValueWithUnit.objects.all()
     if value_ids is not None:
         unused = unused.filter(id__in=value_ids)
-    for rel in ValueWithUnit._meta.related_objects:
+    for rel in value_relations():
         used = rel.related_model.objects.exclude(**{f"{rel.field.name}__isnull": True})
         unused = unused.exclude(id__in=used.values(rel.field.attname))
     _, deleted = unused.delete()
@@ -714,8 +730,9 @@ def store_chemked_data(data: Dict[str, Any], rel_path: str, report: Callable[[st
                 float(equiv_raw) if isinstance(equiv_raw, (int, float)) else None
             )
 
-            # Parse per-datapoint residence time
-            res_quantity = create_value_with_unit(datapoint_data.get("residence-time"))
+            # Parse per-datapoint residence time; a datapoint keeps it in s only, so the
+            # parsed value is not stored
+            res_quantity = create_value_with_unit(datapoint_data.get("residence-time"), save=False)
 
             # Temperature and pressure are required numbers, so a datapoint whose unit
             # cannot be converted is skipped rather than stored in the wrong unit.

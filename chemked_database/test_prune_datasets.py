@@ -12,17 +12,35 @@ from io import StringIO
 from pathlib import Path
 
 import yaml
+from django.apps import apps
 from django.core.management import CommandError, call_command
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
 from analysis.models import SimulationRun
 from database.models import KineticModel
 
-from .management.commands.sync_chemked import store_chemked_data
-from .models import Composition, CompositionSpecies, ExperimentDataset, ValueWithUnit
+from .management.commands.sync_chemked import store_chemked_data, value_relations
+from .models import (
+    Composition,
+    CompositionSpecies,
+    ExperimentDataset,
+    SpeciationMeasurementDatapoint,
+    ValueWithUnit,
+)
+from .test_ingest import SPECIATION_FILE
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
 IN_MAIN = "hydrogen/Test_2020/Test_2020_ST_7.yaml"
+
+
+def unused_values():
+    used = set()
+    for rel in value_relations():
+        used.update(
+            rel.related_model.objects.exclude(**{f"{rel.field.name}__isnull": True})
+            .values_list(rel.field.attname, flat=True)
+        )
+    return ValueWithUnit.objects.exclude(id__in=used).count()
 
 
 def counts():
@@ -52,6 +70,40 @@ class ChemkedCheckout(TestCase):
         out = StringIO()
         call_command("prune_chemked_datasets", "--path", str(self.checkout), *args, stdout=out)
         return out.getvalue()
+
+
+class ValueRelationTests(SimpleTestCase):
+    def test_every_foreign_key_to_a_value_is_found(self):
+        keys = {
+            (model._meta.label, field.name)
+            for model in apps.get_models()
+            for field in model._meta.concrete_fields
+            if field.is_relation and field.related_model is ValueWithUnit
+        }
+        found = {(rel.related_model._meta.label, rel.field.name) for rel in value_relations()}
+        self.assertEqual(found, keys)
+        # A relation without a reverse accessor (related_name "+")
+        self.assertIn(("chemked_database.SpeciationMeasurementDatapoint", "residence_time_quantity"), found)
+
+
+class SpeciationValuesTests(ChemkedCheckout):
+    def setUp(self):
+        super().setUp()
+        target = self.checkout / "hydrogen/Cong_2009/Cong_2009_JSR.yaml"
+        target.parent.mkdir(parents=True)
+        target.write_text(SPECIATION_FILE)
+
+    def test_reingest_and_prune_keep_the_speciation_quantities(self):
+        self.sync()
+        first = counts()
+        self.sync()
+        self.assertEqual(counts(), first)
+        self.prune("--apply")
+        self.assertEqual(counts(), first)
+        self.assertEqual(unused_values(), 0)
+        point = SpeciationMeasurementDatapoint.objects.get()
+        self.assertIsNotNone(point.residence_time_quantity)
+        self.assertIsNotNone(point.reactor_volume_quantity)
 
 
 class ReingestTests(ChemkedCheckout):
