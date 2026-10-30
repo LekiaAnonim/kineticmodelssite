@@ -15,6 +15,9 @@ import yaml
 from django.core.management import CommandError, call_command
 from django.test import TestCase
 
+from analysis.models import SimulationRun
+from database.models import KineticModel
+
 from .management.commands.sync_chemked import store_chemked_data
 from .models import Composition, CompositionSpecies, ExperimentDataset, ValueWithUnit
 
@@ -98,6 +101,29 @@ class PruneTests(ChemkedCheckout):
         rows = report.read_text().splitlines()
         self.assertEqual(len(rows), 3)
         self.assertIn("H2_Test_2020_ST_10004084", rows[1])
+
+    def test_runs_stay_without_a_dataset_unless_asked(self):
+        model = KineticModel.objects.create(model_name="a")
+        flat = ExperimentDataset.objects.get(chemked_file_path="H2_Test_2020_ST_10004084")
+        kept = ExperimentDataset.objects.get(chemked_file_path=IN_MAIN)
+        run = SimulationRun.objects.create(kinetic_model=model, dataset=flat)
+        SimulationRun.objects.create(kinetic_model=model, dataset=kept)
+
+        out = self.prune("--apply")
+        run.refresh_from_db()
+        self.assertIsNone(run.dataset)
+        self.assertIn("1 simulation runs were on the deleted datasets", out)
+        self.assertEqual(SimulationRun.objects.count(), 2)
+
+    def test_with_runs_deletes_the_runs_of_the_deleted_datasets(self):
+        model = KineticModel.objects.create(model_name="a")
+        flat = ExperimentDataset.objects.get(chemked_file_path="H2_Test_2020_ST_10004084")
+        kept = ExperimentDataset.objects.get(chemked_file_path=IN_MAIN)
+        SimulationRun.objects.create(kinetic_model=model, dataset=flat)
+        SimulationRun.objects.create(kinetic_model=model, dataset=kept)
+
+        self.prune("--apply", "--with-runs")
+        self.assertEqual(list(SimulationRun.objects.values_list("dataset_id", flat=True)), [kept.pk])
 
     def test_a_checkout_without_files_is_refused(self):
         empty = Path(tempfile.mkdtemp())

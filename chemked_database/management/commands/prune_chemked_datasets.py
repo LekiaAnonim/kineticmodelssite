@@ -16,6 +16,7 @@ re-ingest left the old ones behind.
 Usage:
     python manage.py prune_chemked_datasets --path <ChemKED-database checkout>   # dry run
     python manage.py prune_chemked_datasets --path <checkout> --apply --report deleted.csv
+    python manage.py prune_chemked_datasets --path <checkout> --apply --with-runs   # their runs too
 
 The dry run makes the same deletions in a transaction that is rolled back, so its counts are
 the ones --apply gives.
@@ -25,6 +26,7 @@ from pathlib import Path
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+from django.apps import apps
 from django.db import transaction
 from django.db.models import Count
 
@@ -33,6 +35,8 @@ from chemked_database.management.commands.sync_chemked import (
     delete_unused_values,
 )
 from chemked_database.models import CompositionSpecies, ExperimentDataset
+
+SimulationRun = apps.get_model("analysis", "SimulationRun")
 
 FLAT = "flat name (stored by the web pages)"
 NOT_IN_CHECKOUT = "repository path not in the checkout"
@@ -59,6 +63,11 @@ class Command(BaseCommand):
         )
         parser.add_argument("--apply", action="store_true", help="Write the changes (default: dry run).")
         parser.add_argument("--report", help="CSV file with one row per dataset to delete.")
+        parser.add_argument(
+            "--with-runs",
+            action="store_true",
+            help="Delete the simulation runs of the deleted datasets too (default: they stay, without a dataset).",
+        )
 
     def handle(self, *args, **options):
         if not options["path"] or not Path(options["path"]).is_dir():
@@ -92,10 +101,12 @@ class Command(BaseCommand):
 
         with transaction.atomic():
             ids = [d.pk for d, _ in stale]
-            runs = (
-                ExperimentDataset.objects.filter(pk__in=ids, simulation_runs__isnull=False)
-                .distinct().count()
-            )
+            runs = SimulationRun.objects.filter(dataset_id__in=ids)
+            run_count = runs.count()
+            if options["with_runs"]:
+                _, deleted_runs = runs.delete()
+                for label, count in sorted(deleted_runs.items()):
+                    self.stdout.write(f"  deleted {label}: {count}")
             # The species of profiles belong to no composition, so they go first
             CompositionSpecies.objects.filter(
                 concentration_profiles__measurement__datapoint__dataset__in=ids
@@ -115,8 +126,11 @@ class Command(BaseCommand):
                 f"{loose.get(CompositionSpecies._meta.label, 0)} species of no composition or profile, "
                 f"{values} values with units"
             )
-            if runs:
-                self.stdout.write(f"{runs} deleted datasets had simulation runs; the runs stay, without a dataset")
+            if run_count and not options["with_runs"]:
+                self.stdout.write(
+                    f"{run_count} simulation runs were on the deleted datasets; they stay, without a "
+                    "dataset (--with-runs deletes them)"
+                )
             if not options["apply"]:
                 transaction.set_rollback(True)
         self.stdout.write("applied" if options["apply"] else "dry run: rolled back, nothing written")
