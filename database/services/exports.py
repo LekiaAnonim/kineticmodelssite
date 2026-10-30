@@ -836,12 +836,24 @@ def _build_rmg_reactions(kinetic_model, species_map, rmg_reaction_cls, strict=Fa
     ):
         kinetics = kinetics_comment.kinetics
         reaction = kinetics.reaction
+        # Each species as many times as its coefficient, so H2O2 = 2 OH stays balanced.
         try:
-            reactants = [species_map[sp.id] for sp in reaction.reactants()]
-            products = [species_map[sp.id] for sp in reaction.products()]
+            reactant_rows, product_rows = reaction.stoich_reactants(), reaction.stoich_products()
+        except NotImplementedError:
+            # A fractional coefficient: RMG cannot write it.
+            unbalanced_reactions.append(kinetics.id)
+            if strict:
+                raise ExportError(
+                    "Strict Chemkin generation failed because a reaction has a fractional "
+                    f"coefficient: {kinetics.id}."
+                )
+            continue
+        try:
+            reactants = [species_map[sp.id] for sp in reactant_rows]
+            products = [species_map[sp.id] for sp in product_rows]
         except KeyError:
             if strict:
-                for sp in list(reaction.reactants()) + list(reaction.products()):
+                for sp in reactant_rows + product_rows:
                     if sp.id not in species_map:
                         missing_species.add(sp.id)
             continue
@@ -873,6 +885,13 @@ def _build_rmg_reactions(kinetic_model, species_map, rmg_reaction_cls, strict=Fa
 
     # Mark duplicate reactions so save_chemkin_file writes the DUPLICATE keyword
     _mark_duplicate_reactions(reactions)
+
+    if unbalanced_reactions:
+        logger.warning(
+            f"Chemkin generation for '{kinetic_model.model_name}' skipped "
+            f"{len(unbalanced_reactions)} unbalanced or fractional reaction(s): "
+            f"{', '.join(str(i) for i in sorted(unbalanced_reactions)[:10])}"
+        )
 
     if strict and missing_species:
         sample = ", ".join(str(species_id) for species_id in sorted(missing_species)[:5])
