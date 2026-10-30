@@ -14,12 +14,14 @@ and answers two questions for a new or changed YAML file:
 * Which folder does the file belong in? The answer follows the current layout:
   the fuel folder that holds files with the same fuel species, then the
   folder of files from the same paper, then ``Author_Year``. Conventions that
-  the layout alone does not show are in RETIRED_FOLDERS (e.g. ``butanol/``
-  takes no new files) and FUEL_FOLDERS (one folder per butanol isomer).
+  the layout alone does not show are in NESTED_FOLDERS (``butanol/`` holds one
+  fuel folder per butanol isomer, e.g. ``butanol/n-butanol/``), FUEL_FOLDERS
+  (the folder of each butanol isomer) and RETIRED_FOLDERS (folders that take
+  no new files, e.g. the old top-level ``n-butanol/``).
 
 A file with the same name in another folder is not a duplicate. One paper often
 gives a separate file for each fuel, for example
-``butanol/Beeckmann_2014/Beeckmann_2014_opf_p10bar.yaml`` and
+``butanol/n-butanol/Beeckmann_2014/Beeckmann_2014_opf_p10bar.yaml`` and
 ``ethanol/Beeckmann_2014/Beeckmann_2014_opf_p10bar.yaml``.
 
 The web upload and the REST API use this through GitHubPRService, and the
@@ -227,9 +229,19 @@ _BATH_NAMES = {
 _NOX_INCHI = {"1S/NO/c1-2", "1S/NO2/c2-1-3", "1S/N2O/c1-2-3"}
 _NOX_NAMES = {"no", "no2", "n2o", "nitric oxide", "nitrogen dioxide", "nitrous oxide"}
 
+_BUTANOL_ISOMERS = ("n-butanol", "2-butanol", "i-butanol", "t-butanol")
+
+# Parent folders whose fuel folders are one level down: the fuel folder of
+# ``butanol/n-butanol/Stranic_2012/x.yaml`` is ``butanol/n-butanol``.
+NESTED_FOLDERS = {
+    "butanol": _BUTANOL_ISOMERS,
+}
+
 # Folders that hold files but take no new ones; their files should move.
 RETIRED_FOLDERS = {
-    "butanol": "butanol isomers go to n-butanol/, 2-butanol/, i-butanol/ or t-butanol/",
+    "butanol": "only its isomer folders take files: "
+               + ", ".join(f"butanol/{isomer}/" for isomer in _BUTANOL_ISOMERS),
+    **{isomer: f"{isomer} goes to butanol/{isomer}/" for isomer in _BUTANOL_ISOMERS},
 }
 
 _N_BUTANOL = "1S/C4H10O/c1-2-3-4-5/h5H,2-4H2,1H3"
@@ -240,11 +252,27 @@ _T_BUTANOL = "1S/C4H10O/c1-4(2,3)5/h5H,1-3H3"
 # Folder for a main fuel (InChI) by convention. It comes before the folder
 # where most files with that main fuel are.
 FUEL_FOLDERS = {
-    _N_BUTANOL: "n-butanol",
-    _2_BUTANOL: "2-butanol",
-    _I_BUTANOL: "i-butanol",
-    _T_BUTANOL: "t-butanol",
+    _N_BUTANOL: "butanol/n-butanol",
+    _2_BUTANOL: "butanol/2-butanol",
+    _I_BUTANOL: "butanol/i-butanol",
+    _T_BUTANOL: "butanol/t-butanol",
 }
+
+
+def fuel_folder(path: str) -> str:
+    """Fuel folder of a repository path ('' for a file at the top level).
+
+    The first folder, or the first two for a parent in NESTED_FOLDERS:
+    ``butanol/n-butanol/Stranic_2012/x.yaml`` gives ``butanol/n-butanol``.
+    A paper folder directly in the parent gives the parent (``butanol``).
+    """
+    parts = path.split("/")
+    if len(parts) < 2:
+        return ""
+    if len(parts) > 2 and parts[1] in NESTED_FOLDERS.get(parts[0], ()):
+        return f"{parts[0]}/{parts[1]}"
+    return parts[0]
+
 
 # InChI for species names (lowercase) that files give without an InChI.
 KNOWN_INCHI = {
@@ -336,13 +364,13 @@ class IndexedFile:
 
     @property
     def folder(self) -> str:
-        return self.path.split("/", 1)[0] if "/" in self.path else ""
+        return fuel_folder(self.path)
 
     @property
     def subdir(self) -> str:
         """Folder below the fuel folder ('' for a file directly in it)."""
         parts = self.path.split("/")
-        return "/".join(parts[1:-1])
+        return "/".join(parts[self.folder.count("/") + 1:-1])
 
 
 @dataclass

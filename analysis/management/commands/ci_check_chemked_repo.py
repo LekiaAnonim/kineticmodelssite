@@ -18,7 +18,8 @@ web upload uses:
 * warning: a new file is not in the folder that the existing layout gives
   (folder of files with the same fuels, then of the same paper, then
   ``Author_Year``), or a file is in a folder that takes no new files
-  (repo_check.RETIRED_FOLDERS, e.g. ``butanol/``). A file with the same name
+  (repo_check.RETIRED_FOLDERS, e.g. a paper folder directly in ``butanol/``
+  or the old top-level ``n-butanol/``). A file with the same name
   in another folder is fine.
 
 Usage::
@@ -44,7 +45,9 @@ from analysis.management.commands.ci_validate_chemked import (
     _create_check_run,
     _update_check_run,
 )
-from chemked_database.repo_check import RETIRED_FOLDERS, data_key, load_chemked, load_index
+from chemked_database.repo_check import (
+    RETIRED_FOLDERS, data_key, fuel_folder, load_chemked, load_index,
+)
 
 CHECK_RUN_NAME = "ChemKED Duplicate and Folder Check"
 ICONS = {"failure": "❌", "warning": "⚠️", "notice": "✅"}
@@ -91,7 +94,7 @@ def check_files(index, files):
                 "measured values); check that this is not the same experiment.",
             ))
 
-        top = path.split("/", 1)[0] if "/" in path else ""
+        top = fuel_folder(path)
         retired = (
             f"`{top}/` takes no new files ({RETIRED_FOLDERS[top]}). "
             if top in RETIRED_FOLDERS else ""
