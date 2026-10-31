@@ -1,3 +1,4 @@
+import hashlib
 from typing import List, Optional, Literal, ClassVar, Union
 
 import rmgpy.kinetics as kinetics
@@ -437,6 +438,13 @@ def validate_kinetics_data(data, returns=False):
         raise DJValidationError(error_msgs or f"Invalid type: {data.get('type')}")
 
 
+def efficiencies_hash(efficiencies):
+    """The fingerprint of a set of collider efficiencies, given as (species id, efficiency)
+    pairs in any order; "" for none. Efficiencies are compared to 6 significant digits."""
+    pairs = sorted(f"{species_id}:{efficiency:.6g}" for species_id, efficiency in efficiencies)
+    return hashlib.md5(bytes(";".join(pairs), "UTF-8")).hexdigest() if pairs else ""
+
+
 class Kinetics(models.Model):
     prime_id = models.CharField(blank=True, max_length=10)
     reaction = models.ForeignKey("Reaction", on_delete=models.CASCADE)
@@ -453,6 +461,11 @@ class Kinetics(models.Model):
         "Species", null=True, blank=True, on_delete=models.PROTECT,
         related_name="collider_kinetics",
         help_text="The only collider of this rate, as in (+AR); blank for (+M).")
+    # The collider efficiencies belong to the rate: two models with the same parameters but
+    # other efficiencies have two records. Kept current by refresh_efficiencies_hash.
+    efficiencies_hash = models.CharField(
+        max_length=32, blank=True, default="", editable=False,
+        help_text="Fingerprint of the collider efficiencies; blank for none.")
     min_temp = models.FloatField("Lower Temp Bound", help_text="units: K", null=True, blank=True)
     max_temp = models.FloatField("Upper Temp Bound", help_text="units: K", null=True, blank=True)
     min_pressure = models.FloatField(
@@ -466,14 +479,16 @@ class Kinetics(models.Model):
 
     class Meta:
         verbose_name_plural = "Kinetics"
-        # The same rate for (+M) and for (+AR) are two records. PostgreSQL 14 has no NULLS NOT
-        # DISTINCT, so the (+M) rates get their own constraint.
+        # The same rate for (+M) and for (+AR), or with other collider efficiencies, are two
+        # records. PostgreSQL 14 has no NULLS NOT DISTINCT, so the (+M) rates get their own
+        # constraint.
         constraints = [
             models.UniqueConstraint(
-                fields=("reaction", "raw_data"), condition=models.Q(specific_collider__isnull=True),
+                fields=("reaction", "raw_data", "efficiencies_hash"),
+                condition=models.Q(specific_collider__isnull=True),
                 name="unique_kinetics_rate"),
             models.UniqueConstraint(
-                fields=("reaction", "raw_data", "specific_collider"),
+                fields=("reaction", "raw_data", "specific_collider", "efficiencies_hash"),
                 condition=models.Q(specific_collider__isnull=False),
                 name="unique_kinetics_rate_collider"),
         ]
@@ -496,6 +511,11 @@ class Kinetics(models.Model):
         )
 
         return rmg_reaction
+
+    def refresh_efficiencies_hash(self):
+        """Store the fingerprint of the efficiency rows as they are now (after an edit)."""
+        self.efficiencies_hash = efficiencies_hash(self.efficiency_set.values_list("species_id", "efficiency"))
+        Kinetics.objects.filter(pk=self.pk).update(efficiencies_hash=self.efficiencies_hash)
 
     def rmg_kinetics(self):
         """The RMG kinetics object alone, with collider efficiencies; no reaction needed."""

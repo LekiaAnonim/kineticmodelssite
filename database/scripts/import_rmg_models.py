@@ -499,10 +499,12 @@ def labels_by_structure_key(species_dict, states=None):
     return {key: label for key, label in labels.items() if label}
 
 
-def create_and_save_efficiencies(
-    kinetic_model, kinetics_instance, rmg_kinetics_data, models, labels=None, cache=None
-):
-    for rmg_molecule, efficiency in rmg_kinetics_data.efficiencies.items():
+def collider_efficiencies(kinetic_model, rmg_kinetics_data, models, labels=None, cache=None):
+    """(species record, efficiency) for each collider efficiency of a library entry; none for
+    PLOG and Chebyshev kinetics. `labels` is labels_by_structure_key, `cache` that of
+    import_kinetics."""
+    efficiencies = []
+    for rmg_molecule, efficiency in (getattr(rmg_kinetics_data, "efficiencies", None) or {}).items():
         structure = molecule_key(rmg_molecule)
         name = (labels or {}).get(structure, "")
         # A labelled collider is the reaction species with that label (ground state).
@@ -514,10 +516,8 @@ def create_and_save_efficiencies(
             species = get_or_create_species(kinetic_model, name, [rmg_molecule], models)
             if key:
                 cache[key] = species
-        efficiency = models.Efficiency.objects.create(
-            species=species, kinetics=kinetics_instance, efficiency=efficiency
-        )
-        efficiency.save()
+        efficiencies.append((species, efficiency))
+    return efficiencies
 
 
 def get_base_kinetics_data_fields(rmg_kinetics_data):
@@ -627,17 +627,21 @@ def import_kinetics(kinetics_path, kinetic_model, models, only_types=None, state
                     identity["specific_collider"] = (
                         labelled_species(kinetic_model, collider, models, states, lookups)
                         if collider is not None else None)
+                efficiencies = collider_efficiencies(
+                    kinetic_model, rmg_kinetics_data, models, labels=labels, cache=lookups)
+                if has_field(models.Kinetics, "efficiencies_hash"):
+                    # Another model's record with the same parameters but other efficiencies
+                    # (H2O 7.5 where this library has 0.0) is not this model's rate.
+                    identity["efficiencies_hash"] = kd.efficiencies_hash(
+                        (species.pk, efficiency) for species, efficiency in efficiencies)
 
                 kinetics_instance, created = models.Kinetics.objects.get_or_create(
                     **identity, defaults=base_fields
                 )
-                # PLOG and Chebyshev kinetics have no collider efficiencies.
-                if created and getattr(rmg_kinetics_data, "efficiencies", None):
-                    create_and_save_efficiencies(
-                        kinetic_model, kinetics_instance, rmg_kinetics_data, models,
-                        labels=labels, cache=lookups,
-                    )
                 if created:
+                    for species, efficiency in efficiencies:
+                        models.Efficiency.objects.create(
+                            species=species, kinetics=kinetics_instance, efficiency=efficiency)
                     index_new_rows(models, kinetics=kinetics_instance)
 
                 models.KineticsComment.objects.get_or_create(

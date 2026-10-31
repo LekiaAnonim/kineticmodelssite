@@ -27,6 +27,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Count
 
 from database import models as db
+from database.models.kinetic_data import efficiencies_hash
 from database.scripts.import_rmg_models import (
     get_reaction_hash, get_species_hash, import_kinetics, import_thermo)
 
@@ -226,12 +227,32 @@ def merge_kinetics(keep_id, drop_id):
     db.Kinetics.objects.filter(pk=drop_id).delete()
 
 
+def refresh_efficiencies_hashes(kinetics_ids, report):
+    """Give these kinetics rows the fingerprint of their efficiencies after a species merge
+    moved them; merge a row into the identical one of the same reaction."""
+    for kinetics in db.Kinetics.objects.filter(pk__in=kinetics_ids).order_by("pk"):
+        new_hash = efficiencies_hash(kinetics.efficiency_set.values_list("species_id", "efficiency"))
+        if new_hash == kinetics.efficiencies_hash:
+            continue
+        twin = db.Kinetics.objects.filter(
+            reaction_id=kinetics.reaction_id, raw_data=kinetics.raw_data,
+            specific_collider_id=kinetics.specific_collider_id, efficiencies_hash=new_hash,
+        ).exclude(pk=kinetics.pk).values_list("pk", flat=True).first()
+        if twin is not None:
+            merge_kinetics(twin, kinetics.pk)
+            report["kinetics_merged"] += 1
+        else:
+            db.Kinetics.objects.filter(pk=kinetics.pk).update(efficiencies_hash=new_hash)
+        report["kinetics_with_changed_efficiencies"] += 1
+
+
 def merge_reaction_pair(keep_id, drop_id, report):
     """Merge a reaction into the one with the same species and coefficients."""
     for kinetics in db.Kinetics.objects.filter(reaction_id=drop_id):
         twin = db.Kinetics.objects.filter(
             reaction_id=keep_id, raw_data=kinetics.raw_data,
-            specific_collider_id=kinetics.specific_collider_id).first()
+            specific_collider_id=kinetics.specific_collider_id,
+            efficiencies_hash=kinetics.efficiencies_hash).first()
         if twin:
             merge_kinetics(twin.pk, kinetics.pk)
             report["kinetics_merged"] += 1
@@ -275,6 +296,9 @@ def merge_split_species(apply=False, log=print):
             if n % 100 == 0:
                 log(f"  merged {n} of {len(groups)} groups")
         report["reactions_with_changed_species"] = len(reactions)
+        # A collider efficiency on a merged record changes the rate's fingerprint.
+        refresh_efficiencies_hashes(set(db.Efficiency.objects.filter(
+            species_id__in=[ids[0] for ids in groups]).values_list("kinetics_id", flat=True)), report)
         merge_reactions(reactions, report)
         if not apply:
             transaction.set_rollback(True)
@@ -487,6 +511,12 @@ def integrity_report():
     stored = dict(db.Reaction.objects.values_list("pk", "hash"))
     r["reactions_with_stale_hash"] = sum(1 for pk in computed if computed[pk] != stored[pk])
     r["reactions_sharing_stoichiometry"] = sum(c - 1 for c in Counter(computed.values()).values() if c > 1)
+    efficiencies = defaultdict(list)
+    for kinetics_id, species_id, value in db.Efficiency.objects.values_list("kinetics_id", "species_id", "efficiency"):
+        efficiencies[kinetics_id].append((species_id, value))
+    r["kinetics_with_stale_efficiencies_hash"] = sum(
+        1 for pk, stored in db.Kinetics.objects.values_list("pk", "efficiencies_hash")
+        if stored != efficiencies_hash(efficiencies[pk]))
 
     for model in (db.Thermo, db.Kinetics, db.Reaction, db.Species):
         used = referenced_ids(model, skip=OWNED_ROWS.get(model, ()))
