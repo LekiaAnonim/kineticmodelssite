@@ -10,7 +10,7 @@ from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 
 from .github_pr_service import GitHubPRService
-from .repo_check import RepoIndex, load_chemked, load_index
+from .repo_check import RepoIndex, fuel_folder, load_chemked, load_index
 
 O2 = ("O2", "1S/O2/c1-2", 0.1)
 AR = ("Ar", "1S/Ar", 0.88)
@@ -57,13 +57,17 @@ FILES = {
     # One paper, one file per fuel, same file name
     "ethanol/Beeckmann_2014/Beeckmann_2014_opf_p10bar.yaml": chemked(
         [ETHANOL, O2, AR], [900], doi="10.1000/b", author="J. Beeckmann", year=2014),
-    "butanol/Beeckmann_2014/Beeckmann_2014_opf_p10bar.yaml": chemked(
+    "butanol/n-butanol/Beeckmann_2014/Beeckmann_2014_opf_p10bar.yaml": chemked(
         [BUTANOL, O2, AR], [900], doi="10.1000/b", author="J. Beeckmann", year=2014),
     "methanol/Alzueta_2001/Alzueta_2001_fr.yaml": chemked(
         [METHANOL, O2, AR], [800], doi="10.1000/c", author="M. Alzueta", year=2001),
     "methanol_NOx/Alzueta_2001/Alzueta_2001_fr.yaml": chemked(
         [METHANOL, NO, O2, AR], [800], doi="10.1000/c", author="M. Alzueta", year=2001),
-    # butanol/ is retired: more n-butanol files there than in n-butanol/
+    # butanol/ holds the isomer folders. A paper folder directly in butanol/
+    # and the old top-level isomer folders take no new files: more n-butanol
+    # files there than in butanol/n-butanol/.
+    "butanol/n-butanol/Moss_2008/Moss_2008_n-b.yaml": chemked(
+        [BUTANOL, O2, AR], [1180], doi="10.1000/moss", author="J. Moss", year=2008),
     "butanol/Bec_2014/x1.yaml": chemked(
         [BUTANOL, O2, AR], [1000], doi="10.1000/bec", author="I. BEC", year=2014),
     "butanol/Bec_2014/x2.yaml": chemked(
@@ -158,7 +162,7 @@ class RepoCheckTests(RepoFixture):
         self.assertIsNone(self.index.find_duplicate(chemked([CH4, O2, AR], [1200, 1301])))
 
     def test_same_name_in_other_folder_is_not_a_duplicate(self):
-        path = "butanol/Beeckmann_2014/Beeckmann_2014_opf_p10bar.yaml"
+        path = "butanol/n-butanol/Beeckmann_2014/Beeckmann_2014_opf_p10bar.yaml"
         self.assertIsNone(self.index.find_duplicate(FILES[path], exclude_path=path))
         methanol = chemked([METHANOL, O2, AR], [950], doi="10.1000/b", author="J. Beeckmann", year=2014)
         self.assertIsNone(self.index.check_upload("Beeckmann_2014_opf_p10bar.yaml", methanol))
@@ -192,28 +196,47 @@ class RepoCheckTests(RepoFixture):
                        doi="10.1000/x", author="A. B", year=1999)
         self.assertEqual(self.index.suggest_folder(text).folder, "methane")
 
+    def test_fuel_folder_of_nested_folders(self):
+        self.assertEqual(fuel_folder("butanol/n-butanol/Moss_2008/x.yaml"), "butanol/n-butanol")
+        self.assertEqual(fuel_folder("butanol/n-butanol/x.yaml"), "butanol/n-butanol")
+        self.assertEqual(fuel_folder("butanol/Bec_2014/x1.yaml"), "butanol")
+        self.assertEqual(fuel_folder("n-butanol/Bec_2014_n-b_phi_1.yaml"), "n-butanol")
+        self.assertEqual(fuel_folder("methane/Aul_2013/Aul_2013_st.yaml"), "methane")
+        self.assertEqual(fuel_folder("x.yaml"), "")
+        indexed = self.index.files["butanol/n-butanol/Moss_2008/Moss_2008_n-b.yaml"]
+        self.assertEqual((indexed.folder, indexed.subdir), ("butanol/n-butanol", "Moss_2008"))
+        self.assertNotIn("butanol", self.index.open_folders)
+        self.assertNotIn("n-butanol", self.index.open_folders)
+        self.assertIn("butanol/n-butanol", self.index.open_folders)
+
+    def test_same_paper_in_isomer_folder(self):
+        text = chemked([BUTANOL, O2, AR], [1250], doi="10.1000/moss", author="J. Moss", year=2008)
+        suggestion = self.index.suggest_folder(text)
+        self.assertEqual(suggestion.directory, "butanol/n-butanol/Moss_2008")
+        self.assertIn("same paper are in butanol/n-butanol/Moss_2008/", suggestion.reason)
+
     def test_retired_folder_gets_no_new_files(self):
         text = chemked([BUTANOL, O2, AR], [1200], doi="10.1000/bec", author="I. BEC", year=2014)
-        self.assertEqual(self.index.suggest_folder(text).directory, "n-butanol")
+        self.assertEqual(self.index.suggest_folder(text).directory, "butanol/n-butanol/Bec_2014")
         text = chemked([BUTANOL, O2, AR], [1200], doi="10.1000/z", author="Z. Zed", year=2019)
-        self.assertEqual(self.index.suggest_folder(text).directory, "n-butanol/Zed_2019")
+        self.assertEqual(self.index.suggest_folder(text).directory, "butanol/n-butanol/Zed_2019")
 
     def test_retired_folder_file_belongs_in_isomer_folder(self):
-        path = "butanol/Bec_2014/x1.yaml"
-        suggestion = self.index.suggest_folder(FILES[path], exclude_path=path)
-        self.assertEqual(suggestion.directory, "n-butanol")
+        for path in ("butanol/Bec_2014/x1.yaml", "n-butanol/Bec_2014_n-b_phi_1.yaml"):
+            suggestion = self.index.suggest_folder(FILES[path], exclude_path=path)
+            self.assertEqual(suggestion.directory, "butanol/n-butanol/Bec_2014")
 
     def test_isomer_without_inchi_goes_to_its_folder(self):
         text = chemked([("iC4H9OH", "", 0.02), O2, AR], [1000], doi="10.1000/i", author="A. B", year=2012)
         suggestion = self.index.suggest_folder(text)
-        self.assertEqual(suggestion.directory, "i-butanol/B_2012")
-        self.assertIn("by convention", suggestion.reason)
+        self.assertEqual(suggestion.directory, "butanol/i-butanol/B_2012")
+        self.assertIn("goes to butanol/i-butanol/ by convention", suggestion.reason)
 
     def test_isomer_blend_goes_to_isomer_folder(self):
         c2h2 = ("C2H2", "1S/C2H2/c1-2/h1-2H", 0.006)
         text = chemked([c2h2, ("nC4H9OH", "", 0.004), O2, AR], [900],
                        doi="10.1000/e", author="C. Esarte", year=2012)
-        self.assertEqual(self.index.suggest_folder(text).folder, "n-butanol")
+        self.assertEqual(self.index.suggest_folder(text).folder, "butanol/n-butanol")
 
     def test_new_fuel_gets_new_folder(self):
         toluene = ("toluene", "1S/C7H8/c1-7-5-3-2-4-6-7/h2-6H,1H3", 0.01)
@@ -266,11 +289,19 @@ class CICheckTests(RepoFixture):
             # Update of a committed file
             "methane/Smith_2010/Smith_2010_st.yaml": chemked(
                 [CH4, O2, AR], [1150], doi="10.1000/s", author="A. Smith", year=2010),
-            # New file and update in the retired butanol/ folder
+            # New file and update in a paper folder directly in butanol/
             "butanol/Bec_2014/x3.yaml": chemked(
                 [BUTANOL, O2, AR], [1150], doi="10.1000/bec", author="I. BEC", year=2014),
             "butanol/Bec_2014/x2.yaml": chemked(
                 [BUTANOL, O2, AR], [1060], doi="10.1000/bec", author="I. BEC", year=2014),
+            # Update in the old top-level n-butanol/ folder
+            "n-butanol/Bec_2014_n-b_phi_1.yaml": chemked(
+                [BUTANOL, O2, AR], [1110], doi="10.1000/bec", author="I. BEC", year=2014),
+            # New file and update in an isomer folder below butanol/
+            "butanol/n-butanol/Moss_2008/new.yaml": chemked(
+                [BUTANOL, O2, AR], [1260], doi="10.1000/moss", author="J. Moss", year=2008),
+            "butanol/n-butanol/Moss_2008/Moss_2008_n-b.yaml": chemked(
+                [BUTANOL, O2, AR], [1190], doi="10.1000/moss", author="J. Moss", year=2008),
         }
 
     def test_check_files(self):
@@ -292,8 +323,20 @@ class CICheckTests(RepoFixture):
         for path in ("butanol/Bec_2014/x3.yaml", "butanol/Bec_2014/x2.yaml"):
             level, message = results[path]
             self.assertEqual(level, "warning")
-            self.assertIn("`butanol/` takes no new files", message)
-            self.assertIn("`n-butanol/`", message)
+            self.assertIn("`butanol/` takes no new files (only its isomer folders take files", message)
+            self.assertIn("`butanol/n-butanol/Bec_2014/`", message)
+        level, message = results["n-butanol/Bec_2014_n-b_phi_1.yaml"]
+        self.assertEqual(level, "warning")
+        self.assertIn("`n-butanol/` takes no new files (n-butanol goes to butanol/n-butanol/)", message)
+        self.assertIn("`butanol/n-butanol/Bec_2014/`", message)
+        self.assertEqual(
+            results["butanol/n-butanol/Moss_2008/new.yaml"],
+            ("notice", "New file in the expected folder `butanol/n-butanol/Moss_2008/`."),
+        )
+        self.assertEqual(
+            results["butanol/n-butanol/Moss_2008/Moss_2008_n-b.yaml"],
+            ("notice", "Update of a committed file; no duplicate data."),
+        )
 
     def test_command_prints_without_check_run(self):
         from io import StringIO
@@ -311,7 +354,7 @@ class CICheckTests(RepoFixture):
         call_command("ci_check_chemked_repo", files_dir=files_dir, clone=self.clone,
                      no_check_run=True, stdout=out)
 
-        self.assertIn("failure: 3 duplicate(s), 4 warning(s) in 9 file(s)", out.getvalue())
+        self.assertIn("failure: 3 duplicate(s), 5 warning(s) in 12 file(s)", out.getvalue())
 
 
 class UploadPreviewTests(TestCase):
