@@ -275,9 +275,10 @@ class Reaction(models.Model):
         rmg_reactants = []
         rmg_products = []
 
-        for reactant in self.reactants():
+        # Each species as many times as its coefficient: H2O2 <=> OH + OH, not H2O2 <=> OH.
+        for reactant in self.stoich_reactants():
             rmg_reactants.append(reactant.to_rmg())
-        for product in self.products():
+        for product in self.stoich_products():
             rmg_products.append(product.to_rmg())
 
         return rmgpy.reaction.Reaction(

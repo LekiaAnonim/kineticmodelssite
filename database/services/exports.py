@@ -839,8 +839,19 @@ def _build_rmg_reactions(kinetic_model, species_map, rmg_reaction_cls, strict=Fa
     ):
         kinetics = kinetics_comment.kinetics
         reaction = kinetics.reaction
+        # Each species as many times as its coefficient, so H2O2 = 2 OH stays balanced.
+        try:
+            reactant_rows, product_rows = reaction.stoich_reactants(), reaction.stoich_products()
+        except NotImplementedError:
+            # A fractional coefficient: RMG cannot write it.
+            unbalanced_reactions.append(kinetics.id)
+            if strict:
+                raise ExportError(
+                    "Strict Chemkin generation failed because a reaction has a fractional "
+                    f"coefficient: {kinetics.id}."
+                )
+            continue
         # A specific collider, as in H + O2 (+AR), must be in the SPECIES block too.
-        reactant_rows, product_rows = reaction.reactants(), reaction.products()
         needed = [sp.id for sp in [*reactant_rows, *product_rows]]
         if kinetics.specific_collider_id:
             needed.append(kinetics.specific_collider_id)
@@ -878,6 +889,13 @@ def _build_rmg_reactions(kinetic_model, species_map, rmg_reaction_cls, strict=Fa
 
     # Mark duplicate reactions so save_chemkin_file writes the DUPLICATE keyword
     _mark_duplicate_reactions(reactions)
+
+    if unbalanced_reactions:
+        logger.warning(
+            f"Chemkin generation for '{kinetic_model.model_name}' skipped "
+            f"{len(unbalanced_reactions)} unbalanced or fractional reaction(s): "
+            f"{', '.join(str(i) for i in sorted(unbalanced_reactions)[:10])}"
+        )
 
     if strict and missing_species:
         sample = ", ".join(str(species_id) for species_id in sorted(missing_species)[:5])
