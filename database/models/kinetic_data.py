@@ -281,7 +281,7 @@ class ThirdBody(BaseModel):
     type: Literal["third_body"]
     low_arrhenius: Arrhenius
 
-    def to_rmg(self, min_temp, max_temp, min_pressure, max_pressure, *args):
+    def to_rmg(self, min_temp, max_temp, min_pressure, max_pressure, efficiencies, *args):
         return kinetics.ThirdBody(
             arrheniusLow=self.low_arrhenius.to_rmg(
                 min_temp, max_temp, min_pressure, max_pressure
@@ -290,6 +290,7 @@ class ThirdBody(BaseModel):
             Tmax=ScalarQuantity(max_temp, "K"),
             Pmin=ScalarQuantity(min_pressure, "Pa"),
             Pmax=ScalarQuantity(max_pressure, "Pa"),
+            efficiencies=_efficiencies_to_rmg(efficiencies),
         )
 
     def table_data(self):

@@ -2,6 +2,7 @@
 with the parameters of other models but H2O 0.0, because H2O has its own (+H2O) rate; it must
 not be linked to a record with another model's H2O 7.5. Here: H + O2 (+M) <=> HO2 (+M)."""
 import importlib
+import re
 import shutil
 import tempfile
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from rest_framework.test import APIClient
 
 from database import models as db
 from database.models.kinetic_data import efficiencies_hash
-from database.scripts.import_rmg_models import get_or_create_species, import_kinetics
+from database.scripts.import_rmg_models import get_or_create_species, import_kinetics, import_thermo
 from database.services import cleanup, exports
 from database.tests.test_database_cleanup import reaction, split_records
 from database.tests.test_import_rmg_species_unit import MODELS, molecule
@@ -217,3 +218,53 @@ class ColliderEfficiencyEditTests(TestCase):
         self.kinetics.refresh_from_db()
         self.assertEqual(set(self.kinetics.efficiency_set.values_list("efficiency", flat=True)), {1.0})
         self.assertEqual(self.kinetics.efficiencies_hash, stored_hash(self.kinetics))
+
+
+def third_body_model(root, name, efficiencies):
+    """H + O2 + M <=> HO2 + M as a three-body rate (GRI-Mech 3.0 writes it so), not a falloff one."""
+    thermo_path, kinetics_path = collider_model(root, name, {})
+    with open(kinetics_path, "a") as handle:
+        handle.write(f'''
+entry(
+    index = 0,
+    label = "H + O2 <=> HO2",
+    degeneracy = 1.0,
+    kinetics = ThirdBody(arrheniusLow=Arrhenius(A=(2.8e+18,'cm^6/(mol^2*s)'), n=-0.86, Ea=(0,'cal/mol'), T0=(1,'K')), efficiencies={efficiencies}),
+    shortDesc = """The chemkin file reaction is H + O2 + M <=> HO2 + M""",
+)
+''')
+    return thermo_path, kinetics_path
+
+
+class ThirdBodyEfficiencyExportTests(TestCase):
+    """A three-body rate keeps its collider efficiencies in the RMG object and the exports."""
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory)
+        self.model = db.KineticModel.objects.create(model_name="gri")
+        thermo_path, kinetics_path = third_body_model(self.directory, "gri", "{'O': 10.0, '[Ar]': 0.38, '[O][O]': 0.0}")
+        import_thermo(thermo_path, self.model, MODELS)
+        import_kinetics(kinetics_path, self.model, MODELS)
+        self.rate = record(self.model)
+
+    def test_rmg_kinetics_have_the_efficiencies(self):
+        self.assertEqual(self.rate.raw_data["type"], "third_body")
+        self.assertEqual(efficiencies(self.model), {"H2O": 10.0, "AR": 0.38, "O2": 0.0})
+        for rmg_kinetics in (self.rate.to_rmg().kinetics, self.rate.rmg_kinetics()):
+            self.assertEqual(sorted(rmg_kinetics.efficiencies.values()), [0.0, 0.38, 10.0])
+
+    def test_chemkin_file_has_the_efficiencies(self):
+        (text,) = [v.decode() for k, v in exports._generate_chemkin_files(self.model).items() if k.endswith("_chem.inp")]
+        lines = text.splitlines()
+        (index,) = [i for i, line in enumerate(lines) if "+M" in line.replace(" ", "") and "HO2" in line]
+        written = dict(re.findall(r"([A-Z0-9]+)(?:\(\d+\))?/\s*([\d.]+)/", lines[index + 1]))
+        self.assertEqual({k: float(v) for k, v in written.items()}, {"H2O": 10.0, "AR": 0.38, "O2": 0.0})
+
+    def test_cantera_file_has_the_efficiencies(self):
+        import cantera as ct
+        solution = ct.Solution(yaml=exports.build_cantera_yaml(self.model).content.decode())
+        (rate,) = [r for r in solution.reactions() if "HO2" in r.equation]
+        self.assertEqual(rate.reaction_type, "three-body-Arrhenius")
+        written = {re.sub(r"\(\d+\)$", "", name): value for name, value in rate.third_body.efficiencies.items()}
+        self.assertEqual(written, {"H2O": 10.0, "AR": 0.38, "O2": 0.0})
