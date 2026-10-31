@@ -236,7 +236,7 @@ class KineticsAdmin(admin.ModelAdmin):
     list_display = ('id', 'reaction', 'source', 'type', 'temp_range', 'pressure_range')
     list_filter = ('reverse',)
     search_fields = ('prime_id', 'reaction__prime_id', 'source__source_title')
-    autocomplete_fields = ['reaction', 'source']
+    autocomplete_fields = ['reaction', 'source', 'specific_collider']
     inlines = [EfficiencyInline]
     readonly_fields = ('type',)
     
@@ -248,7 +248,7 @@ class KineticsAdmin(admin.ModelAdmin):
             'fields': (('min_temp', 'max_temp'), ('min_pressure', 'max_pressure'))
         }),
         ('Kinetic Data', {
-            'fields': ('raw_data', 'type', 'relative_uncertainty'),
+            'fields': ('raw_data', 'type', 'specific_collider', 'relative_uncertainty'),
             'classes': ('wide',)
         }),
     )
@@ -264,6 +264,11 @@ class KineticsAdmin(admin.ModelAdmin):
             return f"{obj.min_pressure:.0e} - {obj.max_pressure:.0e} Pa"
         return '-'
     pressure_range.short_description = 'P Range'
+
+    # The efficiencies (inline) are part of the rate's identity (Kinetics.efficiencies_hash).
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        form.instance.refresh_efficiencies_hash()
 
 
 @admin.register(Thermo)
@@ -406,6 +411,23 @@ class EfficiencyAdmin(admin.ModelAdmin):
     list_display = ('id', 'species', 'kinetics', 'efficiency')
     search_fields = ('species__prime_id', 'kinetics__prime_id')
     autocomplete_fields = ['species', 'kinetics']
+
+    # An efficiency is part of its rate's identity (Kinetics.efficiencies_hash).
+    def save_model(self, request, obj, form, change):
+        old = Efficiency.objects.filter(pk=obj.pk).values_list("kinetics", flat=True).first()
+        super().save_model(request, obj, form, change)
+        for kinetics in Kinetics.objects.filter(pk__in={old, obj.kinetics_id} - {None}):
+            kinetics.refresh_efficiencies_hash()
+
+    def delete_queryset(self, request, queryset):
+        kinetics_ids = set(queryset.values_list("kinetics", flat=True))
+        super().delete_queryset(request, queryset)
+        for kinetics in Kinetics.objects.filter(pk__in=kinetics_ids):
+            kinetics.refresh_efficiencies_hash()
+
+    def delete_model(self, request, obj):
+        super().delete_model(request, obj)
+        obj.kinetics.refresh_efficiencies_hash()
 
 
 @admin.register(SubMechanism)

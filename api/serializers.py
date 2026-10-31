@@ -119,7 +119,18 @@ class KineticsSerializer(NestedModelSerializer):
 
     class Meta:
         model = models.Kinetics
-        exclude = ["species", "raw_data"]
+        exclude = ["species", "raw_data", "efficiencies_hash"]
+
+    # The efficiencies are part of the rate's identity (Kinetics.efficiencies_hash).
+    def create(self, validated_data):
+        kinetics = super().create(validated_data)
+        kinetics.refresh_efficiencies_hash()
+        return kinetics
+
+    def update(self, instance, validated_data):
+        kinetics = super().update(instance, validated_data)
+        kinetics.refresh_efficiencies_hash()
+        return kinetics
 
 
 class SpeciesNameSerializer(serializers.ModelSerializer):
