@@ -38,6 +38,14 @@ model's draft branch on the server, then, when someone opens a pull request, to 
    - The person connects their own GitHub account, through the Prometheus GitHub App.
    - **Open pull request** commits what is left, pushes the branch with that person's token, and
      opens a pull request into master. **Update pull request #N** pushes new commits to it.
+   - The pull request gets the checkpoints squashed (`publish.py`): each run of checkpoint
+     commits becomes one commit ("identify 9 species, update the RMG libraries"), with everyone
+     who confirmed in it as an author (`Co-authored-by`). Commits made on the web (the file
+     editor, uploads, a new model) keep their own message. The draft on the server keeps every
+     checkpoint, and the job page shows how many commits the pull request gets.
+   - New checkpoints change the last squashed commit, so **Update pull request** replaces the
+     branch on GitHub (`--force-with-lease`). It does so only while the branch is what Prometheus
+     pushed before; a commit someone added on GitHub stops the push with a message.
    - The button is disabled, with the reason shown, when:
      - the job is not Completed or Cancelled;
      - the draft is the same as master;

@@ -294,19 +294,54 @@ def _askpass_script():
     return path
 
 
+def _published(draft, head):
+    """What Prometheus pushes for the draft at `head` (publish.py); `head` if that fails."""
+    from . import publish
+    try:
+        return publish.squashed(draft, head)
+    except drafts.DraftError as e:
+        logger.warning(f'Pushing the checkpoints of {draft.branch} one by one: {e}')
+        return head
+
+
 def push(draft, token):
-    """Push the draft's branch to RMG-models with `token`. Returns the commit pushed."""
+    """
+    Push the draft to RMG-models with `token`, with its checkpoint commits squashed
+    (publish.py). Returns the draft's own commit that was pushed (its HEAD), which is what
+    draft.last_pushed_sha keeps.
+
+    New checkpoints change the last squashed commit, so the branch on GitHub is replaced. That is
+    done only while the branch is what Prometheus pushed before (git push --force-with-lease):
+    a commit someone added to the pull request on GitHub stops the push with a message.
+    """
     env = {'GIT_ASKPASS': _askpass_script(), 'PROMETHEUS_GIT_TOKEN': token}
+    remote_ref = f'refs/heads/{draft.branch}'
     with drafts.draft_lock(draft):
         head = drafts.git(['rev-parse', 'HEAD'], draft.path).stdout.strip()
+        published = _published(draft, head)
+        found = drafts.git(
+            ['-c', 'credential.helper=', 'ls-remote', push_url(), remote_ref],
+            draft.path, env=env, timeout=120,
+        ).stdout.split()
+        on_github = found[0] if found else ''
+        if on_github and on_github != published:
+            ours = {draft.last_pushed_sha}
+            if draft.last_pushed_sha:
+                ours.add(_published(draft, draft.last_pushed_sha))
+            if on_github not in ours:
+                raise GitHubError(
+                    f'{draft.branch} on GitHub has commits that Prometheus did not push '
+                    f'({on_github[:8]}). Merge or drop them on GitHub first, so they are not lost.'
+                )
         drafts.git(
             [
                 '-c',
                 'credential.helper=',
                 'push',
                 '--quiet',
+                f'--force-with-lease={remote_ref}:{on_github}',
                 push_url(),
-                f'HEAD:refs/heads/{draft.branch}',
+                f'{published}:{remote_ref}',
             ],
             draft.path,
             env=env,
