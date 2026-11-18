@@ -15,7 +15,7 @@ from django.utils import timezone
 
 from importer_dashboard import drafts, github
 from importer_dashboard.models import ClusterJob, DraftStatus, GitHubAccount, ImportJobStatus
-from importer_dashboard.tests.test_drafts_unit import DraftTestCase, out
+from importer_dashboard.tests.test_drafts_unit import DraftTestCase, out, run
 
 
 class FakeResponse:
@@ -227,6 +227,53 @@ class PullRequestTests(GitHubTestCase):
         self.assertContains(response, 'Updated pull request #7')
         self.assertIn('H2O\tO', out('show', f'{draft.branch}:{self.model}/SMILES.txt', cwd=self.remote))
         self.assertEqual(len(self.gh.made('POST', '/repos/comocheng/RMG-models/pulls')), 1)
+
+    def checkpoints(self, draft, *lines):
+        for line in lines:
+            with open(self.worktree_file(draft, 'SMILES.txt'), 'a') as f:
+                f.write(line + '\n')
+            drafts.checkpoint(draft, job=self.job)
+
+    def pull_request(self):
+        return self.client.post(reverse('importer_dashboard:draft_pull_request', args=[self.job.id]), follow=True)
+
+    def on_github(self, draft):
+        return out('log', '--format=%s', f'{draft.base_sha}..{draft.branch}', cwd=self.remote).splitlines()
+
+    def test_the_pull_request_gets_the_checkpoints_in_one_commit(self):
+        draft = self.completed_job_with_a_change()
+        self.checkpoints(draft, 'H2O\tO\t! Confirmed by lekia', 'CO\t[C-]#[O+]\t! Confirmed by lekia')
+        self.connect_github()
+        self.assertContains(self.pull_request(), 'Opened pull request #7')
+        self.assertEqual(self.on_github(draft), [f'{self.model}: identify 3 species'])
+        draft.refresh_from_db()
+        self.assertEqual(draft.last_pushed_sha, out('rev-parse', 'HEAD', cwd=draft.path))  # the draft's own commit
+
+        # A new identification: the branch on GitHub is replaced, still with one commit
+        self.checkpoints(draft, 'H2\t[H][H]\t! Confirmed by lekia')
+        self.assertContains(self.pull_request(), 'Updated pull request #7')
+        self.assertEqual(self.on_github(draft), [f'{self.model}: identify 4 species'])
+        self.assertIn('H2\t[H][H]', out('show', f'{draft.branch}:{self.model}/SMILES.txt', cwd=self.remote))
+        self.assertEqual(out('rev-parse', f'{draft.branch}^{{tree}}', cwd=self.remote),
+                         out('rev-parse', 'HEAD^{tree}', cwd=draft.path))
+
+    def test_a_commit_added_on_github_stops_the_update(self):
+        draft = self.completed_job_with_a_change()
+        self.connect_github()
+        self.pull_request()
+        draft.refresh_from_db()
+        clone = os.path.join(self.tmp.name, 'maintainer')
+        run('clone', '-q', '-b', draft.branch, self.remote, clone, cwd=self.tmp.name)
+        with open(os.path.join(clone, self.model, 'SMILES.txt'), 'a') as f:
+            f.write('HE\t[He]\n')
+        run('commit', '-qam', 'Added HE in review', cwd=clone)
+        run('push', '-q', 'origin', draft.branch, cwd=clone)
+        added = out('rev-parse', draft.branch, cwd=self.remote)
+
+        self.checkpoints(draft, 'H2O\tO\t! Confirmed by lekia')
+        response = self.pull_request()
+        self.assertContains(response, 'has commits that Prometheus did not push')
+        self.assertEqual(out('rev-parse', draft.branch, cwd=self.remote), added)  # nothing lost
 
     def merged_draft(self):
         """A draft whose pull request #7 was merged on GitHub, its branch still there."""

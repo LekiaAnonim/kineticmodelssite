@@ -28,7 +28,7 @@ head, the count tiles of the Species summary, the collapsible results with count
     {% endif %}
 
     <dl class="im-metrics im-draft__metrics">
-        <div><dt>Commits</dt><dd>{{ draft_changes.commits|length }}</dd></div>
+        <div><dt>Commits in the pull request</dt><dd>{{ draft_changes.pull_request_commits }}</dd></div>
         <div><dt>SMILES.txt lines added</dt><dd>{{ draft_changes.smiles_added|length }}</dd></div>
         <div><dt>SMILES.txt lines removed</dt><dd>{{ draft_changes.smiles_removed|length }}</dd></div>
         <div><dt>Files changed</dt><dd>{{ draft_changes.files|length }}</dd></div>
@@ -84,6 +84,7 @@ head, the count tiles of the Species summary, the collapsible results with count
             </button>
         </div>
         <div class="collapse" id="draftCommits">
+            {% if draft_changes.pull_request_commits < draft_changes.commits|length %}<p class="im-note">{% include "importer_dashboard/im_icon.html" with icon="info" size=16 %}<span>These are the draft's checkpoints. The pull request gets them in {{ draft_changes.pull_request_commits }} commit{{ draft_changes.pull_request_commits|pluralize }}: checkpoints in a row become one, and your own edits keep their message.</span></p>{% endif %}
             <div class="im-table-wrap"><table class="im-table">
                 <thead><tr><th scope="col">Commit</th><th scope="col">Message</th><th scope="col">Author</th><th scope="col" class="is-end">Date</th></tr></thead>
                 <tbody>{% for c in draft_changes.commits|slice:":50" %}<tr><td><code>{{ c.sha }}</code></td><td>{{ c.subject }}</td><td>{{ c.author }}</td><td class="is-end im-nowrap">{{ c.date }}</td></tr>{% endfor %}</tbody>

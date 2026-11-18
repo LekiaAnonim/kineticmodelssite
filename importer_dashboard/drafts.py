@@ -46,6 +46,8 @@ LIBRARY_FOLDERS = ['RMG-Py-thermo-library', 'RMG-Py-kinetics-library']
 LIBRARIES_AT_REST = ('awaiting_input', 'finished', 'stopped')
 # How often a running job's identifications are committed
 CHECKPOINT_SECONDS = 60
+# The last line of every checkpoint commit, so that publish.py can squash them before a push
+CHECKPOINT_TRAILER = 'Prometheus-Checkpoint: yes'
 
 
 class DraftError(Exception):
@@ -345,6 +347,20 @@ def _numstat(draft, relpath):
     return 0, 0
 
 
+def checkpoint_subject(folder, added=0, removed=0, blocked=0, libraries=False):
+    """The subject of a checkpoint commit: "<folder>: identify 2 species, update the RMG libraries"."""
+    parts = []
+    if added:
+        parts.append(f"identify {added} species" if added != 1 else "identify 1 species")
+    if removed:
+        parts.append(f"remove {removed} SMILES.txt line{'s' if removed != 1 else ''}")
+    if blocked:
+        parts.append(f"block {blocked} match{'es' if blocked != 1 else ''}")
+    if libraries:
+        parts.append("update the RMG libraries")
+    return f"{folder}: {', '.join(parts) or 'update the importer files'}"
+
+
 def checkpoint(draft, include_libraries=False, user=None, job=None):
     """
     Commit the importer's files of `draft` that changed: SMILES.txt and SMILES-BLOCKED.txt, and
@@ -370,20 +386,11 @@ def checkpoint(draft, include_libraries=False, user=None, job=None):
         added, removed = _numstat(draft, f'{folder}/SMILES.txt')
         blocked, _ = _numstat(draft, f'{folder}/SMILES-BLOCKED.txt')
         libraries = any(_numstat(draft, f'{folder}/{name}') != (0, 0) for name in LIBRARY_FOLDERS)
-        parts = []
-        if added:
-            parts.append(f"identify {added} species" if added != 1 else "identify 1 species")
-        if removed:
-            parts.append(f"remove {removed} SMILES.txt line{'s' if removed != 1 else ''}")
-        if blocked:
-            parts.append(f"block {blocked} match{'es' if blocked != 1 else ''}")
-        if libraries:
-            parts.append("update the RMG libraries")
-        subject = f"{folder}: {', '.join(parts) or 'update the importer files'}"
+        subject = checkpoint_subject(folder, added, removed, blocked, libraries)
         body = f"Import job {job.pk} on Prometheus." if job else "Prometheus Importer."
         starter = getattr(job, 'started_by', None) if job else None
         git(
-            ['commit', '--quiet', '-m', subject, '-m', body],
+            ['commit', '--quiet', '-m', subject, '-m', body, '-m', CHECKPOINT_TRAILER],
             draft.path,
             env=_commit_env(git_identity(user or starter)),
         )
@@ -466,9 +473,15 @@ def changes(draft):
         git(['diff', '--quiet', base, 'HEAD', '--', folder], draft.path, check=False).returncode
         == 0
     )
+    from .publish import pull_request_commits
+    try:
+        in_pull_request = pull_request_commits(draft, head)
+    except DraftError:
+        in_pull_request = len(commits)
     return {
         'head': head,
         'commits': commits,
+        'pull_request_commits': in_pull_request,
         'files': files,
         'smiles_added': added,
         'smiles_changed': len(added) + len(removed),
